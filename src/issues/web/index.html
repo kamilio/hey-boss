@@ -369,8 +369,18 @@
           <button type="button" role="tab" id="settings-tab-instructions" aria-controls="settings-panel-instructions" aria-selected="false" tabindex="-1">Instructions</button>
           <button type="button" role="tab" id="settings-tab-planning" aria-controls="settings-panel-planning" aria-selected="false" tabindex="-1">Planning</button>
           <button type="button" role="tab" id="settings-tab-workflow" aria-controls="settings-panel-workflow" aria-selected="false" tabindex="-1">Workflow</button>
+          <button type="button" role="tab" id="settings-tab-activity" aria-controls="settings-panel-activity" aria-selected="false" tabindex="-1">Activity</button>
         </div>
         <div class="project-settings-body">
+          <div id="settings-panel-activity" role="tabpanel" aria-labelledby="settings-tab-activity" tabindex="0" hidden>
+            <div class="config-activity-heading"><div><h3>Configuration activity</h3><p class="field-help">Settings and prompts across your machines. Undo keeps the history.</p></div><button type="button" class="button" id="config-history-refresh">Refresh</button></div>
+            <p class="field-help">Edit local files with <code>hey-boss config sync</code>. Concurrent saves use last-write-wins; earlier versions stay here.</p>
+            <p id="config-history-status" role="status"></p>
+            <div id="config-history-errors" role="alert"></div>
+            <div id="config-history-detail" hidden></div>
+            <ol id="config-history-list" aria-label="Configuration revisions"></ol>
+            <button type="button" class="button" id="config-history-more" hidden>Load earlier changes</button>
+          </div>
           <div id="settings-panel-configuration" role="tabpanel" aria-labelledby="settings-tab-configuration" tabindex="0">
             <div class="project-configuration-grid">
               <section class="settings-section configuration-card project-execution-card" aria-labelledby="project-execution-title">

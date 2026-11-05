@@ -31,7 +31,7 @@ async (page) => {
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited implementation');
   await save();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes settings');
-  check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Fixture handoff' && saved[0].prompt_overrides.plan === 'Edited plan' && saved[0].prs_enabled), 'All tab edits save without erasing the sequence');
+  check(await page.evaluate(() => fixtureSettings.prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].operation.changes['prompt_overrides.handoff'] === 'Fixture handoff' && saved[0].operation.changes['prompt_overrides.plan'] === 'Edited plan' && saved[0].operation.changes.prs_enabled), 'All tab edits save without erasing the sequence');
   await open();
   check(await page.locator('#project-prompt-layout').count() === 0, 'Reopening does not recreate the editor');
   await page.locator('#project-prompt').fill('');

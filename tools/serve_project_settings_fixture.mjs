@@ -29,6 +29,7 @@ const server = createServer((req, res) => {
         drafts_enabled:true,artifacts_enabled:true,
         prompt_defaults:${JSON.stringify(promptDefaults)},prompt_sections:${JSON.stringify(Object.keys(promptDefaults).map(key => ({key,title:key,help:'Fixture prompt section'})))},prompt_overrides:{chief_wrapper:'Legacy {{project}} wrapper: {{prompt}}'}};
       async function api(request) {
+        if (request.action === 'project_config') return {revisions:[],working_copies:[],next_offset:null};
         if (request.action === 'project_settings') {
           if (window.failLoad) throw Error('Fixture load failed');
           return {...window.fixtureSettings};
@@ -39,7 +40,10 @@ const server = createServer((req, res) => {
       async function mutate(request) {
         if (window.failSave) throw Error('Fixture save failed');
         window.saved.push(request);
-        Object.assign(window.fixtureSettings,request);
+        for (const [key,value] of Object.entries(request.operation.changes)) {
+          if (key.startsWith('prompt_overrides.')) window.fixtureSettings.prompt_overrides[key.slice(17)] = value;
+          else window.fixtureSettings[key] = value;
+        }
         return {version:2};
       }
     </script><script src="/project-settings.js"></script></html>`);

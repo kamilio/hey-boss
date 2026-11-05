@@ -14,7 +14,7 @@ async (page) => {
   await page.goto(page.url().startsWith('http://127.0.0.1:') ? page.url().split('/').slice(0, 3).join('/') : 'http://127.0.0.1:59642');
   await page.evaluate(() => { window.fixtureSettings.prompt_overrides.layout = '{{delivery}}\n\n{{task}}'; });
   await open();
-  check(await page.getByRole('tab').count() === 4, 'Configuration and three editor tabs');
+  check(await page.getByRole('tab').count() === 5, 'Configuration, three editors, and activity');
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
   check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Configuration selected initially');
   check(!await page.locator('.settings-preview').isVisible(), 'Configuration has no prompt preview');
@@ -46,9 +46,9 @@ async (page) => {
   await page.waitForFunction(() => document.querySelector('#project-instructions-preview').textContent === 'Edited implementation');
   check(await page.locator('#project-preview-choices').innerText() === 'Existing checkout · Pull requests', 'Workflow preview uses unsaved edits');
   await tab('Workflow').press('End');
-  check(await tab('Workflow').getAttribute('aria-selected') === 'true', 'End selects last tab');
+  check(await tab('Activity').getAttribute('aria-selected') === 'true', 'End selects last tab');
   check(await tab('Chief').count() === 0, 'Retired editor is absent');
-  await tab('Workflow').press('ArrowRight');
+  await tab('Activity').press('ArrowRight');
   check(await tab('Configuration').getAttribute('aria-selected') === 'true', 'Arrow wraps around');
   await tab('Instructions').click();
   check(await page.locator('#project-prompt').inputValue() === 'Edited implementation', 'Draft survives tab switches');
@@ -57,11 +57,11 @@ async (page) => {
   check(await tab('Configuration').evaluate(el => el === document.activeElement), 'Home focuses first tab');
   await page.getByRole('button', {name:'Save',exact:true}).click();
   check(await page.locator('#project-settings-dialog').evaluate(el => !el.open), 'Save closes dialog');
-  check(await page.evaluate(() => saved.length === 1 && saved[0].prs_enabled && saved[0].prompt_overrides.plan === 'Edited plan' && !('plan_template' in saved[0])), 'Save includes all tab edits');
-  check(await page.evaluate(() => !saved[0].drafts_enabled && !saved[0].artifacts_enabled), 'Save includes all resource switches');
-  check(await page.evaluate(() => saved[0].paused && saved[0].pause_reason === 'Waiting for the next release'), 'Pause and reason saved together');
-  check(await page.evaluate(() => !('chief_enabled' in saved[0]) && !('chief_prompt' in saved[0])), 'Saving settings never restores retired configuration');
-  check(await page.evaluate(() => saved[0].prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].prompt_overrides.handoff === 'Short handoff for {{number}}.'), 'Context edits preserve the saved sequence');
+  check(await page.evaluate(() => saved.length === 1 && saved[0].operation.changes.prs_enabled && saved[0].operation.changes['prompt_overrides.plan'] === 'Edited plan' && !('plan_template' in saved[0].operation.changes)), 'Save includes all tab edits');
+  check(await page.evaluate(() => !saved[0].operation.changes.drafts_enabled && !saved[0].operation.changes.artifacts_enabled), 'Save includes all resource switches');
+  check(await page.evaluate(() => saved[0].operation.changes.paused && saved[0].operation.changes.pause_reason === 'Waiting for the next release'), 'Pause and reason saved together');
+  check(await page.evaluate(() => !('chief_enabled' in saved[0].operation.changes) && !('chief_prompt' in saved[0].operation.changes)), 'Saving settings never restores retired configuration');
+  check(await page.evaluate(() => fixtureSettings.prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && saved[0].operation.changes['prompt_overrides.handoff'] === 'Short handoff for {{number}}.' && !('prompt_overrides.layout' in saved[0].operation.changes)), 'Context edits preserve the saved sequence');
   await open();
   check(await page.locator('#project-paused').isChecked(), 'Pause persists on reopen');
   check(await page.locator('#project-pause-reason').inputValue() === 'Waiting for the next release', 'Pause reason persists on reopen');
@@ -100,14 +100,14 @@ async (page) => {
       check(await page.getByRole('button', {name:'Save',exact:true}).evaluate(el => {const r=el.getBoundingClientRect();return r.bottom<=innerHeight && r.top>=0;}), `Save visible for ${name} at ${width}px`);
     }
     await tab('Configuration').click();
-    await page.screenshot({path:`/tmp/hey-boss-settings-qa/configuration-${theme}-${width}.png`});
+    await page.screenshot({path:`.config-qa/configuration-${theme}-${width}.png`});
     await tab('Workflow').click();
     await page.waitForFunction(() => document.querySelector('#project-instructions-preview').getAttribute('aria-busy') === 'false');
     check(await page.locator('#project-instructions-preview').textContent() === await page.locator('#project-prompt').inputValue(), 'Implementation preview preserves configured text');
-    await page.screenshot({path:`/tmp/hey-boss-settings-qa/settings-${theme}-${width}.png`});
+    await page.screenshot({path:`.config-qa/settings-${theme}-${width}.png`});
     if (width < 800) {
       await page.locator('.settings-preview').scrollIntoViewIfNeeded();
-      await page.screenshot({path:`/tmp/hey-boss-settings-qa/preview-${theme}-${width}.png`});
+      await page.screenshot({path:`.config-qa/preview-${theme}-${width}.png`});
     }
   }
   await page.getByRole('button', {name:'Cancel',exact:true}).click();
