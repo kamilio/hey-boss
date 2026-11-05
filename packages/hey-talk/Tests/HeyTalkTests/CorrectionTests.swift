@@ -22,7 +22,7 @@ final class CorrectionTests: XCTestCase {
         return Correction(session: URLSession(configuration: configuration))
     }
 
-    func testCompoundCommandFeedsEachDeliveryBackBeforeChoosingAgain() throws {
+    func testCompoundCommandContinuesAfterClearAndFinishesAfterPaste() throws {
         let correction = client()
         var actions: [CorrectionAction] = []
         var rounds = 0
@@ -40,9 +40,7 @@ final class CorrectionTests: XCTestCase {
                 XCTAssertEqual(history?.last?["output"] as? String, "cleared")
                 item = ["type": "function_call", "name": "paste", "arguments": #"{"text":"Check publishing."}"#, "call_id": "c2"]
             default:
-                XCTAssertEqual(history?.last?["output"] as? String, "pasted")
-                XCTAssertEqual(history?.last?["call_id"] as? String, "c2")
-                XCTAssertEqual(body?["tool_choice"] as? String, "auto")
+                XCTFail("Paste must finish without another model request")
                 item = ["type": "message"]
             }
             rounds += 1
@@ -59,7 +57,38 @@ final class CorrectionTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertEqual(actions, [.clearInput, .paste("Check publishing.")])
-        XCTAssertEqual(rounds, 3)
+        XCTAssertEqual(rounds, 2)
+    }
+
+    func testPasteFinishesAfterDeliveryWithoutAnotherRequest() {
+        let correction = client()
+        var requests = 0
+        CorrectionProtocol.handle = { stub in
+            requests += 1
+            stub.respond(status: requests == 1 ? 200 : 502, body: #"""
+                data: {"type":"response.output_item.done","item":{"type":"function_call","name":"paste","call_id":"paste","arguments":"{\"text\":\"Check publishing.\"}"}}
+
+                data: {"type":"response.completed"}
+
+                """#)
+        }
+        let delivered = expectation(description: "paste requested"), done = expectation(description: "finished")
+        var finishDelivery: ((String) -> Void)?, completed = false
+        correction.correct("Check publishing.", vocabulary: [], perform: { action, next in
+            XCTAssertEqual(action, .paste("Check publishing."))
+            finishDelivery = next
+            delivered.fulfill()
+        }) { result in
+            XCTAssertTrue(Thread.isMainThread)
+            XCTAssertEqual(try? result.get(), .paste("Check publishing."))
+            completed = true
+            done.fulfill()
+        }
+        wait(for: [delivered], timeout: 2)
+        XCTAssertFalse(completed, "Do not finish before paste completes")
+        finishDelivery?("submitted")
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(requests, 1)
     }
 
     func testFailedContinuationDoesNotRepeatDeliveredTool() {

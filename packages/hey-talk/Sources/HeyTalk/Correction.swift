@@ -158,6 +158,7 @@ final class Correction {
                           let id = call["call_id"] as? String, !id.isEmpty,
                           !history.contains(where: { $0["call_id"] as? String == id }) else { throw TalkError("Invalid tool call ID.") }
                     perform(action) { output in
+                        if case .paste = action { completion(.success(action)); return }
                         turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],
                              last: action, count: count + 1)
                     }
