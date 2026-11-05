@@ -18,14 +18,29 @@ let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
 let identity = try String(contentsOf: root.appendingPathComponent("assets/signing-identity.sha1"), encoding: .utf8)
     .trimmingCharacters(in: .whitespacesAndNewlines)
 precondition(identity.count == 40 && identity.allSatisfy { $0.isHexDigit }, "Invalid pinned signing identity")
+var resolvedAgentRevision: String?
+func agentRevision() throws -> String {
+    if let revision = resolvedAgentRevision { return revision }
+    let git = Process(), output = Pipe()
+    git.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+    git.arguments = ["ls-remote", "https://github.com/poe-platform/poe-code.git", "refs/heads/main"]
+    git.standardOutput = output
+    try git.run()
+    let text = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+    git.waitUntilExit()
+    let revision = String(text.split(whereSeparator: \.isWhitespace).first ?? "")
+    require(git.terminationStatus == 0 && revision.count == 40 && revision.allSatisfy { $0.isHexDigit }, "Could not resolve Poe Agent’s GitHub revision")
+    resolvedAgentRevision = revision; return revision
+}
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/signing-identity.sha1"] {
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
     }
+    hash.update(data: Data(try agentRevision().utf8))
     return hash.finalize().map { String(format: "%02x", $0) }.joined()
 }
 func verify(_ path: URL, identifier: String) throws -> Bool {
@@ -135,6 +150,15 @@ try Data(contentsOf: root.appendingPathComponent("assets/hey-boss.icns"))
     .write(to: resources.appendingPathComponent("hey-boss.icns"), options: .atomic)
 try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
     .write(to: resources.appendingPathComponent("conversation.md"), options: .atomic)
+let buildAgent = Process()
+buildAgent.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+buildAgent.arguments = ["node", root.appendingPathComponent("assets/build-conversation-agent.mjs").path, resources.path, try agentRevision()]
+var environment = ProcessInfo.processInfo.environment
+environment["PATH"] = files.homeDirectoryForCurrentUser.path + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+buildAgent.environment = environment
+try buildAgent.run(); buildAgent.waitUntilExit()
+require(buildAgent.terminationStatus == 0, "Could not build Poe Agent from GitHub")
+try sign(resources.appendingPathComponent("node"), identifier: "local.hey-boss.agent-node")
 let manifest = try String(contentsOf: root.appendingPathComponent("Cargo.toml"), encoding: .utf8)
 let version = manifest.components(separatedBy: .newlines).first { $0.hasPrefix("version = ") }!.components(separatedBy: "\"")[1]
 let info: [String: Any] = [
