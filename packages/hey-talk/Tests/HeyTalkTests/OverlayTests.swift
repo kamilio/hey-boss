@@ -4,6 +4,36 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testChatOwnsPillUntilReleasedAndStartupIsImmediate() throws {
+        let app = NSApplication.shared, windows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        let all = views(try XCTUnwrap(panel.contentView))
+        let surface = try XCTUnwrap(all.first { $0.layer?.sublayers?.contains { $0.name == "ai-disabled" } == true })
+        overlay.setCorrection(false); overlay.setAutoSubmit(false)
+        for (phase, message) in [("idle", "Voice off"), ("starting", "Starting…"), ("listening", "Listening"), ("recording", "Recording"), ("decoding", "Transcribing…"), ("thinking", "Thinking…"), ("speaking", "Speaking")] {
+            overlay.showConversation(["phase": phase, "message": message, "action": "Stop voice"])
+            XCTAssertTrue(surface.accessibilityLabel()?.contains(message) == true)
+            XCTAssertFalse(surface.accessibilityLabel()?.contains("dictation") == true)
+            XCTAssertTrue(all.compactMap { $0 as? NSTextField }.contains { !$0.isHidden && $0.stringValue == message })
+            XCTAssertTrue(surface.layer?.sublayers?.first { $0.name == "ai-disabled" }?.isHidden == true)
+            XCTAssertFalse(panel.canBecomeKey)
+        }
+        overlay.showConversation(["phase": "thinking", "message": "Needs approval", "action": "Open chat", "approval": true])
+        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat"])
+        overlay.showConversation(["phase": "speaking", "message": "Speaking", "action": "Stop voice", "interrupt": true])
+        let interrupt = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "Listen for next message" })
+        var interrupted = false; overlay.onInterruptConversation = { interrupted = true }
+        XCTAssertTrue(app.sendAction(try XCTUnwrap(interrupt.action), to: interrupt.target, from: interrupt))
+        XCTAssertTrue(interrupted)
+        overlay.showConversation(nil)
+        XCTAssertTrue(surface.accessibilityLabel()?.contains("Start dictation") == true)
+        overlay.preparing(.listening)
+        XCTAssertTrue(surface.accessibilityLabel()?.contains("Opening microphone") == true, "Startup state changes before the delayed Connecting label")
+    }
+
     @MainActor func testT3ConfirmationIsSmallTemporaryAndLeavesDictationAlone() async throws {
         let app = NSApplication.shared, oldWindows = Set(app.windows.map(\.windowNumber))
         let overlay = Overlay()
