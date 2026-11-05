@@ -701,3 +701,48 @@ fn compressed_page_facts_are_small_and_legacy_resources_still_replay() {
     capture_all(&b, &mut eb);
     assert_eq!(body(&fb), text);
 }
+
+#[test]
+fn external_links_and_upload_receipts_replicate_and_stay_with_the_page_lifetime() {
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = peer(&fa, "a");
+    let b = peer(&fb, "b");
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    publish(&fa, "first");
+    a.execute("INSERT INTO page_exports(name,generation,provider,audience,remote_id,url,version,deployment,auto_sync) SELECT name,generation,'fixture','organization','id','https://example.com/report','v1',deployment,0 FROM published_pages WHERE name='report'", []).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let page = pages::view(&fb.0.join("issues.db"), "report").unwrap();
+    assert!(page.publications[0].synced);
+    assert_eq!(page.publications[0].url, "https://example.com/report");
+    publish(&fb, "second");
+    assert!(
+        !pages::view(&fb.0.join("issues.db"), "report")
+            .unwrap()
+            .publications[0]
+            .synced
+    );
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert!(
+        !pages::view(&fa.0.join("issues.db"), "report")
+            .unwrap()
+            .publications[0]
+            .synced
+    );
+    pages::delete(&fb.0.join("issues.db"), "report").unwrap();
+    publish(&fb, "new lifetime");
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert!(
+        pages::view(&fa.0.join("issues.db"), "report")
+            .unwrap()
+            .publications
+            .is_empty()
+    );
+}

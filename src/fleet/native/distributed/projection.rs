@@ -64,6 +64,7 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         | "published_chunks"
         | "published_deployments"
         | "published_pages"
+        | "page_exports"
         | "published_publications"
         | "published_page_chunks" => "@row",
         _ => column,
