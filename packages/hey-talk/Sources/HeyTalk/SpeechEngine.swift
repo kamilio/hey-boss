@@ -18,15 +18,17 @@ protocol SpeechEngine: AnyObject {
 }
 
 enum SpeechModel {
-    static var directory: URL { ControlSocket.directory.appendingPathComponent("models/sherpa-onnx-supertonic-3-tts-int8-2026-05-11") }
+    static let name = "pocket-tts-english-2026-10"
+    static let voice = "mary"
+    static var directory: URL { ControlSocket.directory.appendingPathComponent("models/" + name) }
     static var available: Bool {
-        ["duration_predictor.int8.onnx", "text_encoder.int8.onnx", "vector_estimator.int8.onnx", "vocoder.int8.onnx", "tts.json", "unicode_indexer.bin", "voice.bin"].allSatisfy {
+        ["config.yaml", "model.safetensors", "tokenizer.json", voice + ".safetensors"].allSatisfy {
             FileManager.default.isReadableFile(atPath: directory.appendingPathComponent($0).path)
-        } && FileManager.default.isReadableFile(atPath: ModelPaths.library.path)
+        } && FileManager.default.isExecutableFile(atPath: ModelPaths.contents.appendingPathComponent("Helpers/pocket-tts").path)
     }
 }
 
-final class SupertonicSpeechEngine: SpeechEngine {
+final class LocalSpeechEngine: SpeechEngine {
     private let queue = DispatchQueue(label: "hey-talk.speech-model", qos: .userInitiated)
     private let lock = NSLock()
     private var process: Process?
@@ -54,8 +56,8 @@ final class SupertonicSpeechEngine: SpeechEngine {
                 try Wire.write(Wire.json(["text": text]), to: input.fileHandleForWriting.fileDescriptor)
                 let header = try Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 60, limit: 4096)
                 let message = try JSONSerialization.jsonObject(with: header) as? [String: Any]
-                guard let count = message?["count"] as? Int, count > 0, count <= 44_100 * 120,
-                      let rate = message?["rate"] as? Int, rate == 44_100 else {
+                guard let rate = message?["rate"] as? Int, (8_000...96_000).contains(rate),
+                      let count = message?["count"] as? Int, count > 0, count <= rate * 120 else {
                     throw TalkError(message?["error"] as? String ?? "Invalid speech audio")
                 }
                 let data = try Wire.readExactly(count * 4, from: output.fileHandleForReading.fileDescriptor, timeout: 30)
@@ -82,7 +84,7 @@ final class SupertonicSpeechEngine: SpeechEngine {
         guard SpeechModel.available else { lock.unlock(); throw TalkError("Speech model missing. Run the Hey Talk installer.") }
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/hey-talk-inference")
-        child.arguments = ["--speech-worker", SpeechModel.directory.path, ModelPaths.library.path, ModelPaths.directory.path]
+        child.arguments = ["--speech-worker"]
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = FileHandle.standardError
         child.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") }
         do {
@@ -137,25 +139,25 @@ private final class SpeechAlignment {
 
 func runSpeechWorker(model: String, library: String, alignmentModel: String) throws {
     try Wire.prepare(STDIN_FILENO); try Wire.prepare(STDOUT_FILENO)
+    let speech = PocketSpeech()
     let parentWatch = DispatchSource.makeProcessSource(identifier: getppid(), eventMask: .exit, queue: .global())
-    parentWatch.setEventHandler { _exit(0) }; parentWatch.resume()
-    guard let speech = ht_speech_create(library, model) else { throw TalkError("Cannot load Supertonic speech model") }
-    defer { ht_speech_destroy(speech); parentWatch.cancel() }
-    try Wire.write(Wire.json(["ready": true]), to: STDOUT_FILENO)
+    parentWatch.setEventHandler { speech.stop(); _exit(0) }; parentWatch.resume()
+    signal(SIGTERM, SIG_IGN)
+    let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+    termination.setEventHandler { speech.stop(); _exit(0) }; termination.resume()
+    defer { speech.stop(); parentWatch.cancel(); termination.cancel() }
+    try speech.start(model: model)
+    try Wire.write(Wire.json(["ready": true, "engine": "pocket-tts", "voice": SpeechModel.voice]), to: STDOUT_FILENO)
     let alignment = SpeechAlignment(library: library, model: alignmentModel)
     while true {
         let request = try Wire.line(from: STDIN_FILENO, timeout: 86_400, limit: 16_384)
         guard let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
-              let text = object["text"] as? String, !text.isEmpty, text.count <= 240 else { throw TalkError("Invalid speech chunk") }
-        var count: Int32 = 0, rate: Int32 = 0
-        let speaker = object["speaker"] as? Int32 ?? 6
-        guard (0..<10).contains(speaker) else { throw TalkError("Unknown Supertonic speaker") }
-        guard let samples = ht_speech_generate(speech, text, speaker, &count, &rate) else { throw TalkError("Could not generate speech") }
-        let data = Data(bytes: samples, count: Int(count) * MemoryLayout<Float>.size)
-        ht_speech_free(samples)
-        try Wire.write(Wire.json(["count": Int(count), "rate": Int(rate)]), to: STDOUT_FILENO)
+              let text = object["text"] as? String, !text.isEmpty, text.count <= 2_000 else { throw TalkError("Invalid speech chunk") }
+        let audio = try speech.generate(text)
+        let data = audio.samples.withUnsafeBytes { Data($0) }
+        try Wire.write(Wire.json(["count": audio.samples.count, "rate": Int(audio.sampleRate)]), to: STDOUT_FILENO)
         try Wire.write(data, to: STDOUT_FILENO)
-        let pcm = try speechAlignmentSamples(data, rate: Double(rate))
+        let pcm = try speechAlignmentSamples(data, rate: audio.sampleRate)
         guard let json = alignment.json(samples: pcm) else {
             try Wire.write(Wire.json(["tokens": [], "timestamps": []]), to: STDOUT_FILENO); continue
         }

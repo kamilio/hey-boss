@@ -6728,17 +6728,14 @@ final class ArtifactHTMLReader: NSObject, WKNavigationDelegate, WKUIDelegate, NS
 // Keep one model warm for the document; playback stays on the echo-cancelled graph.
 final class ReaderVoice {
     private let child = Process(), input = Pipe(), output = Pipe()
-    private let queue = DispatchQueue(label: "reader.supertonic", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "reader.speech", qos: .userInitiated)
     private var ready = false
     init?() {
         let files = FileManager.default, home = files.homeDirectoryForCurrentUser
-        let models = home.appendingPathComponent("Library/Application Support/hey-talk/models")
-        let model = models.appendingPathComponent("sherpa-onnx-supertonic-3-tts-int8-2026-05-11")
         let apps = [home.appendingPathComponent("Applications/Hey Talk.app"), URL(fileURLWithPath: "/Applications/Hey Talk.app")]
-        guard files.isReadableFile(atPath: model.appendingPathComponent("tts.json").path),
-              let app = apps.first(where: { files.isExecutableFile(atPath: $0.appendingPathComponent("Contents/Helpers/hey-talk-inference").path) }) else { return nil }
+        guard let app = apps.first(where: { files.isExecutableFile(atPath: $0.appendingPathComponent("Contents/Helpers/hey-talk-inference").path) }) else { return nil }
         child.executableURL = app.appendingPathComponent("Contents/Helpers/hey-talk-inference")
-        child.arguments = ["--speech-worker", model.path, app.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib").path, models.appendingPathComponent("orukeet-v0.1.0").path]
+        child.arguments = ["--speech-worker"]
         child.standardInput = input; child.standardOutput = output; child.standardError = FileHandle.nullDevice
         _ = fcntl(input.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1)
         do { try child.run() } catch { return nil }
@@ -6835,15 +6832,18 @@ final class ReaderVoice {
         queue.async { [self] in
             do {
                 if !ready {
-                    guard try message()["ready"] as? Bool == true else { throw CocoaError(.fileReadCorruptFile) }
+                    let status = try message()
+                    guard status["ready"] as? Bool == true else { throw CocoaError(.fileReadCorruptFile) }
+                    ReviewAudio.log.info("Speech helper ready: \(status["engine"] as? String ?? "local", privacy: .public), voice \(status["voice"] as? String ?? "default", privacy: .public)")
                     ready = true
                 }
                 let reading = Self.spokenMeasurements(text)
-                var request = try JSONSerialization.data(withJSONObject: ["text": reading.text, "speaker": 7]); request.append(10)
+                var request = try JSONSerialization.data(withJSONObject: ["text": reading.text]); request.append(10)
                 try input.fileHandleForWriting.write(contentsOf: request)
                 let header = try message()
-                guard header["rate"] as? Int == 44100, let count = header["count"] as? Int, (1...44100*120).contains(count),
-                      let format = AVAudioFormat(standardFormatWithSampleRate: 44100, channels: 1),
+                guard let rate = header["rate"] as? Int, (8_000...96_000).contains(rate),
+                      let count = header["count"] as? Int, (1...rate*120).contains(count),
+                      let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
                       let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else { throw CocoaError(.fileReadCorruptFile) }
                 buffer.frameLength = buffer.frameCapacity
                 let pcm = UnsafeMutableRawPointer(buffer.floatChannelData![0])
@@ -6855,19 +6855,19 @@ final class ReaderVoice {
                 let alignment = try message(), tokens = alignment["tokens"] as? [String] ?? [], times = alignment["timestamps"] as? [Double] ?? []
                 var spoken: [(String, Int)] = []
                 let subwords = tokens.contains { $0.hasPrefix("▁") || $0.hasPrefix(" ") }
-                for (token, seconds) in zip(tokens, times) where seconds >= 0 && seconds < Double(count) / 44100 {
-                    if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * 44100))) }
+                for (token, seconds) in zip(tokens, times) where seconds >= 0 && seconds < Double(count) / Double(rate) {
+                    if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * Double(rate)))) }
                     spoken[spoken.count-1].0 += token.trimmingCharacters(in: CharacterSet(charactersIn: "▁ ")).lowercased()
                 }
-                // Supertonic includes silence on both edges of each clip. Keep
+                // Trim silence on both edges of each clip. Keep
                 // a short breath and protect quiet consonants near the boundary.
                 let samples = buffer.floatChannelData![0]
                 var first = 0, end = count
                 while first < count && abs(samples[first]) < 0.002 { first += 1 }
                 if first < count {
                     while end > first && abs(samples[end - 1]) < 0.002 { end -= 1 }
-                    first = max(0, first - 1103)       // 25 ms before the first audible sample
-                    end = min(count, end + 2205)       // 50 ms after the last audible sample
+                    first = max(0, first - rate / 40)       // 25 ms before the first audible sample
+                    end = min(count, end + rate / 20)       // 50 ms after the last audible sample
                     if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
                     buffer.frameLength = AVAudioFrameCount(end - first)
                 } else { first = 0 }

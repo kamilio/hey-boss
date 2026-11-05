@@ -152,7 +152,7 @@ bold, italic and color attributes supplied by Accessibility; it cannot reproduce
 CSS details that T3 does not expose. Use the disclosure button to collapse it,
 or the speed button to cycle from 0.75× to 2×. Playback starts at 1.25×.
 
-Supertonic 3 generates short English audio chunks locally while earlier chunks
+Pocket TTS with the Mary voice generates English audio locally while earlier chunks
 play. Only two chunks are queued. The model warms when entering an allowed app
 and is released after ten idle minutes. Recognition supplies word timings after
 audio starts; its model loads in the background so it cannot delay first audio
@@ -160,6 +160,12 @@ or the next chunk. The first chunks may use a soft phrase lens until word timing
 is ready. Unmatched numbers or code terms also use that softer phrase highlight.
 Leaving the allowlist, turning the feature off, or starting manual dictation
 stops playback. Auto dictation pauses during reading.
+
+Conversation chat, the document reader, and Hey Talk all use the same installed
+`hey-talk-inference --speech-worker` helper. Model and voice choices live in
+that helper; updating Hey Talk updates speech everywhere. The installer downloads
+the pinned model and Mary embedding once. Playback uses only local files and a
+loopback-only Pocket TTS process; no Python, cloud service, or account is needed.
 
 ```sh
 hey-talk speech                          # State and allowed apps

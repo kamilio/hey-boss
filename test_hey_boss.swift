@@ -13,6 +13,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPEECH_HELPER"] == "1" { auditSpeechHelper(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLIPBOARD"] == "1" { auditPromptClipboard(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SKILL_EDITOR"] { auditSkillEditor(path); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_IMAGES"] == "1" { auditImageNotifications(); return }
@@ -4446,6 +4447,25 @@ func auditSpokenReview(_ id: String) {
     print("PASS final-line interruption and silent completion")
 }
 
+func auditSpeechHelper() {
+    guard let voice = ReaderVoice() else { preconditionFailure("Install Hey Talk before testing the shared speech helper") }
+    defer { voice.stop() }
+    for text in ["Hello there. This paragraph can now be read aloud.", "Your appointment is on November 5th at 9:15 p.m. Add one and a half teaspoons of salt."] {
+        var done = false
+        voice.generate(text) { buffer, words in
+            guard let buffer else { preconditionFailure("Shared speech helper did not produce audio") }
+            precondition(buffer.format.sampleRate == 24_000)
+            precondition(buffer.frameLength > 1_000 && !words.isEmpty)
+            precondition((0..<Int(buffer.frameLength)).contains { abs(buffer.floatChannelData![0][$0]) > 0.01 })
+            done = true
+        }
+        let deadline = Date().addingTimeInterval(30)
+        while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
+        precondition(done, "Timed out waiting for the installed speech helper")
+    }
+    print("PASS conversation and reader use the installed shared Pocket TTS helper at 24 kHz")
+}
+
 // Opt-in acoustic check: no permission prompts, transcription, files, or posts.
 func auditReviewEcho() {
     guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
@@ -4483,7 +4503,7 @@ func auditReviewEcho() {
     while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
     RunLoop.current.run(until: Date().addingTimeInterval(1))
     precondition(audio.readerVoice === voice)
-    print("Physical playback voice: " + (voice == nil ? "macOS" : "Supertonic 3"))
+    print("Physical playback voice: " + (voice == nil ? "macOS" : "shared local helper"))
     audio.stop()
     if stimulus.isRunning { stimulus.terminate() }
     precondition(done && (fixture == nil ? interruptions == 0 : paused && interruptions == 1), "Playback finished: \(done); detected interruptions: \(interruptions)")
