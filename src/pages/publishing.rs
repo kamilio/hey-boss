@@ -95,10 +95,18 @@ impl Provider {
             ));
         }
         if result["code"] != 0 {
-            let stderr = crate::utilities::decode(&result["stderr"])?;
+            let mut bytes = crate::utilities::decode(&result["stderr"])?;
+            if bytes.is_empty() {
+                bytes = crate::utilities::decode(&result["stdout"])?;
+            }
+            let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]);
+            let message = serde_json::from_str::<Value>(&text)
+                .ok()
+                .and_then(|v| v["message"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| text.trim().to_owned());
             return Err(Error::invalid(format!(
-                "Publisher failed: {}",
-                String::from_utf8_lossy(&stderr[..stderr.len().min(4096)]).trim()
+                "Publisher exited with {}: {message}",
+                result["code"]
             )));
         }
         let output: Value = serde_json::from_slice(&crate::utilities::decode(&result["stdout"])?)?;
