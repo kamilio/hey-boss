@@ -10,26 +10,32 @@ final class OverlayTests: XCTestCase {
         overlay.show(true)
         defer { overlay.show(false) }
         let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
-        let root = try XCTUnwrap(panel.contentView), initial = panel.frame, count = app.windows.count
-        func notices(_ view: NSView) -> [OverlayNotice] {
-            (view as? OverlayNotice).map { [$0] } ?? view.subviews.flatMap(notices)
+        let root = try XCTUnwrap(panel.contentView), initial = panel.frame, windows = Set(app.windows.map(\.windowNumber))
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        func label() -> NSTextField? {
+            views(root).compactMap { $0 as? NSTextField }.first { !$0.isHidden && $0.stringValue == "Unpinned" }
         }
+        func iconX() throws -> CGFloat {
+            let icon = try XCTUnwrap(views(root).first { String(describing: type(of: $0)) == "IdentityView" })
+            return panel.convertToScreen(icon.convert(icon.bounds, to: nil)).midX
+        }
+        try await Task.sleep(nanoseconds: 350_000_000)
+        let anchor = try iconX()
         for action: CorrectionAction in [.paste("hello"), .clearInput, .listThreads] { overlay.confirmT3Action(action) }
-        XCTAssertTrue(notices(root).isEmpty)
+        XCTAssertEqual(panel.frame, initial)
         overlay.confirmT3Action(.pinThread(true))
         overlay.confirmT3Action(.pinThread(false))
         overlay.finishProcessing()
         overlay.update(.listening)
-        let drawer = try XCTUnwrap(notices(root).first)
-        XCTAssertEqual(notices(root).count, 1)
-        XCTAssertEqual(drawer.subviews.compactMap { ($0 as? NSTextField)?.stringValue }, ["Thread unpinned"])
-        XCTAssertEqual(app.windows.count, count)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let text = try XCTUnwrap(label())
+        XCTAssertLessThan(panel.convertToScreen(text.convert(text.bounds, to: nil)).maxX, anchor - 11)
+        XCTAssertEqual(try iconX(), anchor, accuracy: 1)
+        XCTAssertTrue(app.windows.filter(\.isVisible).allSatisfy { windows.contains($0.windowNumber) })
         XCTAssertFalse(panel.canBecomeKey)
-        XCTAssertEqual(panel.frame.minY, initial.minY, accuracy: 1)
-        XCTAssertGreaterThan(panel.frame.height, initial.height)
-        XCTAssertLessThanOrEqual(panel.frame.height - initial.height, 40)
-        try await Task.sleep(nanoseconds: 3_600_000_000)
-        XCTAssertTrue(notices(root).isEmpty)
+        XCTAssertEqual(panel.frame.height, initial.height)
+        try await Task.sleep(nanoseconds: 3_200_000_000)
+        XCTAssertNil(label())
         XCTAssertEqual(panel.frame, initial)
     }
 
