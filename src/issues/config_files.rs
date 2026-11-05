@@ -292,19 +292,20 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let initial = saved.is_none();
-    let had_error = saved.as_ref().is_some_and(|(_, _, error)| error.is_some());
+    if saved.as_ref().is_some_and(|(id, _, _)| id != &project.id) {
+        return Err(Error::conflict(
+            "This working copy is registered to another project",
+        ));
+    }
     let template = desired(&settings, &Files::new())?;
     let mut disk = observed(&dir, &template)?;
+    // Recreate an emptied working copy from the saved configuration, including
+    // after an interrupted directory recreation.
+    let saved = saved.filter(|_| disk.values().any(Option::is_some));
+    let initial = saved.is_none();
+    let had_error = saved.as_ref().is_some_and(|(_, _, error)| error.is_some());
     let mut base = match saved {
-        Some((id, raw, _)) => {
-            if id != project.id {
-                return Err(Error::conflict(
-                    "This working copy is registered to another project",
-                ));
-            }
-            serde_json::from_str::<Value>(&raw)?
-        }
+        Some((_, raw, _)) => serde_json::from_str::<Value>(&raw)?,
         None => {
             // Existing files are user edits. Missing files on initial setup are
             // populated from the database rather than resetting saved overrides.
@@ -396,23 +397,45 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
 
 pub(crate) fn reconcile(path: &Path) -> Result<()> {
     let store = Store::open(path)?;
-    let rows = store.db.prepare("SELECT c.path,p.id,p.name,c.error FROM project_config_checkouts c JOIN projects p ON p.id=c.project_id")?
-        .query_map([], |r| Ok((r.get::<_,String>(0)?, Project {id:r.get(1)?,name:r.get(2)?},r.get::<_,Option<String>>(3)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    if rows.is_empty() {
-        return Ok(());
+    let mut rows = store.db.prepare("SELECT c.path,p.id,p.name,c.error FROM project_config_checkouts c JOIN projects p ON p.id=c.project_id")?
+        .query_map([], |r| Ok((PathBuf::from(r.get::<_,String>(0)?), (Project {id:r.get(1)?,name:r.get(2)?},r.get::<_,Option<String>>(3)?))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
+    let configs = path.parent().unwrap().join("project-configs");
+    let projects = store.db.prepare("SELECT p.id,p.name FROM projects p JOIN project_name_keys k ON k.project_id=p.id WHERE p.hidden_at IS NULL")?
+        .query_map([], |r| Ok(Project {id:r.get(0)?,name:r.get(1)?}))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for project in projects {
+        let slug = project
+            .id
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join("-");
+        let slug = &slug[..slug.len().min(80)];
+        let hash = project_config::digest(&json!(project.id));
+        let root = configs.join(format!("{slug}-{}", &hash[..16]));
+        rows.entry(root).or_insert((project, None));
     }
-    for (root, project, previous_error) in rows {
-        if !Path::new(&root).is_dir() {
-            continue;
-        }
-        if let Err(error) = sync_root(path, Path::new(&root), &project) {
+    for (root, (project, previous_error)) in rows {
+        let result = (|| -> Result<()> {
+            if root.parent() == Some(&configs) {
+                directory(&configs)?;
+                directory(&root)?;
+            } else if !root.is_dir() {
+                return Ok(());
+            }
+            sync_root(path, &root, &project)?;
+            Ok(())
+        })();
+        if let Err(error) = result {
             if previous_error.as_deref() == Some(&error.to_string()) {
                 continue;
             }
-            store.db.execute(
+            let recorded = store.db.execute(
                 "UPDATE project_config_checkouts SET error=?2 WHERE path=?1 AND error IS NOT ?2",
-                params![root, error.to_string()],
+                params![root.to_string_lossy(), error.to_string()],
             )?;
+            if recorded == 0 {
+                eprintln!("Project configuration {}: {error}", root.display());
+            }
         }
     }
     Ok(())
@@ -421,6 +444,138 @@ pub(crate) fn reconcile(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn service_materializes_projects_without_workers_or_checkouts() {
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!(".config-host-{}", worker::random_id().unwrap()));
+        fs::create_dir(&root).unwrap();
+        let path = root.join("issues.db");
+        let mut store = Store::open(&path).unwrap();
+        let project = Project {
+            id: "named:../../Host config".into(),
+            name: "Host config".into(),
+        };
+        let actor = identity::resolve_inspection(Some("human:test"), "test", &root).unwrap();
+        let init = || {
+            serde_json::from_value(json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}})).unwrap()
+        };
+        store.execute(&request(&project, &actor, init())).unwrap();
+        reconcile(&path).unwrap();
+        let directories = fs::read_dir(root.join("project-configs"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(directories.len(), 1);
+        let copy = &directories[0];
+        let yaml = copy.join(".hey-boss/config.yaml");
+        let original = fs::read_to_string(&yaml).unwrap();
+        let identity: Project =
+            serde_json::from_str(&fs::read_to_string(copy.join(".hey-boss/project.json")).unwrap())
+                .unwrap();
+        assert_eq!(identity.id, project.id);
+        assert!(copy.join(".hey-boss/prompts/worker.md").is_file());
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM project_config_revisions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM issue_workers", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        fs::write(
+            &yaml,
+            original.replace("prs_enabled: false", "prs_enabled: true"),
+        )
+        .unwrap();
+        reconcile(&path).unwrap();
+        assert_eq!(
+            store
+                .execute(&request(&project, &actor, Operation::ProjectSettings))
+                .unwrap()["prs_enabled"],
+            true
+        );
+        let change =
+            serde_json::from_value(json!({"action":"configure_project","worktree_enabled":true}))
+                .unwrap();
+        store.execute(&request(&project, &actor, change)).unwrap();
+        reconcile(&path).unwrap();
+        assert!(
+            fs::read_to_string(&yaml)
+                .unwrap()
+                .contains("worktree_enabled: true")
+        );
+        let saved = fs::read_to_string(&yaml).unwrap();
+        let revisions: i64 = store
+            .db
+            .query_row("SELECT count(*) FROM project_config_revisions", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        fs::remove_dir_all(copy).unwrap();
+        reconcile(&path).unwrap();
+        assert_eq!(fs::read_to_string(&yaml).unwrap(), saved);
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM project_config_revisions", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            revisions
+        );
+        // A broken copy must not stop a newly registered project materializing.
+        fs::write(&yaml, "invalid: [").unwrap();
+        let second = Project {
+            id: "named:Second".into(),
+            name: "Second".into(),
+        };
+        store.execute(&request(&second, &actor, init())).unwrap();
+        reconcile(&path).unwrap();
+        assert_eq!(
+            fs::read_dir(root.join("project-configs")).unwrap().count(),
+            2
+        );
+        assert_eq!(
+            store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM project_config_checkouts WHERE error IS NOT NULL",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        fs::write(&yaml, original).unwrap();
+        reconcile(&path).unwrap();
+        let before: i64 = store
+            .db
+            .query_row("PRAGMA data_version", [], |r| r.get(0))
+            .unwrap();
+        reconcile(&path).unwrap();
+        assert_eq!(
+            store
+                .db
+                .query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            before
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn service_sync_recovers_invalid_files_and_keeps_idle_checks_read_only() {
         let root = std::env::current_dir()
@@ -443,9 +598,11 @@ mod tests {
         reconcile(&path).unwrap();
         let error: Option<String> = store
             .db
-            .query_row("SELECT error FROM project_config_checkouts", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT error FROM project_config_checkouts WHERE path=?1",
+                [root.to_str().unwrap()],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(error.unwrap().contains("config.yaml"));
         fs::write(
@@ -462,8 +619,8 @@ mod tests {
             store
                 .db
                 .query_row(
-                    "SELECT error IS NULL FROM project_config_checkouts",
-                    [],
+                    "SELECT error IS NULL FROM project_config_checkouts WHERE path=?1",
+                    [root.to_str().unwrap()],
                     |r| r.get::<_, bool>(0)
                 )
                 .unwrap(),
