@@ -27,7 +27,7 @@
     $('share-auto').checked = saved ? saved.auto_sync : true;
     $('share-submit').textContent = saved ? 'Save and sync' : 'Publish';
   }
-  async function openShare(page, refresh) {
+  async function openShare(page, refresh, providerName) {
     sharePage = page; shareRefresh = refresh; $('share-error').hidden = true; $('share-link').value = '';
     $('share-description').textContent = `Share “${page.name}” through a configured provider.`;
     $('share-provider').replaceChildren(); $('share-submit').disabled = true;
@@ -36,6 +36,7 @@
       providers = (await api('/api/pages/providers')).providers;
       if (!providers.length) throw new Error('No publishing providers configured. Add them to ~/.hey-boss/publishing.yaml.');
       for (const provider of providers) { const option = node('option', `${provider.name} · ${audience(provider.audience)}`); option.value = provider.name; $('share-provider').append(option); }
+      if (providerName && providers.some(p=>p.name===providerName)) $('share-provider').value = providerName;
       providerChanged(); $('share-submit').disabled = false; $('share-provider').focus();
     } catch(e) { $('share-error').textContent = e.message; $('share-error').hidden = false; }
   }
@@ -60,22 +61,20 @@
     const box = node('div', null, 'page-publishing');
     for (const publication of page.publications || []) {
       const row = node('div', null, 'page-publication');
-      const link = node('a', `${publication.provider} · ${audience(publication.audience)}`);
+      const link = node('a', publication.provider);
+      link.title = `${audience(publication.audience)} · ${publication.url}`;
       if (/^https?:\/\//.test(publication.url)) { link.href = publication.url; link.target = '_blank'; link.rel = 'noopener noreferrer'; }
-      row.append(link, node('span', publication.error ? 'Sync failed' : publication.synced ? 'Synced' : 'Not synced', `page-state${publication.synced?'':' syncing'}`));
-      const details = node('p', publication.auto_sync ? 'Auto-sync on publish' : 'Manual sync');
-      if (publication.error) details.textContent += ` · ${publication.error}`;
-      box.append(row, details);
+      const status = node('button', publication.synced ? 'Up to date' : 'Not up to date', `page-state publication-status${publication.synced?'':' syncing'}`);
+      status.type = 'button'; status.disabled = page.syncing;
+      status.title = `${publication.error || (publication.auto_sync ? 'Auto-sync on publish' : 'Manual sync')} · Open sharing settings${publication.synced?'':' to retry'}`;
+      status.onclick = () => openShare(page, refresh, publication.provider);
+      row.append(link, status); box.append(row);
     }
-    const actions = node('div', null, 'page-publish-actions');
-    const share = node('button', (page.publications || []).length ? 'Sharing settings' : 'Publish externally', 'button small');
-    share.type = 'button'; share.onclick = () => openShare(page, refresh); share.disabled = page.syncing; actions.append(share);
-    if ((page.publications || []).some(p=>!p.synced)) {
-      const sync = node('button', 'Sync now', 'button small'); sync.type = 'button'; sync.disabled = page.syncing;
-      sync.onclick = async () => { sync.disabled = true; sync.textContent = 'Syncing…'; try { await post('/api/pages/sync', {name:page.name}); await refresh(); } catch(e) { error(e); sync.disabled = false; sync.textContent = 'Sync now'; } };
-      actions.append(sync);
+    if (!(page.publications || []).length) {
+      const share = node('button', 'Publish externally', 'button small');
+      share.type = 'button'; share.onclick = () => openShare(page, refresh); share.disabled = page.syncing; box.append(share);
     }
-    box.append(actions); return box;
+    return box;
   }
   if ($('page-frame')) {
     const name = decodeURIComponent(location.pathname.slice('/pages/'.length));
@@ -87,6 +86,7 @@
       try {
         const {page, content_url} = await api(`/api/pages?name=${encodeURIComponent(name)}`);
         $('page-sharing').replaceChildren(publishing(page, load));
+        document.querySelector('.page-bar>.private-badge').hidden = (page.publications || []).length > 0;
         $('pages-error').hidden = true;
         $('page-status').hidden = !page.syncing;
         $('page-status').textContent = page.deployment ? 'An update is syncing. Showing the last complete version.' : 'Files are syncing to this machine. The page will open when they arrive.';
