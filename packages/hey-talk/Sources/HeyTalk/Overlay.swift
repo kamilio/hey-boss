@@ -393,6 +393,7 @@ final class Overlay {
         correctionIndicator.isHidden = true; submitIndicator.isHidden = true
         glow.isHidden = true
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
+        panel.displayIfNeeded()
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
         pasteWait?.removeFromSuperview(); pasteWait = nil
