@@ -833,6 +833,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
                     }
                     guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason); return }
+                    self.overlay?.confirmT3Action(action)
                     lastDelivery = delivery
                     next(delivery)
                 }

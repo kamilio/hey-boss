@@ -85,6 +85,7 @@ controls whether it sends. Name a project to switch projects, or leave out the t
 “Go to chat three” switches to sidebar position 3 (the same slot as ⌘3). “Go to Publish Artifact conversation”
 reads the current sidebar first and resolves the title among positions 1–9. If the list changes before navigation, the action stops.
 “Settle this thread”, “Pin this thread”, and “Unpin this thread” check the current state, so repeating a command is safe.
+A small confirmation appears at the top of the display after a T3 action, then disappears on its own. Paste, clear, and sidebar lookups stay quiet.
 Rename, pin/unpin, and settle use T3’s protocol-2 API with five-minute credentials from `~/.t3/bin/t3`, held only in memory.
 Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts. Server actions currently support local T3 threads.
 These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
