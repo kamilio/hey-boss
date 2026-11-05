@@ -80,6 +80,9 @@ Ask for a new thread in your own words. “Start a new thread and check whether 
 opens a thread in the current project and puts the request in its composer. Auto Submit
 controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
 In any recognized editable field, say “clear this input” to select and delete its contents without submitting.
+Hey Talk gives each tool result back to the model so it can take the next requested action. For example,
+“clear this input, then paste Check publishing” clears the field before inserting the new text. Auto Submit
+waits until the model finishes. A blocked action stops the sequence; completed actions stay in History.
 With `--no-paste`, only the paste result is available.
 
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one
@@ -97,7 +100,7 @@ Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`
 `history --json` also includes it. `null` means no context was attached.
 Context is saved locally with the original and final transcript, with the same
 user-only file permissions; it is not included in routine status output.
-Result JSON includes correction status (`off`, `applied`, or `fallback`), timing,
+Result JSON includes correction status (`off`, `applied`, `fallback`, or `partial` if correction failed after a tool ran), timing,
 and `original_text` alongside the final `text`, including when correction is off or fails.
 Explicit “new line” or `\n` commands produce line breaks in corrected text.
 

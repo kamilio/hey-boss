@@ -44,7 +44,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -77,14 +77,18 @@ final class Correction {
         var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
         if let appContext { values["app_context"] = appContext }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
+        let message = String(decoding: input, as: UTF8.self)
+        let conversation: Any = history.isEmpty ? message as Any : [["role": "user", "content": message]] + history
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false, "stream": true,
-            "instructions": try prompt("correction"), "tools": tools, "tool_choice": "required", "parallel_tool_calls": false, "input": String(decoding: input, as: UTF8.self)
+            "instructions": try prompt("correction"), "tools": tools, "tool_choice": history.isEmpty ? "required" : "auto", "parallel_tool_calls": false,
+            "include": ["reasoning.encrypted_content"], "input": conversation
         ])
         return request
     }
 
-    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool, canClear: Bool) async throws -> CorrectionAction {
+    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool, canClear: Bool) async throws -> (CorrectionAction?, [[String: Any]]) {
+        var items: [[String: Any]] = []
         var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
             let data = Data(line.dropFirst(5).utf8)
@@ -94,6 +98,8 @@ final class Correction {
             switch event["type"] as? String {
             case "response.output_item.done":
                 guard let item = event["item"] as? [String: Any] else { throw TalkError("Missing correction item.") }
+                if item["type"] as? String == "message" { continue }
+                items.append(item)
                 if item["type"] as? String == "reasoning" { continue }
                 guard action == nil, item["type"] as? String == "function_call",
                       let arguments = item["arguments"] as? String,
@@ -118,8 +124,7 @@ final class Correction {
                 default: throw TalkError("Unavailable correction tool.")
                 }
             case "response.completed":
-                guard let action else { throw TalkError("Correction returned no tool call.") }
-                return action
+                return (action, items)
             case "error", "response.failed", "response.incomplete":
                 throw TalkError("Correction did not finish.")
             default: break
@@ -128,20 +133,38 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
-        task = Task { [session] in
-            let result: Result<CorrectionAction, Error>
-            do {
-                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, threadActions: threadActions, canClear: canClear)
-                let (bytes, response) = try await session.bytes(for: request)
-                guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
-                guard (200..<300).contains(response.statusCode) else {
-                    throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
-                }
-                result = .success(try await Self.action(bytes, threadActions: threadActions, canClear: canClear))
-            } catch { result = .failure(error) }
-            await MainActor.run { completion(result) }
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false,
+                 perform: ((CorrectionAction, @escaping (String) -> Void) -> Void)? = nil,
+                 completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
+        func turn(_ history: [[String: Any]], last: CorrectionAction?, count: Int) {
+            task = Task { @MainActor in
+                do {
+                    let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext,
+                                                   threadActions: threadActions, canClear: canClear, history: history)
+                    let (bytes, response) = try await self.session.bytes(for: request)
+                    guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
+                    guard (200..<300).contains(response.statusCode) else {
+                        throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
+                    }
+                    let (action, items) = try await Self.action(bytes, threadActions: threadActions, canClear: canClear)
+                    try Task.checkCancellation()
+                    guard let action else {
+                        guard let last else { throw TalkError("Correction returned no tool call.") }
+                        completion(.success(last)); return
+                    }
+                    guard let perform else { completion(.success(action)); return }
+                    guard count < 8 else { throw TalkError("Stopped after eight tool calls.") }
+                    guard let call = items.first(where: { $0["type"] as? String == "function_call" }),
+                          let id = call["call_id"] as? String, !id.isEmpty,
+                          !history.contains(where: { $0["call_id"] as? String == id }) else { throw TalkError("Invalid tool call ID.") }
+                    perform(action) { output in
+                        turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],
+                             last: action, count: count + 1)
+                    }
+                } catch { completion(.failure(error)) }
+            }
         }
+        turn([], last: nil, count: 0)
     }
     func cancel() { task?.cancel(); task = nil }
     deinit { task?.cancel() }

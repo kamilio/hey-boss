@@ -4,7 +4,7 @@ import XCTest
 
 final class ClearInputTests: XCTestCase {
     @MainActor
-    func testClearOnlyDeletesThePreparedField() async throws {
+    func testClearThenPasteInThePreparedField() async throws {
         guard let bundleID = ProcessInfo.processInfo.environment["HEY_TALK_CLEAR_TEST"] else { throw XCTSkip("Requires a focused scratch field") }
         let app = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first)
         if NSWorkspace.shared.frontmostApplication?.processIdentifier != app.processIdentifier { app.activate() }
@@ -25,23 +25,33 @@ final class ClearInputTests: XCTestCase {
         let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
         XCTAssertTrue((payload["app_context"] as? String)?.contains("## Current input\n" + marker) == true)
         let correction = Correction()
-        let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
-            correction.correct("Can you clear what’s in this field?", vocabulary: [], appContext: context, canClear: true) { continuation.resume(with: $0) }
-        }
-        guard action == .clearInput else { return XCTFail("Model did not choose clear_input") }
-        guard field.isFocused(), SpeechAX.string(field.element, "AXValue").trimmingCharacters(in: .newlines) == marker else {
-            return XCTFail("Scratch field changed during correction")
-        }
+        var actions: [CorrectionAction] = []
         let board = NSPasteboard.general.changeCount
-        let done = expectation(description: "cleared")
-        Paste.deliver(action, target: app, originalField: field, shouldPressEnter: { XCTFail("Unexpected submit"); return true },
-                      returnToField: nil, targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
-            XCTAssertNil(reason); XCTAssertEqual(delivery, "cleared"); done.fulfill()
+        let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
+            correction.correct("Clear this field, then paste the words Check publishing.", vocabulary: [], appContext: context, canClear: true,
+                               perform: { action, next in
+                func fail(_ message: String) {
+                    continuation.resume(throwing: NSError(domain: "ClearInputTests", code: 1, userInfo: [NSLocalizedDescriptionKey: message]))
+                }
+                switch (actions.count, action) {
+                case (0, .clearInput): break
+                case (1, .paste(let text)) where text.trimmingCharacters(in: .punctuationCharacters).lowercased() == "check publishing": break
+                default: fail("Unexpected tool at step \(actions.count + 1): \(action)"); return
+                }
+                guard field.isFocused(),
+                      SpeechAX.string(field.element, "AXValue").trimmingCharacters(in: .newlines) == (actions.isEmpty ? marker : "")
+                else { fail("Scratch input lost focus or changed before tool \(actions.count + 1)"); return }
+                actions.append(action)
+                Paste.deliver(action, target: app, originalField: field, shouldPressEnter: { false },
+                              returnToField: nil, targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
+                    if let reason { fail("Delivery blocked: " + reason.rawValue); return }
+                    if action == .clearInput { XCTAssertEqual(NSPasteboard.general.changeCount, board) }
+                    next(delivery)
+                }
+            }) { continuation.resume(with: $0) }
         }
-        await fulfillment(of: [done], timeout: 2)
-        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(actions.count, 2)
         XCTAssertTrue(field.isFocused())
-        XCTAssertEqual((SpeechAX.value(field.element, "AXValue") as? String)?.trimmingCharacters(in: .newlines), "")
-        XCTAssertEqual(NSPasteboard.general.changeCount, board)
+        XCTAssertEqual(SpeechAX.string(field.element, "AXValue").trimmingCharacters(in: .newlines), actions.last?.text)
     }
 }
