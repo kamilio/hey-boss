@@ -99,6 +99,7 @@ final class Overlay {
     private let pillContent = ClickSurface()
     private let identity = IdentityView()
     private let wave = WaveView()
+    private let resultIcon = NSImageView()
     private let confirmation = NSTextField(labelWithString: "")
     private let connecting = NSTextField(labelWithString: "Connecting…")
     private var waitingForAudio = false
@@ -126,7 +127,8 @@ final class Overlay {
     private var pasteWait: PasteWaitView?
     var onCancelPaste: (() -> Void)?
     private var notice: OverlayNotice?
-    private var compactNotice = false
+    private var status: OverlayNotice?
+    private var statusDismiss: DispatchWorkItem?
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
@@ -219,6 +221,9 @@ final class Overlay {
             pillContent.layer?.addSublayer(indicator)
         }
         confirmation.font = .systemFont(ofSize: 12, weight: .medium)
+        pillContent.addSubview(resultIcon)
+        resultIcon.isHidden = true
+        confirmation.textColor = .labelColor
         confirmation.isHidden = true
         pillContent.addSubview(confirmation)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
@@ -259,7 +264,10 @@ final class Overlay {
         enabled = visible
         if !visible {
             dockMotion?.stop(); dockMotion = nil
-            dismissNotice(animated: false)
+            clearStatus()
+            clearNotice()
+            updateAccessibilityLabel()
+            layout(animated: false)
         }
         if visible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
         dockTimer?.invalidate(); dockTimer = nil
@@ -329,13 +337,12 @@ final class Overlay {
         update(next, waitingForAudio: false)
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
-        if pasteWait != nil, #available(macOS 26, *) { (pill as? NSGlassEffectView)?.style = .clear }
         pasteWait?.removeFromSuperview(); pasteWait = nil
         identity.isHidden = false
         correctionIndicator.isHidden = correctionEnabled; submitIndicator.isHidden = autoSubmitEnabled
         completionDismiss?.cancel(); completionDismiss = nil
         connectingDelay?.cancel(); connectingDelay = nil
-        if !compactNotice && (confirmation.isHidden || next == .recording) { clearNotice() }
+        if confirmation.isHidden || next == .recording { clearNotice() }
         self.waitingForAudio = waitingForAudio
         connecting.isHidden = true
         phase = next; expanded = next == .recording
@@ -383,8 +390,7 @@ final class Overlay {
         }
     }
     private func showPasteWait(_ instruction: String) {
-        update(.idle); clearNotice()
-        if #available(macOS 26, *) { (pill as? NSGlassEffectView)?.style = .regular }
+        update(.idle); clearNotice(); clearStatus()
         let view = PasteWaitView(instruction: instruction) { [weak self] in self?.onCancelPaste?() }
         pasteWait = view; pillContent.addSubview(view)
         identity.isHidden = true; correctionIndicator.isHidden = true; submitIndicator.isHidden = true
@@ -403,7 +409,6 @@ final class Overlay {
     }
     func setAutoMode(_ enabled: Bool) {
         autoMode = enabled
-        autoHalo.isHidden = !enabled
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func setCorrection(_ enabled: Bool) {
@@ -456,7 +461,16 @@ final class Overlay {
     @objc private func showHistory() { onShowHistory?() }
     @objc private func chatWithContext() { onChatWithContext?() }
     private func updateModeAppearance() {
-        pillContent.accent = autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent
+        let tint = resultIcon.isHidden ? nil : resultIcon.contentTintColor
+        pillContent.accent = tint ?? (autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent)
+        let rim = tint ?? TalkDesign.automatic
+        CATransaction.begin()
+        CATransaction.setDisableActions(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+        CATransaction.setAnimationDuration(0.2)
+        autoHalo.strokeColor = rim.withAlphaComponent(tint == nil ? 0.65 : 0.42).cgColor
+        autoHalo.shadowColor = rim.cgColor
+        autoHalo.isHidden = !autoMode && tint == nil
+        CATransaction.commit()
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
         wave.color = autoMode ? TalkDesign.automatic : TalkDesign.active
         pillContent.toolTip = autoMode
@@ -475,14 +489,18 @@ final class Overlay {
     }
     private func layout(animated: Bool) {
         let duration = phase == .recording ? 0.16 : 0.3
+        if #available(macOS 26, *), let glass = pill as? NSGlassEffectView {
+            let style: NSGlassEffectView.Style = pasteWait != nil || notice != nil || status != nil || !confirmation.isHidden ? .regular : .clear
+            if glass.style != style { glass.style = style }
+        }
         let showConnecting = !connecting.isHidden
-        let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 9
-        var size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
+        let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26
+        let rightExtension = status?.frame.width ?? 0
+        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
-        resizePanel(for: size, leftExtension: leftExtension)
-        size.width += leftExtension
-        let width = size.width, height = size.height
-        let center = root.bounds.midX - leftExtension / 2
+        resizePanel(for: size, extensionWidth: max(leftExtension, rightExtension))
+        let width = size.width + leftExtension + rightExtension, height = size.height
+        let center = root.bounds.midX + (rightExtension - leftExtension) / 2
         let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
         // Clockwise from the top center, just outside the existing glass edge.
         let rim = CGMutablePath()
@@ -518,8 +536,8 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let contentOrigin = leftExtension + (width - leftExtension - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded ? contentOrigin + 9 : leftExtension + (width - leftExtension - 22) / 2
+        let contentOrigin = leftExtension + (size.width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2
+        let markX = expanded ? contentOrigin + 9 : leftExtension + (size.width - 22) / 2
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
@@ -534,11 +552,14 @@ final class Overlay {
         submitIndicator.position = CGPoint(x: markX + 23, y: 10)
         CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
-        noticeRecordButton.frame = NSRect(x: (width - 36) / 2, y: 0, width: 36, height: 36)
+        status?.frame.origin = NSPoint(x: leftExtension + size.width, y: 0)
+        noticeRecordButton.isHidden = notice == nil && status == nil
+        pillContent.setAccessibilityRole(pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
+        noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
     }
-    private func resizePanel(for size: NSSize, leftExtension: CGFloat) {
-        let windowSize = NSSize(width: max(200, size.width + 96, size.width + 2 * leftExtension + 16), height: size.height + 48)
+    private func resizePanel(for size: NSSize, extensionWidth: CGFloat) {
+        let windowSize = NSSize(width: max(200, size.width + 96, size.width + 2 * extensionWidth + 16), height: size.height + 48)
         guard panel.frame.size != windowSize else { return }
         let delta = (windowSize.width - root.bounds.width) / 2
         var frame = NSRect(x: panel.frame.midX - windowSize.width / 2, y: panel.frame.minY, width: windowSize.width, height: windowSize.height)
@@ -583,53 +604,82 @@ final class Overlay {
     @objc private func recordFromNotice() { onToggle?() }
     private func clearNotice() {
         noticeDismiss?.cancel(); noticeDismiss = nil
-        confirmation.isHidden = true
+        if !confirmation.isHidden {
+            confirmation.isHidden = true; resultIcon.isHidden = true
+            updateModeAppearance()
+        }
         notice?.removeFromSuperview(); notice = nil
-        compactNotice = false
         noticeRecordButton.isHidden = true
         pillContent.setAccessibilityRole(.button)
     }
-    private func dismissNotice(animated: Bool = true) {
+    private func dismissNotice() {
         guard notice != nil || !confirmation.isHidden else { return }
         clearNotice()
         updateAccessibilityLabel()
-        layout(animated: animated)
+        layout(animated: true)
     }
     func error(_ message: String, accessibilityAction: Bool = false) {
-        presentNotice(message, accessibilityAction: accessibilityAction, compact: false)
+        presentNotice(message, accessibilityAction: accessibilityAction)
     }
-    func showModeNotice() {
-        let message = autoMode ? "Auto mode on" : "Auto mode off"
-        presentNotice(message, accessibilityAction: false, compact: true)
+    func showStatus(_ message: String) {
+        guard enabled, pasteWait == nil, notice == nil else { return }
+        clearStatus()
+        let dismiss = { [weak self] in
+            self?.clearStatus()
+            self?.layout(animated: true)
+        }
+        let content = OverlayNotice(message: message, openAccessibility: nil, dismiss: dismiss, compact: true)
+        status = content; pillContent.addSubview(content)
+        layout(animated: true)
+        let timer = DispatchWorkItem(block: dismiss)
+        statusDismiss = timer
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: timer)
     }
-    func confirmT3Action(_ action: CorrectionAction) {
-        guard enabled, pasteWait == nil else { return }
+    private func clearStatus() {
+        statusDismiss?.cancel(); statusDismiss = nil
+        status?.removeFromSuperview(); status = nil
+    }
+    func confirmT3Action(_ action: CorrectionAction, failed: Bool = false) {
+        guard enabled, pasteWait == nil, notice == nil else { return }
         let message: String
         switch action {
-        case .pinThread(let pinned): message = pinned ? "Pinned" : "Unpinned"
-        case .settleThread: message = "Settled"
-        case .rename: message = "Renamed"
-        case .newThread: message = "New thread"
-        case .switchThread(let position): message = "Chat \(position)"
+        case .pinThread(let pinned): message = failed ? (pinned ? "Couldn’t pin" : "Couldn’t unpin") : (pinned ? "Pinned" : "Unpinned")
+        case .settleThread: message = failed ? "Couldn’t settle" : "Settled"
+        case .rename: message = failed ? "Couldn’t rename" : "Renamed"
+        case .newThread: message = failed ? "Couldn’t open thread" : "New thread"
+        case .switchThread(let position): message = failed ? "Couldn’t switch chats" : "Chat \(position)"
+        case .listThreads where failed: message = "Couldn’t read chats"
         case .paste, .clearInput, .listThreads: return
         }
         clearNotice()
         confirmation.stringValue = message
         confirmation.sizeToFit()
-        confirmation.setFrameOrigin(NSPoint(x: 12, y: floor((36 - confirmation.frame.height) / 2)))
+        resultIcon.image = NSImage(systemSymbolName: failed ? "xmark" : "checkmark", accessibilityDescription: nil)
+        resultIcon.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
+        resultIcon.contentTintColor = failed ? TalkDesign.failure : TalkDesign.success
+        resultIcon.frame = NSRect(x: 12, y: 11.5, width: 13, height: 13)
+        let fade = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        resultIcon.alphaValue = fade ? 0 : 1; confirmation.alphaValue = resultIcon.alphaValue
+        resultIcon.isHidden = false
+        confirmation.setFrameOrigin(NSPoint(x: 29, y: (18 + confirmation.firstBaselineOffsetFromTop - confirmation.frame.height - confirmation.font!.capHeight / 2).rounded()))
         confirmation.isHidden = false
+        updateModeAppearance()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = fade ? 0.24 : 0
+            resultIcon.animator().alphaValue = 1; confirmation.animator().alphaValue = 1
+        }
         NSAccessibility.post(element: panel, notification: .announcementRequested, userInfo: [.announcement: message, .priority: NSAccessibilityPriorityLevel.low.rawValue])
         layout(animated: true)
         let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
         noticeDismiss = dismiss
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: dismiss)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (failed ? 5 : 3), execute: dismiss)
     }
-    private func presentNotice(_ message: String, accessibilityAction: Bool, compact: Bool) {
+    private func presentNotice(_ message: String, accessibilityAction: Bool) {
         guard enabled, pasteWait == nil else { return }
         clearNotice()
-        compactNotice = compact
+        clearStatus()
         let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
-        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() }, compact: compact)
+        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() })
         notice = content
         pillContent.addSubview(content)
         noticeRecordButton.isHidden = false
@@ -645,7 +695,7 @@ final class Overlay {
         if !accessibilityAction {
             let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
             noticeDismiss = dismiss
-            DispatchQueue.main.asyncAfter(deadline: .now() + (compact ? 3 : 6), execute: dismiss)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)
         }
     }
 }

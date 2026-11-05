@@ -54,33 +54,46 @@ final class OverlayNotice: NSView {
     init(message: String, openAccessibility: (() -> Void)?, dismiss: @escaping () -> Void, compact: Bool = false) {
         self.openAccessibility = openAccessibility
         self.dismiss = dismiss
-        super.init(frame: NSRect(x: 0, y: 0, width: compact ? 180 : 312, height: compact ? 40 : openAccessibility == nil ? 56 : 96))
+        let label = NSTextField(wrappingLabelWithString: message)
+        label.font = .systemFont(ofSize: compact ? 12 : 13, weight: compact ? .medium : .regular)
+        label.maximumNumberOfLines = compact ? 1 : 4
+        label.sizeToFit()
+        let width: CGFloat = compact ? ceil(label.frame.width) + 38 : 312
+        let textWidth = compact ? label.frame.width : width - 58
+        label.preferredMaxLayoutWidth = textWidth
+        let textHeight = ceil(label.intrinsicContentSize.height)
+        let actionsHeight: CGFloat = openAccessibility == nil ? 0 : 40
+        let height: CGFloat = compact ? 36 : textHeight + 28 + actionsHeight
+        super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel("Dictation notice")
-        let label = NSTextField(wrappingLabelWithString: message)
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.drawsBackground = false
-        label.maximumNumberOfLines = 2
-        label.frame = NSRect(x: 16, y: compact ? 10 : bounds.height - 45, width: bounds.width - 62, height: compact ? 20 : 34)
+        setAccessibilityLabel(compact ? message : "Dictation notice")
+        label.frame = NSRect(x: compact ? 2 : 14, y: 14 + actionsHeight, width: textWidth, height: textHeight)
+        if compact {
+            label.frame.origin.y = (18 + label.firstBaselineOffsetFromTop - label.frame.height - label.font!.capHeight / 2).rounded()
+        }
         addSubview(label)
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.frame = NSRect(x: 16, y: 0, width: bounds.width - 32, height: 1)
-        separator.alphaValue = 0.3
-        addSubview(separator)
+        if !compact {
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.frame = NSRect(x: 16, y: 0, width: width - 32, height: 1)
+            separator.alphaValue = 0.3
+            addSubview(separator)
+        }
         let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss notice")!, target: self, action: #selector(closeNotice))
         close.isBordered = false
         close.contentTintColor = .secondaryLabelColor
         close.setAccessibilityLabel("Dismiss notice")
         close.toolTip = "Dismiss"
-        close.frame = NSRect(x: bounds.width - 36, y: bounds.height - 33, width: 24, height: 24)
+        close.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+        let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
+        close.frame = NSRect(x: width - 34, y: (capCenter - 12).rounded(), width: 24, height: 24)
         addSubview(close)
         if openAccessibility != nil {
             let settings = NoticeActionButton(title: "Enable Accessibility", target: self, action: #selector(openSettings))
             settings.isBordered = false
             settings.font = .systemFont(ofSize: 13, weight: .semibold)
-            settings.frame = NSRect(x: 16, y: 10, width: 280, height: 34)
+            settings.frame = NSRect(x: 16, y: 12, width: width - 32, height: 32)
             addSubview(settings)
         }
     }

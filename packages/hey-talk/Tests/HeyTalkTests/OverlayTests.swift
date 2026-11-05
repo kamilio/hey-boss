@@ -202,12 +202,14 @@ final class OverlayTests: XCTestCase {
         }
         let root = try XCTUnwrap(panel.contentView)
         overlay.setAutoMode(true)
-        overlay.showModeNotice()
+        overlay.showStatus("Auto mode on")
         overlay.preparing(); overlay.update(.recording)
         let notice = try XCTUnwrap(notices(root).first)
         let message = try XCTUnwrap(notice.subviews.compactMap { $0 as? NSTextField }.first).stringValue
         XCTAssertEqual(message, "Auto mode on")
-        XCTAssertEqual(notice.frame.width, 180)
+        XCTAssertEqual(notice.frame.height, 36)
+        XCTAssertLessThan(notice.frame.width, 140)
+        XCTAssertGreaterThanOrEqual(notice.frame.minX, TalkDesign.recordingSize.width - 8)
         XCTAssertFalse(panel.canBecomeKey)
         let dismissed = expectation(description: "mode notice closes automatically")
         DispatchQueue.main.asyncAfter(deadline: .now() + 3.3) {
@@ -215,9 +217,32 @@ final class OverlayTests: XCTestCase {
             dismissed.fulfill()
         }
         wait(for: [dismissed], timeout: 4)
-        overlay.setAutoMode(false); overlay.showModeNotice()
+        overlay.setAutoMode(false); overlay.showStatus("Auto mode off")
         let off = try XCTUnwrap(notices(root).first)
         XCTAssertEqual(try XCTUnwrap(off.subviews.compactMap { $0 as? NSTextField }.first).stringValue, "Auto mode off")
+        overlay.update(.listening)
+        overlay.confirmT3Action(.pinThread(true))
+        XCTAssertNotNil(off.superview)
+        let activity = try XCTUnwrap(off.superview?.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Pinned" })
+        XCTAssertEqual(activity.textColor, .labelColor)
+        let symbol = try XCTUnwrap(off.superview?.subviews.compactMap { $0 as? NSImageView }.first { !$0.isHidden })
+        let capCenter = activity.frame.maxY - activity.firstBaselineOffsetFromTop + (activity.font?.capHeight ?? 0) / 2
+        XCTAssertEqual(symbol.frame.midY, capCenter, accuracy: 0.5)
+        XCTAssertEqual(symbol.contentTintColor, TalkDesign.success)
+        let face = try XCTUnwrap(off.superview as? GlassFace)
+        XCTAssertEqual(face.accent, TalkDesign.success)
+        let close = try XCTUnwrap(off.subviews.compactMap { $0 as? NSButton }.first)
+        close.performClick(nil)
+        XCTAssertTrue(notices(root).isEmpty)
+        XCTAssertFalse(activity.isHidden)
+        overlay.confirmT3Action(.pinThread(false), failed: true)
+        XCTAssertEqual(activity.stringValue, "Couldn’t unpin")
+        XCTAssertEqual(symbol.contentTintColor, TalkDesign.failure)
+        XCTAssertEqual(face.accent, TalkDesign.failure)
+        overlay.update(.recording)
+        XCTAssertTrue(symbol.isHidden)
+        XCTAssertNotEqual(face.accent, TalkDesign.failure)
+        XCTAssertEqual(panel.frame.height, TalkDesign.idleSize.height + 48)
     }
 
     @MainActor func testAutoGlowStaysVisibleWithoutAddingTextOrChangingPillSize() throws {
@@ -261,6 +286,10 @@ final class OverlayTests: XCTestCase {
         XCTAssertEqual(panel.frame.minY, initialFrame.minY, accuracy: 1)
         XCTAssertEqual(panel.frame.midX, initialFrame.midX, accuracy: 1)
         XCTAssertEqual(notices(try XCTUnwrap(panel.contentView)).count, 1)
+        let plain = try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first)
+        let shortHeight = plain.frame.height
+        overlay.error("The microphone is unavailable. Reconnect it and try recording again.")
+        XCTAssertGreaterThan(try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first).frame.height, shortHeight)
         overlay.error("Allow automatic paste. Text copied.", accessibilityAction: true)
         XCTAssertEqual(notices(try XCTUnwrap(panel.contentView)).count, 1)
         XCTAssertFalse(panel.canBecomeKey)
