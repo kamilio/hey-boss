@@ -125,6 +125,7 @@ final class Overlay {
     private var pasteWait: PasteWaitView?
     var onCancelPaste: (() -> Void)?
     private var notice: OverlayNotice?
+    private var t3Confirmation: NSPanel?
     private var modeNotice = false
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
@@ -254,6 +255,7 @@ final class Overlay {
     func show(_ visible: Bool) {
         enabled = visible
         if !visible {
+            t3Confirmation?.orderOut(nil); t3Confirmation = nil
             dockMotion?.stop(); dockMotion = nil
             dismissNotice(animated: false)
         }
@@ -594,6 +596,44 @@ final class Overlay {
     func showModeNotice() {
         let message = autoMode ? "Auto mode on" : "Auto mode off"
         presentNotice(message, accessibilityAction: false, isModeNotice: true)
+    }
+    func confirmT3Action(_ action: CorrectionAction) {
+        guard enabled, let screen = NSScreen.main else { return }
+        let message: String
+        switch action {
+        case .pinThread(let pinned): message = pinned ? "Thread pinned" : "Thread unpinned"
+        case .settleThread: message = "Thread settled"
+        case .rename: message = "Thread renamed"
+        case .newThread: message = "New thread opened"
+        case .switchThread(let position): message = "Switched to chat \(position)"
+        case .paste, .clearInput, .listThreads: return
+        }
+        let label = NSTextField(labelWithString: message)
+        label.font = .systemFont(ofSize: 12, weight: .medium)
+        label.sizeToFit()
+        let bounds = NSRect(x: 0, y: 0, width: ceil(label.frame.width) + 42, height: 30)
+        let content = NSVisualEffectView(frame: bounds)
+        content.material = .popover; content.blendingMode = .behindWindow; content.state = .active
+        content.wantsLayer = true; content.layer?.cornerRadius = bounds.height / 2; content.layer?.masksToBounds = true
+        let check = NSImageView(frame: NSRect(x: 10, y: 8, width: 14, height: 14))
+        check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
+        check.contentTintColor = TalkDesign.active
+        label.setFrameOrigin(NSPoint(x: 29, y: floor((bounds.height - label.frame.height) / 2)))
+        content.addSubview(check); content.addSubview(label)
+
+        let toast = RecordingPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        toast.title = "Hey Talk — T3 action"; toast.level = .statusBar
+        toast.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        toast.backgroundColor = .clear; toast.isOpaque = false; toast.hasShadow = true
+        toast.ignoresMouseEvents = true; toast.hidesOnDeactivate = false; toast.contentView = content
+        let visible = screen.visibleFrame
+        toast.setFrameOrigin(NSPoint(x: round(visible.midX - bounds.width / 2), y: visible.maxY - bounds.height - 8))
+        t3Confirmation?.orderOut(nil); t3Confirmation = toast
+        toast.orderFrontRegardless()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8) { [weak self, weak toast] in
+            guard let self, let toast, self.t3Confirmation === toast else { return }
+            toast.orderOut(nil); self.t3Confirmation = nil
+        }
     }
     private func presentNotice(_ message: String, accessibilityAction: Bool, isModeNotice: Bool) {
         guard enabled, pasteWait == nil else { return }

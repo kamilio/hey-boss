@@ -4,6 +4,28 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
+    @MainActor func testT3ConfirmationIsSmallTemporaryAndLeavesDictationAlone() async throws {
+        let app = NSApplication.shared, overlay = Overlay()
+        defer { overlay.show(false) }
+        func confirmations() -> [NSWindow] { app.windows.filter { $0.title == "Hey Talk — T3 action" && $0.isVisible } }
+        for action: CorrectionAction in [.paste("hello"), .clearInput, .listThreads] { overlay.confirmT3Action(action) }
+        XCTAssertTrue(confirmations().isEmpty)
+        overlay.confirmT3Action(.pinThread(true))
+        let notice = try XCTUnwrap(confirmations().first)
+        XCTAssertTrue(notice.ignoresMouseEvents)
+        XCTAssertFalse(notice.canBecomeKey)
+        XCTAssertLessThanOrEqual(notice.frame.height, 32)
+        XCTAssertLessThanOrEqual(notice.frame.width, 160)
+        let display = try XCTUnwrap(notice.screen).visibleFrame
+        XCTAssertEqual(notice.frame.midX, display.midX, accuracy: 1)
+        XCTAssertEqual(notice.frame.maxY, display.maxY - 8, accuracy: 1)
+        overlay.confirmT3Action(.pinThread(false))
+        overlay.finishProcessing()
+        XCTAssertEqual(confirmations().count, 1)
+        try await Task.sleep(nanoseconds: 2_200_000_000)
+        XCTAssertTrue(confirmations().isEmpty)
+    }
+
     @MainActor func testWaitingPillNamesDestinationAndLetsUserCancelWithoutTakingFocus() throws {
         let app = NSApplication.shared, windows = Set(app.windows.map(\.windowNumber))
         let overlay = Overlay()
