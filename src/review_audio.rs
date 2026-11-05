@@ -27,6 +27,20 @@ mod tests {
     }
 
     #[test]
+    fn repeated_short_noise_counts_toward_the_chat_pause() {
+        let mut gate = Turn::new(true);
+        for _ in 0..8 {
+            gate.push(true);
+        }
+        // Brief detector false positives must not turn 2.5 seconds into 20 seconds.
+        let edges = (0..128)
+            .filter_map(|frame| gate.push(frame % 8 != 7))
+            .collect::<Vec<_>>();
+        assert_eq!(edges, [Edge::End]);
+        assert!(!gate.active);
+    }
+
+    #[test]
     fn short_noise_doesnt_interrupt_and_a_thinking_pause_stays_in_one_turn() {
         for (conversation, quiet) in [(false, 40), (true, 125)] {
             let mut gate = Turn::new(conversation);
@@ -80,6 +94,10 @@ impl Turn {
                 return None;
             }
         } else {
+            // A rejected burst was part of the pause, not time to ignore.
+            if self.conversation && self.active && self.speech_run < 8 {
+                self.consecutive += self.speech_run;
+            }
             self.speech_run = 0;
         }
         if speech == self.active {
@@ -129,7 +147,9 @@ pub fn stream(
     let mut pending = Vec::new();
     let mut chat_speech = false;
     let mut turn = Turn::new(conversation);
-    let mut history = std::collections::VecDeque::with_capacity(20);
+    // Keep quiet opening words as well as the detector's confirmation delay.
+    let history_frames = if conversation { 75 } else { 20 }; // 1.5 s / 400 ms
+    let mut history = std::collections::VecDeque::with_capacity(history_frames);
     let mut frame = [0u8; 640];
     loop {
         let mut stereo = [0u8; 1280];
@@ -179,7 +199,7 @@ pub fn stream(
         }
         // A follow-up can begin during the previous chat turn's final pause.
         if conversation || !turn.active {
-            if history.len() == 20 {
+            if history.len() == history_frames {
                 history.pop_front();
             }
             history.push_back(frame);

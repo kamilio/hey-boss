@@ -24,8 +24,10 @@ Turn it off in the waveform menu or the pill’s right-click menu to return manu
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to listen. Speaking starts a recording; pausing for about
 2½ seconds transcribes, pastes, and submits. Auto uses the same local speech
-detector as voice conversations, including buffered opening audio. Silent
-listening is not saved. Plain Enter sends a recording immediately and passes
+detector as voice conversations, retaining 1.5 seconds of opening audio in memory.
+Brief background noises count toward the pause. The pill stays compact while
+listening starts, including when switching chats. Silent listening is not saved.
+Plain Enter sends a recording immediately and passes
 through normally while listening. It starts listening again after submitting if an allowed
 input still has focus. If no speech is detected, a brief notice appears and
 listening resumes. The next plain Enter in that input passes through to the app
