@@ -22,6 +22,70 @@ final class CorrectionTests: XCTestCase {
         return Correction(session: URLSession(configuration: configuration))
     }
 
+    func testCompoundCommandFeedsEachDeliveryBackBeforeChoosingAgain() throws {
+        let correction = client()
+        var actions: [CorrectionAction] = []
+        var rounds = 0
+        CorrectionProtocol.handle = { stub in
+            let stream = stub.request.httpBody.map(InputStream.init(data:)) ?? stub.request.httpBodyStream!
+            stream.open(); defer { stream.close() }
+            let body = try? JSONSerialization.jsonObject(with: stream) as? [String: Any]
+            let history = body?["input"] as? [[String: Any]]
+            let item: [String: String]
+            switch rounds {
+            case 0:
+                item = ["type": "function_call", "name": "clear_input", "arguments": "{}", "call_id": "c1"]
+            case 1:
+                XCTAssertEqual(history?.last?["call_id"] as? String, "c1")
+                XCTAssertEqual(history?.last?["output"] as? String, "cleared")
+                item = ["type": "function_call", "name": "paste", "arguments": #"{"text":"Check publishing."}"#, "call_id": "c2"]
+            default:
+                XCTAssertEqual(history?.last?["output"] as? String, "pasted")
+                XCTAssertEqual(history?.last?["call_id"] as? String, "c2")
+                XCTAssertEqual(body?["tool_choice"] as? String, "auto")
+                item = ["type": "message"]
+            }
+            rounds += 1
+            let event = try! JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
+            stub.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n")
+        }
+        let done = expectation(description: "loop finished")
+        correction.correct("Clear this field, then paste Check publishing.", vocabulary: [], canClear: true, perform: { action, next in
+            actions.append(action)
+            next(action == .clearInput ? "cleared" : "pasted")
+        }) { result in
+            XCTAssertEqual(try? result.get(), .paste("Check publishing."))
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(actions, [.clearInput, .paste("Check publishing.")])
+        XCTAssertEqual(rounds, 3)
+    }
+
+    func testFailedContinuationDoesNotRepeatDeliveredTool() {
+        let correction = client()
+        var requests = 0, deliveries = 0
+        CorrectionProtocol.handle = { stub in
+            requests += 1
+            stub.respond(status: requests == 1 ? 200 : 502, body: #"""
+                data: {"type":"response.output_item.done","item":{"type":"function_call","name":"clear_input","call_id":"clear","arguments":"{}"}}
+
+                data: {"type":"response.completed"}
+
+                """#)
+        }
+        let done = expectation(description: "stopped")
+        correction.correct("Clear this field and paste fresh text.", vocabulary: [], canClear: true, perform: { action, next in
+            deliveries += 1; XCTAssertEqual(action, .clearInput); next("cleared")
+        }) { result in
+            if case .success = result { XCTFail("Failed continuation reported success") }
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(requests, 2)
+        XCTAssertEqual(deliveries, 1)
+    }
+
     func testNetworkSuccessReturnsCorrectedTextOnMainThread() {
         let correction = client()
         CorrectionProtocol.handle = {
@@ -41,7 +105,7 @@ final class CorrectionTests: XCTestCase {
         wait(for: [done], timeout: 2)
     }
 
-    func testRenameRequiresAnEligibleTargetAndExactlyOneCompletedCall() throws {
+    func testRenameRequiresAnEligibleTargetAndOneCompletedCallPerTurn() throws {
         let call = #"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"rename_thread","arguments":"{\"title\":\"Release notes\"}"}}"# + "\n\n"
         let end = #"data: {"type":"response.completed","response":{"status":"completed"}}"# + "\n\n"
         for (allowed, body, succeeds) in [(true, call + end, true), (false, call + end, false),

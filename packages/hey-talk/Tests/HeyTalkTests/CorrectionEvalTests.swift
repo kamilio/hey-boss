@@ -3,6 +3,28 @@ import XCTest
 @testable import HeyTalk
 
 final class CorrectionEvalTests: XCTestCase {
+    func testLiveSequentialTools() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
+        let correction = Correction()
+        for (speech, expected): (String, [CorrectionAction]) in [
+            ("Clear this field, then paste the words Check publishing.", [.clearInput, .paste("check publishing")]),
+            ("Check publishing.", [.paste("check publishing")])
+        ] {
+            var actions: [CorrectionAction] = []
+            let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
+                correction.correct(speech, vocabulary: [], canClear: true, perform: { action, next in
+                    actions.append(action)
+                    next(action == .clearInput ? "cleared" : "pasted")
+                }) { continuation.resume(with: $0) }
+            }
+            let normalized = actions.map { action -> CorrectionAction in
+                guard case .paste(let text) = action else { return action }
+                return .paste(text.trimmingCharacters(in: .punctuationCharacters).lowercased())
+            }
+            XCTAssertEqual(normalized, expected)
+        }
+    }
+
     func testLiveNewThreadTool() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
         let correction = Correction()

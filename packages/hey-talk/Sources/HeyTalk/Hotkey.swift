@@ -111,7 +111,8 @@ enum Paste {
     }
     static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
-                        isCurrent: @escaping () -> Bool, completion: @escaping (String, PasteBlockReason?) -> Void) {
+                        isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil,
+                        completion: @escaping (String, PasteBlockReason?) -> Void) {
         func check() -> PasteBlockReason? {
             PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
                 targetIsSelf: target?.processIdentifier == getpid(),
@@ -155,6 +156,7 @@ enum Paste {
                           let draft = await field.openNewThread(project: project, isCurrent: isCurrent) else {
                         completion("history", .newThreadUnavailable); return
                     }
+                    onNewField?(draft)
                     guard !text.isEmpty else { completion("new_thread", nil); return }
                     guard isCurrent(), draft.isFocused(),
                           SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

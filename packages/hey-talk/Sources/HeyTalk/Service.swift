@@ -46,7 +46,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
     private var recordingContext: ContextSnapshot?
     private var startingInput: FocusedInput?
-    private var waitingPaste: Timer? { didSet { oldValue?.invalidate() } }
+    private var waitingPaste: (timer: Timer, text: String)? { didSet { oldValue?.timer.invalidate() } }
     private var paste = true
     private var pressEnter = false { didSet { updateSubmitIndicator() } }
     private var transcriptionSource = "microphone"
@@ -383,9 +383,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } catch { overlay?.error(error.localizedDescription) }
     }
     @objc private func cancelDictation() {
-        if let retry = waitingPaste, retry.isValid,
-           !Paste.copyAndStopWaiting(session.lastText, retry: retry, to: .general) {
-            overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: retry)
+        if let wait = waitingPaste, wait.timer.isValid,
+           !Paste.copyAndStopWaiting(wait.text, retry: wait.timer, to: .general) {
+            overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: wait.timer)
             return
         }
         cancel()
@@ -715,92 +715,120 @@ final class TalkService: NSObject, NSApplicationDelegate {
         inference.transcribe(samples) { result in Task { @MainActor in
             let context = useCorrection ? await snapshot?.value : nil
             guard self.session.generation == id else { return }
-            let appContext = context?.text
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
-                guard useCorrection else {
-                    self.finish(.paste(text), originalText: text, appContext: nil, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: ["status": "off"])
-                    return
-                }
-                let started = ProcessInfo.processInfo.systemUptime
-                let field = self.autoTarget ?? self.startingInput
-                self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext,
-                                        threadActions: self.paste && field?.canUseThreadActions == true, canClear: self.paste && field != nil) { result in
-                    guard self.session.generation == id, self.session.phase == .processing else { return }
-                    var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
-                                             "context_ms": context?.milliseconds ?? 0, "context_characters": appContext?.count ?? 0]
-                    let corrected: CorrectionAction
-                    switch result {
-                    case .success(let value): corrected = value; info["status"] = "applied"
-                    case .failure(let error):
-                        corrected = .paste(text); info["status"] = "fallback"; info["error"] = error.localizedDescription
-                    }
-                    self.finish(corrected, originalText: text, appContext: appContext, id: id, audioSeconds: audioSeconds, elapsed: elapsed, correctionInfo: info)
-                }
+                self.deliverTranscript(text, context: context, correctionEnabled: useCorrection, id: id,
+                                       audioSeconds: audioSeconds, elapsed: elapsed)
             }
         } }
     }
-    private func finish(_ action: CorrectionAction, originalText: String, appContext: String?, id: UInt64, audioSeconds: Double, elapsed: Double, correctionInfo: [String: Any]) {
-        let text = action.text
-        guard self.session.finish(id, text: text) else { return }
-        if self.autoTarget == nil { self.hotkey?.reset() }
-        self.overlay?.finishProcessing()
-        let entry = Dictation(text: text, originalText: originalText, audioSeconds: audioSeconds, source: self.transcriptionSource, appContext: appContext)
-        // Detach this result before disk IO: a new recording may start while saving.
-        var reply = self.pendingReply; self.pendingReply = nil
-        let shouldPaste = self.paste, pressEnter = self.pressEnter, target = self.target, captureMS = self.captureMilliseconds
-        let host = recordingHost, browser = BrowserPage.isBrowser(target)
-        let targetName = self.targetName
-        let focusedInput = self.autoTarget
-        let t3 = target?.bundleIdentifier == "com.t3tools.t3code"
-        let originalField = focusedInput ?? self.startingInput
-        self.history.save(entry) { saved in
-            let report: (String, PasteBlockReason?) -> Void = { delivery, reason in
-                var response: [String: Any] = ["ok": true, "text": text, "original_text": originalText, "audio_seconds": audioSeconds,
-                        "app_context": appContext as Any? ?? NSNull(),
-                        "inference_ms": elapsed * 1000, "real_time_factor": elapsed / audioSeconds,
-                        "capture_start_ms": captureMS, "delivery": delivery,
-                        "history_id": entry.id.uuidString, "history_saved": saved, "correction": correctionInfo]
-                if let reason { response["paste_block"] = reason.rawValue }
-                reply?(response); reply = nil
+
+    private func deliverTranscript(_ original: String, context: (text: String?, milliseconds: Double)?, correctionEnabled: Bool,
+                                   id: UInt64, audioSeconds: Double, elapsed: Double) {
+        let started = ProcessInfo.processInfo.systemUptime
+        let target = self.target, host = recordingHost, automatic = autoTarget
+        var field = automatic ?? startingInput
+        let needsField = target?.bundleIdentifier == "com.t3tools.t3code" || returnToField || automatic != nil
+        let current = { self.session.generation == id && self.session.phase == .processing }
+        func allowsSubmit() -> Bool {
+            enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier, host: host) &&
+                (!BrowserPage.isBrowser(target) || (host != nil && BrowserPage.host(in: target) == host))
+        }
+
+        var response: [String: Any] = [:]
+        var info: [String: Any] = ["status": correctionEnabled ? "applied" : "off",
+                                   "context_ms": context?.milliseconds ?? 0, "context_characters": context?.text?.count ?? 0]
+        func report(_ delivery: String, _ reason: PasteBlockReason? = nil) {
+            response["delivery"] = delivery; response["paste_block"] = reason?.rawValue
+            if correctionEnabled { info["elapsed_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000 }
+            response["correction"] = info
+            let reply = pendingReply; pendingReply = nil; reply?(response)
+        }
+        func finish(_ delivery: String, _ reason: PasteBlockReason? = nil) {
+            guard current(), session.finish(id, text: response["text"] as? String ?? original) else { return }
+            report(delivery, reason)
+            waitingPaste = nil; self.automatic = nil; hotkey?.reset()
+            overlay?.finishProcessing(); scheduleRelease()
+            lastPasteBlock = reason
+            if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
+            else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
+            else if let error = info["error"] as? String { overlay?.error(error) }
+            if delivery == "submitted", automatic != nil { restartAutomatic(id: id) }
+        }
+        // Keep each tool's text recoverable before touching the original field.
+        func save(_ action: CorrectionAction, then: @escaping () -> Void) {
+            let entry = Dictation(text: action.text, originalText: original, audioSeconds: audioSeconds,
+                                  source: transcriptionSource, appContext: context?.text)
+            history.save(entry) { saved in
+                guard current() else { return }
+                response = ["ok": true, "text": action.text, "original_text": original, "audio_seconds": audioSeconds,
+                            "app_context": context?.text as Any? ?? NSNull(), "inference_ms": elapsed * 1000,
+                            "real_time_factor": elapsed / audioSeconds, "capture_start_ms": self.captureMilliseconds,
+                            "history_id": entry.id.uuidString, "history_saved": saved]
+                then()
             }
-            let complete: (String, PasteBlockReason?) -> Void = { delivery, reason in
-                report(delivery, reason)
-                if self.session.generation == id {
-                    if self.waitingPaste != nil { self.waitingPaste = nil; self.overlay?.update(.idle) }
-                    self.lastPasteBlock = reason
-                    self.automatic = nil; self.hotkey?.reset()
-                    self.scheduleRelease()
-                    if !saved { self.overlay?.error("Not saved. Copy from History before quitting.") }
-                    else if let reason {
-                        let message = reason.message(targetName: targetName, pasted: delivery == "pasted")
-                        self.overlay?.error(message, accessibilityAction: reason == .accessibility)
-                    }
-                    if let error = correctionInfo["error"] as? String, saved, self.lastPasteBlock == nil {
-                        self.overlay?.error("\(error) Original transcript kept.")
-                    }
-                    if saved, delivery == "submitted", focusedInput != nil { self.restartAutomatic(id: id) }
-                }
-            }
-            if shouldPaste, self.session.generation == id {
-                func submit() -> Bool {
-                    guard self.enterExceptions.shouldPressEnter(requested: pressEnter, bundleID: target?.bundleIdentifier, host: host) else { return false }
-                    return !browser || (host != nil && BrowserPage.host(in: target) == host)
-                }
-                let needsField = t3 || self.returnToField
-                Paste.deliver(action, target: target, originalField: originalField, shouldPressEnter: submit, returnToField: self.returnToField ? originalField : nil,
-                              targetStillFocused: {
-                                  (!needsField && focusedInput == nil) || (originalField?.isFocused() ?? !needsField)
-                              }, onWait: (!needsField || originalField != nil) ? { timer in
-                                  self.waitingPaste = timer
+        }
+
+        var lastDelivery: String?
+        var pastedValue: String?
+        func perform(_ action: CorrectionAction, next: @escaping (String) -> Void) {
+            guard current() else { return }
+            let originalField = field
+            save(action) {
+                guard self.paste else { finish("stdout"); return }
+                let focused = { originalField?.isFocused() ?? !needsField }
+                Paste.deliver(action, target: target, originalField: originalField,
+                              shouldPressEnter: { !correctionEnabled && allowsSubmit() },
+                              returnToField: self.returnToField ? originalField : nil, targetStillFocused: focused,
+                              onWait: lastDelivery == nil && (!needsField || originalField != nil) ? { timer in
+                                  self.waitingPaste = (timer, action.text)
                                   self.hotkey?.captureEscape(true)
-                                  self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(targetName ?? "the original app")", while: timer)
-                                  report("waiting", nil)
-                              } : nil,
-                              isCurrent: { self.session.generation == id }, completion: complete)
-            } else { complete(shouldPaste ? "history" : "stdout", nil) }
+                                  self.overlay?.waitToPaste(originalField?.returnInstruction ?? "Return to \(self.targetName ?? "the original app")", while: timer)
+                                  report("waiting")
+                              } : nil, isCurrent: current, onNewField: { field = $0 }) { delivery, reason in
+                    guard current() else { return }
+                    if self.waitingPaste != nil {
+                        self.waitingPaste = nil
+                        self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
+                    }
+                    guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason); return }
+                    lastDelivery = delivery
+                    if delivery == "pasted", allowsSubmit(), let destination = field {
+                        // The paste key is posted asynchronously. Remember the resulting draft
+                        // so a later model turn cannot submit edits made in the meantime.
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            guard current() else { return }
+                            guard destination.isFocused() else { finish(delivery, .focusChanged); return }
+                            pastedValue = SpeechAX.value(destination.element, "AXValue") as? String
+                            next(delivery)
+                        }
+                    } else { next(delivery) }
+                }
+            }
+        }
+        guard correctionEnabled else { perform(.paste(original)) { _ in }; return }
+        correction.correct(original, vocabulary: (try? Vocabulary().words()) ?? [], appContext: context?.text,
+                           threadActions: paste && field?.canUseThreadActions == true, canClear: paste && field != nil,
+                           perform: paste ? perform : nil) { result in
+            guard current() else { return }
+            switch result {
+            case .success(let action):
+                guard let delivery = lastDelivery else { save(action) { finish("stdout") }; return }
+                guard delivery == "pasted", allowsSubmit(), let target else { finish(delivery); return }
+                guard target.isActive, field?.isFocused() ?? !needsField else { finish(delivery, .focusChanged); return }
+                if let field, let pastedValue, SpeechAX.value(field.element, "AXValue") as? String != pastedValue {
+                    finish(delivery, .focusChanged); return
+                }
+                if Paste.post(36, flags: [], to: target.processIdentifier) { finish("submitted") }
+                else { finish(delivery, .eventUnavailable) }
+            case .failure(let error):
+                info["error"] = error.localizedDescription
+                info["status"] = lastDelivery == nil ? "fallback" : "partial"
+                if let delivery = lastDelivery { finish(delivery) }
+                else { save(.paste(original)) { finish(self.paste ? "history" : "stdout") } }
+            }
         }
     }
     private func noSpeechDetected(id: UInt64) {
