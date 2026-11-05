@@ -157,10 +157,14 @@ enum Paste {
         }
         func paste() {
             switch action {
-            case .switchThread(let position):
+            case .switchThread, .nextThread:
                 Task { @MainActor in
-                    guard isCurrent(), check() == nil, let field = originalField,
-                          let selected = await field.switchThread(position: position, listed: listedThreads, isCurrent: isCurrent) else {
+                    guard isCurrent(), check() == nil, let field = originalField else { completion("history", .t3Unavailable); return }
+                    let selected: FocusedInput?
+                    if case .switchThread(let position) = action {
+                        selected = await field.switchThread(position: position, listed: listedThreads, isCurrent: isCurrent)
+                    } else { selected = await field.nextThread(isCurrent: isCurrent) }
+                    guard let selected else {
                         completion("history", .t3Unavailable); return
                     }
                     onNewField?(selected)

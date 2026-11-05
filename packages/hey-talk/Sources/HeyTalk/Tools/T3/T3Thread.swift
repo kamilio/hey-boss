@@ -46,6 +46,19 @@ extension FocusedInput {
     }
 
     @MainActor
+    func nextThread(isCurrent: () -> Bool) async -> FocusedInput? {
+        guard isCurrent(), isFocused(), canUseThreadActions, let window,
+              Paste.post(30, flags: [.maskCommand, .maskShift], to: app.processIdentifier) else { return nil }
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 40_000_000)
+            guard isCurrent(), app.isActive else { break }
+            if let field = Self.read(app: app), field.canUseThreadActions, field.document != document,
+               let destination = field.window, CFEqual(window, destination) { return field }
+        }
+        return nil
+    }
+
+    @MainActor
     func switchThread(position: Int, listed: [T3ThreadRow]?, isCurrent: () -> Bool) async -> FocusedInput? {
         guard isCurrent(), (1...9).contains(position), let rows = threadRows(), rows.count >= position else { return nil }
         let selected = rows[position - 1]

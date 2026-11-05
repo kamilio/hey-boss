@@ -34,6 +34,29 @@ final class CorrectionEvalTests: XCTestCase {
         }
     }
 
+    func testLiveNextChatWithInterleavedDictation() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
+        let correction = Correction()
+        let suite = "next-chat-replay-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = RecentCommands(defaults: defaults)
+        for (speech, navigate) in [("Go to the next chat.", true), ("The tests are passing.", false),
+                                  ("Go to the next.", true), ("Add a shortcut to open the next chat.", false),
+                                  ("Please take me to the following conversation.", true)] {
+            var actions: [CorrectionAction] = []
+            let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
+                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code"] }, package: .t3, recent: history.beginRecording(), perform: { action, next in
+                    actions.append(action)
+                    history.executed(action)
+                    next("done")
+                }) { continuation.resume(with: $0) }
+            }
+            if navigate { XCTAssertEqual(actions, [.nextThread], speech) }
+            else if actions.count != 1 || !actions.contains(where: { if case .paste = $0 { return true }; return false }) { XCTFail("Expected only dictation: \(speech)") }
+        }
+    }
+
     func testLiveSequentialTools() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_EVAL"] == "1" else { throw XCTSkip("Opt-in live Luna eval") }
         let correction = Correction()

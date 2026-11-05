@@ -2,6 +2,15 @@ import Foundation
 import TalkCore
 
 enum T3Tools {
+    static func directSwitch(_ transcript: String, recent: [[String]]) -> CorrectionAction? {
+        let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let match = words.wholeMatch(of: #/(?:(?:go|switch) to )?(?:the )?next(?: (chat|thread|conversation|one))?[.!]?/#) {
+            if let noun = match.1, noun != "one" { return .nextThread }
+            if recent.joined().contains(where: { $0 == "t3_next_thread" || $0.hasPrefix("t3_switch_thread ") }) { return .nextThread }
+        }
+        return ordinalSwitch(transcript)
+    }
+
     static func ordinalSwitch(_ transcript: String) -> CorrectionAction? {
         let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard let match = words.wholeMatch(of: #/(?:(?:now,? )?we can |let['’]s )?(?:go|switch) to the (\w+) (?:chat|thread|conversation)[.!]?/#),
@@ -18,7 +27,7 @@ enum T3Tools {
             tool("t3_new_thread", ["project": ["type": "string"], "text": ["type": "string"]]),
             tool("t3_list_threads"),
             tool("t3_switch_thread", ["position": ["type": "integer", "minimum": 1, "maximum": 9]]),
-            tool("t3_settle_thread"), tool("t3_pin_thread"), tool("t3_unpin_thread")
+            tool("t3_next_thread"), tool("t3_settle_thread"), tool("t3_pin_thread"), tool("t3_unpin_thread")
         ]
     }
 
@@ -38,6 +47,7 @@ enum T3Tools {
             guard let number = values["position"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
                   let position = values["position"] as? Int, (1...9).contains(position) else { throw TalkError("Choose a T3 thread from 1 to 9.") }
             return .switchThread(position)
+        case "t3_next_thread" where values.isEmpty: return .nextThread
         case "t3_settle_thread" where values.isEmpty: return .settleThread
         case "t3_pin_thread" where values.isEmpty: return .pinThread(true)
         case "t3_unpin_thread" where values.isEmpty: return .pinThread(false)
