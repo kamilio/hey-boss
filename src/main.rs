@@ -950,7 +950,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(
-            help.contains("private") && help.contains("never public"),
+            help.contains("private") && help.contains("--provider"),
             "{help}"
         );
         assert!(help.contains("Works offline"), "{help}");

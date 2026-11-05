@@ -49,6 +49,44 @@ pub(super) fn delete(app: &App, bytes: &[u8]) -> Result<Value> {
     Ok(json!({"ok":true}))
 }
 
+pub(super) fn providers() -> Result<Value> {
+    let providers: Vec<_> = pages::publishing::providers()?
+        .into_iter()
+        .map(|(name, p)| json!({"name":name,"audience":p.audience}))
+        .collect();
+    Ok(json!({"ok":true,"providers":providers}))
+}
+
+pub(super) fn share(app: &App, bytes: &[u8]) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Share {
+        name: String,
+        provider: String,
+        link: Option<String>,
+        auto_sync: bool,
+    }
+    let request: Share = serde_json::from_slice(bytes)?;
+    let page = pages::publishing::share(
+        &database(app)?,
+        &request.name,
+        &request.provider,
+        request.link.as_deref(),
+        request.auto_sync,
+    )?;
+    Ok(json!({"ok":true,"page":page}))
+}
+
+pub(super) fn sync(app: &App, bytes: &[u8]) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Sync {
+        name: String,
+    }
+    let request: Sync = serde_json::from_slice(bytes)?;
+    Ok(json!({"ok":true,"page":pages::publishing::sync(&database(app)?, &request.name)?}))
+}
+
 fn file(app: &App, url: &str) -> Result<pages::Content> {
     let path = url.split('?').next().unwrap_or(url);
     let mut parts = path

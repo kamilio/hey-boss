@@ -1247,7 +1247,7 @@ Build and test with `cargo build --locked -p hey-proxy` and
 `cargo test --locked -p hey-proxy`. Proxy rollouts carry the workspace source and
 its single lockfile, and compile only `hey-proxy` on the destination architecture.
 
-## Private published pages
+## Published pages
 
 Run `hey-boss pages publish ./report.html --name weekly-report` or publish a directory
 containing `index.html`. Files replicate across your private fleet and open under
@@ -1255,4 +1255,8 @@ containing `index.html`. Files replicate across your private fleet and open unde
 iframe. Publishing works offline; copies update when machines reconnect.
 Use `hey-boss pages download weekly-report --output ./weekly-report` to restore
 files, or `hey-boss pages delete weekly-report` to remove web access.
+Configure external CLIs in `~/.hey-boss/publishing.yaml`, then use
+`hey-boss pages share weekly-report --provider claude`. Saved links update on
+subsequent publications, with sync status and retry controls in the library.
+The Claude provider uses organization sharing by default.
 See [publishing](docs/publishing.md) for limits, synchronization, and deletion semantics.

@@ -460,6 +460,13 @@ fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletio
     assert_eq!(client.get(format!("{base}/api/pages")).header("Origin","null").send().unwrap().status(),403);
     let page: Value = client.get(format!("{base}/api/pages?name=report")).send().unwrap().json().unwrap();
     assert!(page["page"]["stored_size"].as_u64().unwrap()>0);
+    assert_eq!(page["page"]["publications"], json!([]));
+    for action in ["share", "sync"] {
+        assert_eq!(client.post(format!("{base}/api/pages/{action}")).json(&json!({"name":"report"})).send().unwrap().status(),403);
+        assert_eq!(client.post(format!("{base}/api/pages/{action}")).header("X-Hey-Boss-CSRF",&fixture.app.token).header("Origin","https://untrusted.example").json(&json!({"name":"report"})).send().unwrap().status(),403);
+    }
+    let synced: Value = client.post(format!("{base}/api/pages/sync")).header("X-Hey-Boss-CSRF",&fixture.app.token).json(&json!({"name":"report"})).send().unwrap().json().unwrap();
+    assert_eq!(synced["ok"], true);
     crate::pages::publish(&database, &source, "keep").unwrap();
     let path = page["content_url"].as_str().unwrap();
     let response = client.get(format!("{base}{path}")).header("Origin","null").header("Sec-Fetch-Site","cross-site").send().unwrap();
