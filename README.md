@@ -426,7 +426,10 @@ Sol starts in `~/Workspace/root`. To change this, set `conversation.root` in `~/
 ```yaml
 conversation:
   root: ~/Workspace/root
+  shell: /bin/zsh
 ```
+
+Commands use your account’s login shell and load its interactive startup files, so tools, aliases, and functions from your terminal are available. `conversation.shell` is optional; set it to an absolute shell path to override your account’s shell.
 
 Desktop builds require Node 22+ and npm. They fetch Poe Agent directly from [Poe Code on GitHub](https://github.com/poe-platform/poe-code), build it from main, and bundle its runtime with the app. No published package is needed. The installed revision stays stable until the next desktop build; `hey-boss upgrade --force` refreshes it even when the app source has not changed.
 

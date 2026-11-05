@@ -3,6 +3,7 @@ import {mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink} from 'node:fs/pr
 import {resolve, join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
+import {setTimeout as delay} from 'node:timers/promises';
 import {createInterface} from 'node:readline';
 
 const {createConversation, conversationRoot, interruptedHistory} = await import(pathToFileURL(resolve(process.argv[2], 'conversation-agent.mjs')));
@@ -60,13 +61,38 @@ try {
   console.log('PASS real Poe loop: regular shell, batch failure isolation, root config, AGENTS.md, lazy skills, history/resume, file permissions');
   const tool = (name, args) => [{type: 'function_call', id: 'fc_test', call_id: 'call_test', name, arguments: JSON.stringify(args)}];
   const reply = text => [{type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{type: 'output_text', text, annotations: []}]}];
+  // A GUI launch has a sparse PATH. Login and interactive startup files must
+  // supply the same commands and functions as the user's terminal.
+  const shellHome = join(root, 'shell-home');
+  await mkdir(shellHome);
+  await writeFile(join(shellHome, '.zprofile'), 'export CONVERSATION_LOGIN_READY=yes\n');
+  await writeFile(join(shellHome, '.zshrc'), 'wire_fixture() { printf "terminal-%s" "$CONVERSATION_LOGIN_READY"; }\n');
+  await writeFile(join(root, '.hey-boss/config.yaml'), 'conversation:\n  root: ~/work\n  shell: /bin/zsh\n');
+  const oldZdotdir = process.env.ZDOTDIR, oldPath = process.env.PATH;
+  process.env.ZDOTDIR = shellHome; process.env.PATH = '/usr/bin:/bin';
+  try {
+    const terminal = await createConversation({home: root, statePath: join(root, 'shell.json'), emit: e => events.push(e), fetchImpl: fakeFetch});
+    planned = [tool('shell', {command: `wire_fixture; printf '%s' ' quoted $HOME; $(false)'`, description: 'Checking terminal commands.'}), reply('Ready.')];
+    await terminal({turn: 'Check the terminal.'}, new AbortController().signal);
+    assert.equal(events.findLast(e => e.ToolCompleted).ToolCompleted.output.aggregatedOutput, 'terminal-yes quoted $HOME; $(false)');
+  } finally {
+    if (oldZdotdir === undefined) delete process.env.ZDOTDIR; else process.env.ZDOTDIR = oldZdotdir;
+    process.env.PATH = oldPath;
+  }
+  console.log('PASS configured login shell loads terminal startup files and preserves command quoting');
   planned = [tool('batch', {commands: [{command: 'touch must-not-run', description: 'Creating a file.'}, {command: 'true'}]}), reply('Invalid description.')];
   await run({turn: 'Invalid batch.'}, new AbortController().signal);
   await assert.rejects(stat(join(root, 'work/must-not-run')), {code: 'ENOENT'});
   console.log('PASS required descriptions: reject the whole invalid batch before starting commands');
   const controller = new AbortController();
   const cancel = await createConversation({home: root, statePath: join(root, 'cancel.json'), fetchImpl: fakeFetch,
-    emit: event => { if (event.ToolStarted) setTimeout(() => controller.abort(), 200); }});
+    emit: event => { if (event.ToolStarted) void (async () => {
+      for (let i = 0; i < 100; i++) {
+        if (await stat(join(root, 'work/waiting')).catch(() => null)) break;
+        await delay(20);
+      }
+      controller.abort();
+    })(); }});
   planned = [tool('shell', {command: 'printf started > waiting; sleep 30; printf orphan > orphan', description: 'Waiting for a result.'})];
   const before = Date.now();
   await assert.rejects(cancel({turn: 'Start then cancel.'}, controller.signal));

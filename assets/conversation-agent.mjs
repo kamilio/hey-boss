@@ -1,5 +1,5 @@
 import {readFile, mkdir, open, rename, realpath} from 'node:fs/promises';
-import {homedir} from 'node:os';
+import {homedir, userInfo} from 'node:os';
 import {dirname, isAbsolute, join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
@@ -21,6 +21,16 @@ export async function conversationRoot(home) {
   return root;
 }
 
+export async function conversationShell(home) {
+  const config = parseYaml(await optionalFile(join(home, '.hey-boss/config.yaml')) ??
+    await optionalFile(join(home, '.hey-boss/config.json')) ?? '{}');
+  const shell = config?.conversation?.shell ?? userInfo().shell ?? process.env.SHELL ?? '/bin/sh';
+  if (typeof shell !== 'string' || !isAbsolute(shell)) throw new Error('conversation.shell must be an absolute path.');
+  return shell;
+}
+
+const shellQuote = value => "'" + value.replaceAll("'", "'\\''") + "'";
+
 // A saved call may have changed files even if the app stopped before its result arrived.
 // Preserve that call, but never execute it again when reopening the conversation.
 export function interruptedHistory(messages) {
@@ -33,6 +43,7 @@ export function interruptedHistory(messages) {
 
 export async function createConversation({home = homedir(), statePath, emit, fetchImpl = fetch}) {
   const cwd = await conversationRoot(home);
+  const loginShell = await conversationShell(home);
   await mkdir(cwd, {recursive: true});
   await mkdir(dirname(statePath), {recursive: true, mode: 0o700});
   const base = (await readFile(new URL('./conversation.md', import.meta.url), 'utf8')).trim();
@@ -63,7 +74,10 @@ export async function createConversation({home = homedir(), statePath, emit, fet
       const id = randomUUID();
       emit({ToolStarted: {id, input: args}});
       try {
-        const result = await execute.call({command: args.command}, ctx);
+        // Interactive shells otherwise ignore TERM and can launch jobs in new
+        // process groups, escaping the plugin's cancellation of the command.
+        const script = `set +m; trap 'exit 143' TERM;\n${args.command}`;
+        const result = await execute.call({command: `exec ${shellQuote(loginShell)} -ilc ${shellQuote(script)}`}, ctx);
         emit({ToolCompleted: {id, output: {...args, aggregatedOutput: result}, failed: false}});
         return result;
       } catch (error) {
