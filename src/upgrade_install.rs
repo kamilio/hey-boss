@@ -198,6 +198,14 @@ fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn proxy_changed(staged: &Path, destinations: &[PathBuf]) -> bool {
+    let staged_id = installed_id(staged);
+    destinations
+        .iter()
+        .filter(|path| path.file_name() == staged.file_name())
+        .any(|path| staged_id.is_none() || installed_id(path) != staged_id)
+}
+
 pub(super) fn publish(
     snapshot: &Path,
     binary: &Path,
@@ -342,6 +350,9 @@ fn publish_to(
         };
         companion_backups.push((destination, saved));
     }
+    let restart_proxy =
+        proxy_home.is_some() && proxy_changed(&built.with_file_name("hey-proxy"), companion_bins);
+    let mut proxy_refresh_attempted = false;
     let mut replaced_app = false;
     let mut replaced_binary = false;
     let result = (|| -> io::Result<()> {
@@ -408,8 +419,9 @@ fn publish_to(
             refresh_shared_api(binary, companion, &home()?)?;
         }
         if let Some(proxy_home) = proxy_home
-            && companion_bins.contains(&binary.with_file_name("hey-proxy"))
+            && restart_proxy
         {
+            proxy_refresh_attempted = true;
             refresh_proxy(
                 Path::new("/bin/launchctl"),
                 Path::new("systemctl"),
@@ -446,10 +458,7 @@ fn publish_to(
         {
             let _ = fs::remove_dir_all(adjacent);
         }
-        if replaced_binary
-            && let Some(proxy_home) = proxy_home
-            && companion_bins.contains(&binary.with_file_name("hey-proxy"))
-        {
+        if proxy_refresh_attempted && let Some(proxy_home) = proxy_home {
             let _ = refresh_proxy(
                 Path::new("/bin/launchctl"),
                 Path::new("systemctl"),
@@ -497,6 +506,31 @@ mod tests {
                 ),
             }
         }
+    }
+    #[test]
+    fn proxy_refresh_depends_on_proxy_build_in_every_install_location() {
+        let temp = Temp::new().unwrap();
+        let built = temp.0.join("staged/hey-proxy");
+        let paths = vec![
+            temp.0.join("bin/hey-gh"),
+            temp.0.join("cargo/hey-proxy"),
+            temp.0.join("local/hey-proxy"),
+        ];
+        script(&built, "echo 'hey-proxy (build 0123456789abcdef)'");
+        for path in &paths[1..] {
+            // Different bundle bytes, identical service code.
+            script(
+                path,
+                "echo 'hey-proxy (build 0123456789abcdef)' # previous bundle",
+            );
+        }
+        assert!(!proxy_changed(&built, &paths));
+        for version in ["(build 1123456789abcdef)", "0.1.0"] {
+            script(&paths[2], &format!("echo 'hey-proxy {version}'"));
+            assert!(proxy_changed(&built, &paths));
+        }
+        fs::remove_file(&paths[2]).unwrap();
+        assert!(proxy_changed(&built, &paths));
     }
     #[test]
     fn proxy_upgrade_only_restarts_managed_service() {
