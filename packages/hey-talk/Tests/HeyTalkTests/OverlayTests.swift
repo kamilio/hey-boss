@@ -139,6 +139,13 @@ final class OverlayTests: XCTestCase {
         wait(for: [tick], timeout: 1)
         XCTAssertGreaterThan(rim.strokeEnd, initial)
         XCTAssertLessThan(rim.strokeEnd, 1)
+        let beforeEstimate = rim.strokeEnd
+        overlay.processing(audioSeconds: 240, correction: true)
+        XCTAssertGreaterThanOrEqual(rim.strokeEnd, beforeEstimate, "Receiving the audio duration must not restart the progress animation")
+        let updated = expectation(description: "updated estimate has ticked")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { updated.fulfill() }
+        wait(for: [updated], timeout: 1)
+        XCTAssertGreaterThanOrEqual(rim.strokeEnd, beforeEstimate)
         overlay.update(.idle)
         XCTAssertTrue(rim.isHidden)
         XCTAssertNil(rim.animationKeys())
@@ -338,6 +345,46 @@ final class OverlayTests: XCTestCase {
         overlay.update(.recording)
         XCTAssertFalse(wave.isHidden)
         XCTAssertGreaterThan(try XCTUnwrap(glow.path).boundingBox.width, try XCTUnwrap(outline).width)
+    }
+
+    @MainActor func testVisibleDrawerHasRoomToAnimateClosed() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("Requires motion") }
+        let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        overlay.show(true)
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let compact = panel.frame.size
+        overlay.error("Reconnect your microphone and try again.")
+        try await Task.sleep(for: .milliseconds(350))
+        let open = panel.frame.size
+        XCTAssertGreaterThan(open.height, compact.height)
+        overlay.update(.listening)
+        XCTAssertEqual(panel.frame.size, open, "Shrinking the window immediately clips the closing glass")
+        try await Task.sleep(for: .milliseconds(420))
+        XCTAssertEqual(panel.frame.size, compact)
+    }
+
+    @MainActor func testVisibleWaveformMovesBetweenMicrophoneSamples() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("Requires motion") }
+        let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        overlay.show(true)
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func waveform(_ view: NSView) -> NSView? {
+            view.identifier?.rawValue == "recording-waveform" ? view : view.subviews.lazy.compactMap(waveform).first
+        }
+        let bar = try XCTUnwrap(panel.contentView.flatMap(waveform)?.layer?.sublayers?.last)
+        var samples = 0
+        overlay.level = { samples += 1; return samples.isMultiple(of: 2) ? 0 : 1 }
+        overlay.update(.recording)
+        var intermediate = Set<Int>()
+        for _ in 0..<50 {
+            try await Task.sleep(for: .milliseconds(10))
+            if let h = bar.presentation()?.bounds.height, h > 4.2, h < 21.8 { intermediate.insert(Int(h * 10)) }
+        }
+        XCTAssertGreaterThan(intermediate.count, 3, "Bars should pass through intermediate heights between the quiet and loud samples")
     }
 
     @MainActor func testWaveformIsVisibleAsSoonAsRecordingIsReady() throws {
