@@ -54,7 +54,7 @@ mod ordering;
 mod pr_monitor;
 pub(crate) use pr_monitor::TrackedPullRequest;
 #[path = "project_names.rs"]
-mod project_names;
+pub(super) mod project_names;
 #[path = "ready.rs"]
 mod ready;
 #[path = "status.rs"]
