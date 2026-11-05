@@ -154,6 +154,10 @@ pub(in crate::fleet::native) fn status(ctx: &Context) -> Result<Value> {
         return Ok(json!({"mode":"legacy"}));
     }
     let mut status=replica::rows(&db,"SELECT origin,active,slot,exported,projected,(SELECT count(*) FROM distributed_outbox WHERE clock>m.exported) AS pending_local,(SELECT count(*) FROM distributed_dirty) AS pending_projection,(SELECT count(*) FROM distributed_rejections) AS conflicts,(SELECT count(*) FROM distributed_baseline WHERE complete=0) AS baseline_remaining FROM distributed_meta m WHERE id=1",&[])?.remove(0);
+    let pending: i64 = db.query_row("SELECT count(*) FROM operational_event_outbox", [], |r| {
+        r.get(0)
+    })?;
+    status["pending_local"] = json!(status["pending_local"].as_i64().unwrap_or(0) + pending);
     status["mode"] = json!(if status["active"] == 1 {
         "distributed"
     } else {

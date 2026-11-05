@@ -241,6 +241,7 @@ impl Store {
                     tx.execute("UPDATE issues SET assignee=?3,version=version+1,updated_at=?4 WHERE project_id=?1 AND number=?2",params![run.snapshot.project_id,run.task_number,actor,report.started_at])?;
                 }
                 run = get_run(&tx, &run.id)?;
+                crate::event_log::producers::job(&tx, &run)?;
                 progress(&tx, &run, "running", None, started_at)?;
             }
             if let Some(log) = &report.log {
@@ -280,6 +281,7 @@ fn complete(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: 
         "UPDATE scheduled_job_runs SET state=?2,reason=?3,finished_at=?4 WHERE id=?1",
         params![run.id, state, reason, now],
     )?;
+    crate::event_log::producers::job(db, &get_run(db, &run.id)?)?;
     if run.task_number.is_none() {
         return Ok(());
     }
@@ -336,8 +338,11 @@ impl Store {
         for node in nodes {
             identifier(node, "machine node ID", 128)?;
             let child = super::super::super::worker::random_id()?;
-            tx.execute("INSERT OR IGNORE INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,created_at,snapshot,parent_run_id,target_machine) SELECT ?2,job_id,job_revision,project_id,scheduled_at,trigger,request_key,'pending',created_at,snapshot,id,?3 FROM scheduled_job_runs WHERE id=?1",params![id,child,node])?;
-            tx.execute("INSERT OR IGNORE INTO scheduled_job_owners(run_id,generation) SELECT id,1 FROM scheduled_job_runs WHERE id=?1",[child])?;
+            let inserted = tx.execute("INSERT OR IGNORE INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,created_at,snapshot,parent_run_id,target_machine) SELECT ?2,job_id,job_revision,project_id,scheduled_at,trigger,request_key,'pending',created_at,snapshot,id,?3 FROM scheduled_job_runs WHERE id=?1",params![id,child,node])?;
+            tx.execute("INSERT OR IGNORE INTO scheduled_job_owners(run_id,generation) SELECT id,1 FROM scheduled_job_runs WHERE id=?1",[&child])?;
+            if inserted > 0 {
+                crate::event_log::producers::job(&tx, &get_run(&tx, &child)?)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -348,6 +353,7 @@ impl Store {
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
         let roots=tx.query_collect("SELECT id FROM scheduled_job_runs WHERE parent_run_id IS NULL AND state IN('pending','running') AND (json_extract(snapshot,'$.definition.all_machines')=1 OR json_extract(snapshot,'$.definition.each_machine')=1)",[],|r|r.get::<_,String>(0))?;
         for id in roots {
+            let previous = get_run(&tx, &id)?;
             let children = tx.query_collect(
                 &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE parent_run_id=?1"),
                 [&id],
@@ -381,6 +387,10 @@ impl Store {
                 tx.execute("UPDATE scheduled_job_runs SET state=?2,reason=?3,started_at=?4,finished_at=?5 WHERE id=?1",params![id,state,reason,started,finished])?;
             } else {
                 tx.execute("UPDATE scheduled_job_runs SET state=?2,reason=?3,started_at=?4 WHERE id=?1 AND (state<>?2 OR reason IS NOT ?3 OR started_at IS NOT ?4)",params![id,if started.is_some(){"running"}else{"pending"},reason,started])?;
+            }
+            let current = get_run(&tx, &id)?;
+            if previous.state != current.state {
+                crate::event_log::producers::job(&tx, &current)?;
             }
         }
         tx.commit()?;

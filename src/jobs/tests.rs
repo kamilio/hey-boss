@@ -4,6 +4,56 @@ const ORIGINAL: &str = include_str!("fixtures/original.md");
 const REVISED: &str = include_str!("fixtures/revised.md");
 
 #[test]
+fn operational_job_events_follow_idempotent_transitions_and_overlap() {
+    let mut f = Fixture::new();
+    f.create("events", 1000);
+    let occurrence = f
+        .store
+        .manual_job("named:Jobs", "events", "one", 2000)
+        .unwrap();
+    let run = f.store.enqueue_job(&occurrence).unwrap();
+    f.store.enqueue_job(&occurrence).unwrap();
+    f.store
+        .start_job_run(&run.id, "machine", "session", 3000)
+        .unwrap();
+    f.store
+        .start_job_run(&run.id, "machine", "session", 3000)
+        .unwrap();
+    let overlap = f
+        .store
+        .manual_job("named:Jobs", "events", "two", 4000)
+        .unwrap();
+    f.store.enqueue_job(&overlap).unwrap();
+    f.store
+        .finish_job_run(
+            &run.id,
+            "failed",
+            Some("No space left on device: private"),
+            5000,
+        )
+        .unwrap();
+    f.store
+        .finish_job_run(
+            &run.id,
+            "failed",
+            Some("No space left on device: private"),
+            5000,
+        )
+        .unwrap();
+    let page = crate::event_log::read(&f.store.db, &Default::default(), None, 100).unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .map(|r| r.event.kind.as_str())
+            .collect::<Vec<_>>(),
+        ["job.queued", "job.started", "job.skipped", "job.finished"]
+    );
+    assert_eq!(page.events[3].event.data["state"], "failed");
+    assert_eq!(page.events[3].event.data["error_code"], "disk_full");
+    assert!(!serde_json::to_string(&page).unwrap().contains("private"));
+}
+
+#[test]
 fn exec_submission_preserves_model_and_is_idempotent() {
     let mut f = Fixture::new();
     let value = json!({"command":"submit","id":"exec-fixture","execution":{

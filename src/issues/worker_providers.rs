@@ -233,8 +233,20 @@ pub(super) fn run(
                     store.worker_event(&job.id, &format!("{name}: {input}"), None)?;
                     record(&mut transcript, &event)?;
                 }
-                Event::ToolCompleted { .. } => record(&mut transcript, &event)?,
+                Event::ToolCompleted { id, output, failed } => {
+                    record(&mut transcript, &event)?;
+                    if *failed {
+                        store.worker_observation(job, "agent.tool_failed", id,
+                            json!({"tool_call_id":id,"error_code":crate::event_log::producers::error_code(&output.to_string())}))?;
+                    }
+                }
                 Event::Approval { id, payload, .. } => {
+                    store.worker_observation(
+                        job,
+                        "agent.input_requested",
+                        id,
+                        json!({"request_id":id,"kind":"approval"}),
+                    )?;
                     let request =
                         json!({"id":id,"method":"agent/tool","params":payload["request"]});
                     if !approvals.start(&request, job, None)? {
@@ -243,6 +255,12 @@ pub(super) fn run(
                     store.worker_event(&job.id, "Waiting for approval in Inbox", None)?;
                 }
                 Event::Input { id, payload } => {
+                    store.worker_observation(
+                        job,
+                        "agent.input_requested",
+                        id,
+                        json!({"request_id":id,"kind":"input"}),
+                    )?;
                     let request = if provider == Provider::Claude
                         && payload["request"]["tool_name"] == "AskUserQuestion"
                     {

@@ -8,6 +8,7 @@ mod cli_request;
 mod companion;
 mod config_cli;
 mod error_cli;
+mod event_cli;
 mod exec_cli;
 mod health_cli;
 mod issue_attachments;
@@ -181,6 +182,8 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 enum Command {
     /// Local error ingestion and frequency-ranked diagnostics.
     Errors(error_cli::Options),
+    /// Durable fleet events: inspect history or follow newly arriving facts.
+    Events(event_cli::Options),
     /// Local encrypted records, explicit machine grants, and metadata inventory.
     Secrets(secrets_cli::Options),
     /// Run the separately installed proxy (all arguments pass through to hey-proxy).
@@ -624,6 +627,17 @@ fn run() -> std::io::Result<()> {
         Command::Errors(options) => {
             if let Err(error) = error_cli::run(options) {
                 eprintln!("hey-boss errors: {error}");
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
+        Command::Events(options) => {
+            if let Err(error) = event_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss events: {error}");
+                }
                 std::process::exit(error.exit_code());
             }
             return Ok(());

@@ -936,6 +936,12 @@ impl Codex {
             .rev()
             .find(|(id, _)| Some(id.as_str()) == value["params"]["itemId"].as_str())
             .map(|(_, item)| item);
+        store.worker_observation(
+            job,
+            "agent.input_requested",
+            &value["id"].to_string(),
+            json!({"request_id":value["id"],"kind":value["method"]}),
+        )?;
         match self.approvals.start(&value, job, preview) {
             Ok(true) => {
                 store.worker_event(
@@ -1684,6 +1690,11 @@ fn run_thread(
                 ));
             }
             "item/completed" if params["item"]["type"] != "agentMessage" => {
+                if let Some((id, data)) =
+                    crate::event_log::producers::codex_tool_failure(&params["item"])
+                {
+                    store.worker_observation(job, "agent.tool_failed", id, data)?;
+                }
                 if let Some(detail) = super::worker_infrastructure::tool_failure(&params["item"]) {
                     store.worker_event(&job.id, "Infrastructure unavailable; preserving continuation state if this attempt cannot finish", None)?;
                     c.infrastructure_outage = Some(detail);

@@ -454,7 +454,9 @@ fn remember_pages(db: &Connection, manifest: &Manifest) -> Result<()> {
 }
 
 pub(super) fn revision(payload: &str) -> Result<Option<Revision>> {
-    if payload.is_empty() { return Ok(None); }
+    if payload.is_empty() {
+        return Ok(None);
+    }
     let header: Value = serde_json::from_str(payload)?;
     if header["protocol"] == 1 {
         // Retained for recovery, but superseded by the version-two baseline.
@@ -463,7 +465,10 @@ pub(super) fn revision(payload: &str) -> Result<Option<Revision>> {
     if header["protocol"] != PROTOCOL {
         return Err(replica::invalid("Unsupported distributed protocol"));
     }
-    if header["kind"] == hey_boss_secrets::KIND {
+    if header["kind"] == hey_boss_secrets::KIND
+        || header["kind"] == crate::event_log::KIND
+        || header["kind"] == crate::event_log::RETIRED
+    {
         // The secret projector authenticates these independently. Never project
         // secret metadata or ciphertext into issue rows.
         return Ok(None);

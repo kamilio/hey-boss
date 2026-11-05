@@ -887,6 +887,7 @@ impl Store {
             )?;
         }
         let run = get_run(&tx, &id)?;
+        crate::event_log::producers::job(&tx, &run)?;
         tx.commit()?;
         Ok(run)
     }
@@ -916,6 +917,7 @@ impl Store {
         }
         tx.execute("UPDATE scheduled_job_runs SET state='running',machine=?2,session_id=?3,started_at=?4 WHERE id=?1",params![id,machine,session,now])?;
         let run = get_run(&tx, id)?;
+        crate::event_log::producers::job(&tx, &run)?;
         tx.commit()?;
         Ok(run)
     }
@@ -950,6 +952,7 @@ impl Store {
             params![id, state, reason, now],
         )?;
         let run = get_run(&tx, id)?;
+        crate::event_log::producers::job(&tx, &run)?;
         tx.commit()?;
         Ok(run)
     }

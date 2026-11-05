@@ -37,6 +37,43 @@ pub struct Inbox {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn operational_bridge_retries_without_replicating_raw_error_evidence() {
+        let mut inbox = Inbox::memory();
+        let root = std::env::temp_dir().join(format!(
+            "error-bridge-{}",
+            crate::issues::worker::random_id().unwrap()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let db = crate::event_log::open(&root.join("issues.db")).unwrap();
+        inbox.enable("project", true).unwrap();
+        let event = event("one", "No space left on device: private", now());
+        inbox.ingest("project", &[event.clone()], now()).unwrap();
+        inbox.ingest("project", &[event], now()).unwrap();
+        let saved: (String, String) = inbox
+            .db
+            .query_row("SELECT id,event FROM operational_outbox", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(inbox.publish_events(&db).unwrap(), 1);
+        // Crash after publishing but before the source acknowledgement.
+        inbox
+            .db
+            .execute(
+                "INSERT INTO operational_outbox VALUES(?1,?2)",
+                params![saved.0, saved.1],
+            )
+            .unwrap();
+        assert_eq!(inbox.publish_events(&db).unwrap(), 1);
+        assert_eq!(inbox.publish_events(&db).unwrap(), 0);
+        let page = crate::event_log::read(&db, &Default::default(), None, 10).unwrap();
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].event.kind, "error.observed");
+        assert_eq!(page.events[0].event.data["error_code"], "disk_full");
+        assert!(!serde_json::to_string(&page).unwrap().contains("private"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn event(id: &str, message: &str, time: i64) -> Event {
         Event {
             source: "worker".into(),
@@ -268,6 +305,7 @@ CREATE TABLE IF NOT EXISTS error_groups(project TEXT NOT NULL,id TEXT NOT NULL,t
 CREATE TABLE IF NOT EXISTS error_events(project TEXT NOT NULL,source TEXT NOT NULL,event_id TEXT NOT NULL,group_id TEXT NOT NULL,time INTEGER NOT NULL,count INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(project,source,event_id));
 CREATE INDEX IF NOT EXISTS error_event_frequency ON error_events(project,time,group_id);
 CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,time DESC);")?;
+        db.execute_batch("CREATE TABLE IF NOT EXISTS operational_outbox(id TEXT PRIMARY KEY,event TEXT NOT NULL);")?;
         db.execute_batch(
             "CREATE INDEX IF NOT EXISTS error_event_retention ON error_events(time);",
         )?;
@@ -322,6 +360,7 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
                 ));
             }
         }
+        let origin = crate::issues::identity::machine()?;
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -349,6 +388,29 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
                 ],
             )?;
             if inserted > 0 {
+                let event = crate::event_log::Event {
+                    id: format!(
+                        "error:{}",
+                        hash(&serde_json::to_string(&(
+                            &origin,
+                            project,
+                            &e.source,
+                            &e.event_id
+                        ))?)
+                    ),
+                    kind: "error.observed".into(),
+                    version: 1,
+                    origin: origin.clone(),
+                    time: e.timestamp,
+                    project: Some(project.into()),
+                    subject: group.clone(),
+                    data: json!({"source":e.source,"count":e.count,"group_id":group,
+                        "error_code":crate::event_log::producers::error_code(&e.message)}),
+                };
+                tx.execute(
+                    "INSERT OR IGNORE INTO operational_outbox VALUES(?1,?2)",
+                    params![event.id, serde_json::to_string(&event)?],
+                )?;
                 tx.execute("INSERT INTO error_groups(project,id,title,total) VALUES(?1,?2,?3,?4) ON CONFLICT(project,id) DO UPDATE SET total=total+excluded.total",params![project,group,e.message.lines().next().unwrap_or(&e.message),e.count])?;
                 accepted += 1;
                 journal.push(json!({"project":project,"event":e}));
@@ -369,6 +431,21 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         }
         tx.commit()?;
         Ok(json!({"ok":true,"accepted":accepted,"duplicates":events.len()-accepted}))
+    }
+    /// At-least-once bridge between two local databases. A crash after append
+    /// retries the exact saved event, including its identity and timestamp.
+    pub(crate) fn publish_events(&self, db: &crate::database::Connection) -> Result<usize> {
+        let rows = self
+            .db
+            .prepare("SELECT id,event FROM operational_outbox ORDER BY rowid LIMIT 128")?
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, event) in &rows {
+            crate::event_log::append(db, &serde_json::from_str(event)?)?;
+            self.db
+                .execute("DELETE FROM operational_outbox WHERE id=?1", [id])?;
+        }
+        Ok(rows.len())
     }
     pub fn list(&self, project: &str, now: i64) -> Result<Value> {
         // Keep the ranking and chart on one read snapshot while collectors ingest.

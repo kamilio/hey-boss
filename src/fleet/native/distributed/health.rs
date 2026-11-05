@@ -223,6 +223,10 @@ pub(super) fn prepared(
 ) -> Result<()> {
     let mut sample=replica::rows(db,"SELECT active,exported,projected,(SELECT count(*) FROM distributed_outbox WHERE clock>m.exported) AS pending_local,(SELECT count(*) FROM distributed_dirty) AS pending_projection,(SELECT count(*) FROM distributed_rejections) AS conflicts,(SELECT count(*) FROM distributed_baseline WHERE complete=0) AS baseline_remaining,(SELECT count(*) FROM distributed_archives WHERE complete=0) AS pending_archives FROM distributed_meta m WHERE id=1",&[])?.remove(0);
     sample["journal_head"] = json!(engine.head()?);
+    let pending: i64 = db.query_row("SELECT count(*) FROM operational_event_outbox", [], |r| {
+        r.get(0)
+    })?;
+    sample["pending_local"] = json!(sample["pending_local"].as_i64().unwrap_or(0) + pending);
     sample["pending_reservations"] = json!(crate::issues::allocations::pending_reservations(db)?);
     sample["conflicting_attempts"] = json!(crate::issues::allocations::conflicting_attempts(db)?);
     save(ctx, "distributed-health.json", sample)
