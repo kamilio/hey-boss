@@ -8279,13 +8279,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
-        let hadStream = !stream.isEmpty
-        if !stream.isEmpty { finishMessage(stream) }
         for index in activities.indices where activities[index].state == "Running" {
             activities[index].state = "Interrupted"; renderTool(activities[index])
         }
         let unfinishedWorkspace = directory != nil && answering && !turnDone && (folderTurnAccepted || lastMessage?.isEmpty == false)
-        let notice = failure ?? (hadStream || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
+        let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
         save()
         textFlush?.invalidate(); textFlush = nil
