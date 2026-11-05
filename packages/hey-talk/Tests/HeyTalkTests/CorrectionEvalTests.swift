@@ -8,7 +8,7 @@ final class CorrectionEvalTests: XCTestCase {
         let correction = Correction()
         func run(_ speech: String, context: String = "") async throws -> CorrectionAction {
             try await withCheckedThrowingContinuation { continuation in
-                correction.correct(speech, vocabulary: ["hey-boss"], appContext: context, threadActions: true) { continuation.resume(with: $0) }
+                correction.correct(speech, vocabulary: ["hey-boss"], appContext: context, threadActions: true, canClear: true) { continuation.resume(with: $0) }
             }
         }
         let spoken = "So start a new thread. And then I want to check whether the thinking of publish sites or pages is working."
@@ -22,8 +22,10 @@ final class CorrectionEvalTests: XCTestCase {
             let action = try await run(speech, context: "We were discussing project Atlas.")
             XCTAssertEqual(action, .newThread(project: project, text: ""))
         }
-        for speech in ["How do I start a new thread?", "Check the build."] {
-            let action = try await run(speech, context: "Start a new thread in hey-boss.")
+        let cleared = try await run("Please wipe this input.")
+        XCTAssertEqual(cleared, .clearInput)
+        for speech in ["How do I start a new thread?", "Add a button that clears the input.", "Check the build."] {
+            let action = try await run(speech, context: "Clear this input. Start a new thread in hey-boss.")
             guard case .paste = action else { XCTFail("Unexpected navigation for: \(speech)"); continue }
         }
     }

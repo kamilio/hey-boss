@@ -612,7 +612,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
         recordingHost = BrowserPage.host(in: target)
         targetName = target?.localizedName
-        if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && returnToField) {
+        if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && (returnToField || correctionSettings.enabled)) {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
             if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
@@ -727,7 +727,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 let started = ProcessInfo.processInfo.systemUptime
                 let field = self.autoTarget ?? self.startingInput
                 self.correction.correct(text, vocabulary: (try? Vocabulary().words()) ?? [], appContext: appContext,
-                                        threadActions: self.paste && field?.canUseThreadActions == true) { result in
+                                        threadActions: self.paste && field?.canUseThreadActions == true, canClear: self.paste && field != nil) { result in
                     guard self.session.generation == id, self.session.phase == .processing else { return }
                     var info: [String: Any] = ["elapsed_ms": (ProcessInfo.processInfo.systemUptime - started) * 1000,
                                              "context_ms": context?.milliseconds ?? 0, "context_characters": appContext?.count ?? 0]
@@ -792,7 +792,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 let needsField = t3 || self.returnToField
                 Paste.deliver(action, target: target, originalField: originalField, shouldPressEnter: submit, returnToField: self.returnToField ? originalField : nil,
                               targetStillFocused: {
-                                  originalField?.isFocused() ?? !needsField
+                                  (!needsField && focusedInput == nil) || (originalField?.isFocused() ?? !needsField)
                               }, onWait: (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = timer
                                   self.hotkey?.captureEscape(true)

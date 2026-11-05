@@ -81,6 +81,20 @@ final class CorrectionTests: XCTestCase {
         }
     }
 
+    func testClearInputRequiresEditableTargetAndNoArguments() throws {
+        for (eligible, args, succeeds) in [(true, "{}", true), (false, "{}", false), (true, #"{"text":"ignored"}"#, false)] {
+            let correction = client()
+            let item = ["type": "function_call", "name": "clear_input", "arguments": args]
+            let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
+            CorrectionProtocol.handle = { $0.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n") }
+            let done = expectation(description: "clear input")
+            correction.correct("Clear this field.", vocabulary: [], canClear: eligible) { result in
+                XCTAssertEqual(try? result.get(), succeeds ? .clearInput : nil); done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+        }
+    }
+
     func testHTTPFailureAndTimeoutDoNotReturnReplacementText() {
         let correction = client()
         for status in [429, 500, 0] {
