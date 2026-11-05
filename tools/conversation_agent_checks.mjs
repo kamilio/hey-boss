@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {mkdtemp, mkdir, readFile, writeFile, rm, stat} from 'node:fs/promises';
+import {mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink} from 'node:fs/promises';
 import {resolve, join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
@@ -89,7 +89,9 @@ try {
   const mock = join(root, 'provider.mjs');
   // Give the subprocess a deterministic provider without changing its production protocol.
   await writeFile(mock, 'let response = 10, planned; const requests = [];\nglobalThis.fetch = ' + fakeFetch.toString() + ';\n');
-  const child = spawn(process.execPath, ['--import', mock, resolve(process.argv[2], 'conversation-agent.mjs'), join(root, 'protocol.json')],
+  const entry = join(root, 'agent.mjs');
+  await symlink(resolve(process.argv[2], 'conversation-agent.mjs'), entry);
+  const child = spawn(process.execPath, ['--import', mock, entry, join(root, 'protocol.json')],
     {env: {...process.env, HOME: root}, stdio: ['pipe', 'pipe', 'inherit']});
   const exited = new Promise(resolve => child.on('close', resolve));
   const timeout = setTimeout(() => child.kill(), 10000);
@@ -106,5 +108,5 @@ try {
   clearTimeout(timeout);
   assert.equal(await exited, 0);
   assert.equal(completed, 2, 'The first command sent during initialization must be buffered');
-  console.log('PASS actual JSONL subprocess: immediate first message, second turn and clean EOF');
+  console.log('PASS actual JSONL subprocess: symlinked launch, immediate first message, second turn and clean EOF');
 } finally { await rm(root, {recursive: true, force: true}); }

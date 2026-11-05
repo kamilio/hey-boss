@@ -1,6 +1,6 @@
 // Build Poe Agent from GitHub source; no registry release is required.
 import {execFileSync} from 'node:child_process';
-import {copyFile, mkdir, readFile, writeFile} from 'node:fs/promises';
+import {copyFile, mkdir, readFile, writeFile, realpath} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -25,7 +25,7 @@ export async function bundle(source, destination) {
   await copyFile(join(source, 'LICENSE'), join(destination, 'poe-code-LICENSE'));
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
   const [destination, revision] = process.argv.slice(2);
   if (!destination || !/^[a-f0-9]{40}$/.test(revision ?? '')) throw new Error('Expected output directory and GitHub commit.');
   const source = join(homedir(), '.cache/hey-boss/poe-code-agent');
