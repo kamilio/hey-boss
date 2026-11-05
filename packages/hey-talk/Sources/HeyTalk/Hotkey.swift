@@ -71,6 +71,7 @@ final class Hotkey {
 enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
     case renameUnavailable = "rename_unavailable", newThreadUnavailable = "new_thread_unavailable"
+    case clearUnavailable = "clear_unavailable"
     case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
 
@@ -86,6 +87,7 @@ enum PasteBlockReason: String {
         let app = name.isEmpty ? "the original app" : name
         if pasted { return "Pasted in \(app). Press Enter there." }
         switch self {
+        case .clearUnavailable: return "Couldn’t clear the original field."
         case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
         case .renameUnavailable: return "Couldn’t finish renaming the thread. Open History for the title."
         case .accessibility: return "Text copied. Allow automatic paste."
@@ -115,6 +117,36 @@ enum Paste {
                 targetIsSelf: target?.processIdentifier == getpid(),
                 targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
                 ?? (targetStillFocused() ? nil : onWait == nil ? .unidentifiedField : .focusChanged)
+        }
+        if action == .clearInput {
+            Task { @MainActor in
+                guard let field = originalField, let target else { completion("history", .clearUnavailable); return }
+                func focused() -> AXUIElement? {
+                    guard isCurrent(), target.isActive, let input = FocusedInput.read(app: target, forAuto: false), input == field else { return nil }
+                    return input.element
+                }
+                guard let editor = focused(), let value = SpeechAX.value(editor, "AXValue") as? String else { completion("history", .clearUnavailable); return }
+                if value.isEmpty { completion("cleared", nil); return }
+                guard post(0, flags: .maskCommand, to: target.processIdentifier) else { completion("history", .clearUnavailable); return }
+                var deleted = false
+                for _ in 0..<20 {
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                    guard let editor = focused(), let contents = SpeechAX.value(editor, "AXValue") as? String else { break }
+                    // Chromium can expose a trailing newline outside its editable text.
+                    if deleted {
+                        if contents.isEmpty || (contents == "\n" && field.composerLabel != nil) { completion("cleared", nil); return }
+                    } else {
+                        guard contents == value else { break }
+                        guard let selected = SpeechAX.value(editor, "AXSelectedText") as? String,
+                              selected == contents || (selected + "\n" == contents && field.composerLabel != nil) else { continue }
+                        if selected.isEmpty { completion("cleared", nil); return }
+                        guard post(51, flags: [], to: target.processIdentifier) else { break }
+                        deleted = true
+                    }
+                }
+                completion("history", .clearUnavailable)
+            }
+            return
         }
         func paste() {
             if case .newThread(let project, let text) = action {

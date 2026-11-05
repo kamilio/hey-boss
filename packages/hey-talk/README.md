@@ -79,7 +79,8 @@ opens T3’s Rename thread action, and confirms the title without submitting a m
 Ask for a new thread in your own words. “Start a new thread and check whether publishing works”
 opens a thread in the current project and puts the request in its composer. Auto Submit
 controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
-Outside a T3 composer, or with `--no-paste`, only the paste result is available.
+In any recognized editable field, say “clear this input” to select and delete its contents without submitting.
+With `--no-paste`, only the paste result is available.
 
 Context is a spelling hint; the transcript takes priority. Hey Talk takes one
 background snapshot after the microphone is ready and uses it for correction even
@@ -87,7 +88,7 @@ if you change tabs before stopping. Recording never waits for context capture.
 Capture uses macOS Accessibility with a
 200 ms budget and an 8,000-character cap. It skips password fields, unrelated editors, controls, navigation trees, and
 clipped or off-screen text; cmux's rendered terminal viewport is included.
-Named regions and message headings separate the captured text into sections.
+The focused input is read before the rest of the window and has priority within the character cap. Named regions and message headings separate the captured text into sections.
 T3 and Slack capture keep conversations and the current input, excluding navigation
 and workspace status text. The focused input or message composer appears under **Current input**.
 Missing context does not block correction. File transcription never reads app context.

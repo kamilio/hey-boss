@@ -130,6 +130,22 @@ final class AppContextTests: XCTestCase {
         XCTAssertEqual(AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1, conversationOnly: true) { $0.attributes[$1] },
                        "## Conversation / Example (channel)\nPlease use ExampleKit.")
     }
+    func testFocusedInputSurvivesTraversalLimitAndIsNeverDuplicated() {
+        let draft = Node("AXTextArea", "Draft fixture")
+        draft.attributes["AXFocused"] = true
+        let busy = Node("AXWindow", frame: window, children: Array(repeating: Node("AXStaticText", "context"), count: 1600) + [draft])
+        for root in [busy, Node("AXWindow", frame: window, children: [draft])] {
+            let text = AppContext.visibleText(in: root, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1,
+                                             focusedInput: draft) { $0.attributes[$1] }
+            XCTAssertTrue(text?.hasSuffix("## Current input\nDraft fixture") == true)
+            XCTAssertEqual(text?.components(separatedBy: "Draft fixture").count, 2)
+            XCTAssertLessThanOrEqual(text?.count ?? 0, 8000)
+        }
+        draft.attributes["AXSubrole"] = "AXSecureTextField"
+        XCTAssertNil(AppContext.visibleText(in: draft, viewport: window, deadline: ProcessInfo.processInfo.systemUptime + 1,
+                                           focusedInput: draft) { $0.attributes[$1] })
+    }
+
     func testContextIsBoundedAndExpiredCaptureReturnsNothing() {
         let root = Node("AXWindow", frame: window, children: [Node("AXStaticText", String(repeating: "x", count: 9000)), Node("AXStaticText", "last visible words")])
         let text = capture(root)

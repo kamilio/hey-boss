@@ -19,11 +19,12 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
-    case paste(String), rename(String), newThread(project: String?, text: String)
+    case paste(String), rename(String), clearInput, newThread(project: String?, text: String)
 
     var text: String {
         switch self {
         case .paste(let text), .rename(let text): return text
+        case .clearInput: return "Clear input"
         case .newThread(let project, let text):
             if !text.isEmpty { return text }
             return project.map { "New thread in " + $0 } ?? "New thread"
@@ -43,7 +44,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -59,6 +60,7 @@ final class Correction {
                             "required": arguments, "additionalProperties": false]]
         }
         var tools = [try tool("paste", "text")]
+        if canClear { tools.append(try tool("clear_input")) }
         if threadActions {
             tools.append(try tool("rename_thread", "title"))
             tools.append(try tool("new_thread", "project", "text"))
@@ -82,7 +84,7 @@ final class Correction {
         return request
     }
 
-    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool) async throws -> CorrectionAction {
+    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool, canClear: Bool) async throws -> CorrectionAction {
         var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
             let data = Data(line.dropFirst(5).utf8)
@@ -97,6 +99,7 @@ final class Correction {
                       let arguments = item["arguments"] as? String,
                       let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String] else { throw TalkError("Invalid correction tool call.") }
                 switch item["name"] as? String {
+                case "clear_input" where canClear && values.isEmpty: action = .clearInput
                 case "paste" where values.count == 1:
                     guard let text = values["text"]?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
                     else { throw TalkError("Correction returned no text.") }
@@ -125,17 +128,17 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, threadActions: Bool = false, canClear: Bool = false, completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         task = Task { [session] in
             let result: Result<CorrectionAction, Error>
             do {
-                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, threadActions: threadActions)
+                let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, threadActions: threadActions, canClear: canClear)
                 let (bytes, response) = try await session.bytes(for: request)
                 guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                 guard (200..<300).contains(response.statusCode) else {
                     throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                 }
-                result = .success(try await Self.action(bytes, threadActions: threadActions))
+                result = .success(try await Self.action(bytes, threadActions: threadActions, canClear: canClear))
             } catch { result = .failure(error) }
             await MainActor.run { completion(result) }
         }
