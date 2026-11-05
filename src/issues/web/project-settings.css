@@ -197,3 +197,34 @@
   .project-configuration-grid { grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 16px; }
   #project-settings-form .configuration-card { padding: 16px; }
 }
+
+#project-settings-form .project-settings-body[data-settings-tab="activity"] { grid-template-columns: minmax(0, 1fr); }
+#settings-panel-activity { width: 100%; padding: 24px; box-sizing: border-box; }
+.config-activity-heading, .config-history-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.config-activity-heading h3 { margin: 0 0 6px; }
+#config-history-status { color: var(--muted); font-size: 13px; }
+#config-history-status:empty { display: none; }
+#config-history-list { padding: 0; margin: 20px 0; list-style: none; }
+.config-history-entry { display: flex; gap: 20px; align-items: center; padding: 20px 0; border-top: 1px solid var(--line); }
+.config-history-entry > button { flex-shrink: 0; }
+.config-history-summary { flex: 1; min-width: 0; }
+.config-history-heading strong { font-size: 14px; }
+.config-history-heading time, .config-history-author { color: var(--muted); font-size: 12px; }
+.config-history-author { margin: 6px 0 10px; overflow-wrap: anywhere; }
+.config-history-fields { display: flex; flex-wrap: wrap; gap: 5px; }
+.config-history-fields span { padding: 3px 7px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 11px; }
+#config-history-detail { border: 1px solid var(--line); border-radius: 10px; padding: 20px; margin: 20px 0; }
+.config-diff-field h4 { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; margin: 18px 0 8px; }
+.config-diff-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; }
+.config-diff-columns > div { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.config-diff-label { display: block; font-size: 11px; font-weight: 600; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.config-diff-before .config-diff-label { background: #b7474714; }
+.config-diff-after .config-diff-label { background: #32835b18; }
+.config-diff pre { margin: 0; padding: 10px; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 280px; overflow: auto; font: 12px/1.6 ui-monospace, monospace; }
+.config-history-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 18px; }
+@media (max-width: 680px) {
+  .config-history-entry { align-items: flex-start; gap: 12px; }
+  .config-history-heading { flex-direction: column; gap: 5px; }
+  .config-diff-columns { grid-template-columns: minmax(0, 1fr); }
+  #config-history-detail { padding: 12px; }
+}

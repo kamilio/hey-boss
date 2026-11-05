@@ -34,8 +34,7 @@ function addPromptEditors(sections) {
   }
 }
 let projectSettingsTab = "configuration";
-let projectSettingsVersion = 0,
-  projectSettingsProject = null,
+let projectSettingsProject = null,
   projectSettingsFocus = null,
   projectSettingsOriginal = null,
   projectSettingsSaving = false,
@@ -55,7 +54,8 @@ function selectProjectSettingsTab(tab, focus = false) {
   $(".settings-preview").scrollTop = 0;
   projectSettingsTab = tab.id.replace('settings-tab-', '');
   $(".project-settings-body").dataset.settingsTab = projectSettingsTab;
-  $(".settings-preview").hidden = projectSettingsTab === "configuration";
+  $(".settings-preview").hidden = ["configuration", "activity"].includes(projectSettingsTab);
+  if (projectSettingsTab === "activity") loadConfigHistory();
   $(".project-settings-body").scrollTop = 0;
   updateWorkflowBranches();
   if (projectSettingsOriginal) previewProjectInstructions();
@@ -123,6 +123,8 @@ function closeProjectSettings() {
   clearTimeout(projectPreviewTimer);
   ++projectPreviewSequence;
   ++projectSettingsSequence;
+  ++configHistorySequence;
+  ++configDetailSequence;
   $("#project-settings-dialog").close();
   projectSettingsFocus?.focus();
 }
@@ -148,7 +150,6 @@ $("#project-settings-trigger").onclick = async () => {
       projectSettingsProject,
     );
     if (sequence !== projectSettingsSequence) return;
-    projectSettingsVersion = value.version;
     $("#project-worker-model").value = value.worker_model ?? "";
     $("#project-worker-reasoning").value = value.worker_reasoning ?? "";
     $("#project-worker-permissions").value = value.worker_permissions ?? "auto";
@@ -198,15 +199,18 @@ $("#project-settings-form").onsubmit = async (event) => {
     const executionChanged = ["worker_model", "worker_reasoning", "worker_permissions"].some(key => draft[key] !== projectSettingsOriginal[key]);
     const promptsChanged = draft.prompt !== projectSettingsOriginal.prompt ||
       JSON.stringify(draft.prompt_overrides) !== JSON.stringify(projectSettingsOriginal.prompt_overrides);
-    const value = await mutate(
-      {
-        action: "configure_project",
-        ...draft,
-        if_version: projectSettingsVersion,
-      },
+    const changes = {};
+    for (const [key, value] of Object.entries(draft)) {
+      if (key === 'prompt_overrides') {
+        for (const section of Object.keys(value)) {
+          if (value[section] !== projectSettingsOriginal.prompt_overrides[section]) changes['prompt_overrides.' + section] = value[section];
+        }
+      } else if (value !== projectSettingsOriginal[key]) changes[key] = value;
+    }
+    await mutate(
+      {action: "project_config", operation: {command: "apply", changes}},
       projectSettingsProject,
     );
-    projectSettingsVersion = value.version;
     projectSettingsOriginal = draft;
     $("#project-settings-error").hidden = true;
     projectSettingsSaving = false;
@@ -231,7 +235,7 @@ function previewProjectInstructions() {
   const sequence = ++projectPreviewSequence,
     project = projectSettingsProject,
     draft = projectSettingsDraft();
-  if (projectSettingsTab === "configuration") {
+  if (["configuration", "activity"].includes(projectSettingsTab)) {
     $("#project-instructions-preview").setAttribute("aria-busy", "false");
     return;
   }
@@ -337,3 +341,139 @@ for (const button of document.querySelectorAll("[data-reset-prompt]")) {
     previewProjectInstructions();
   };
 }
+
+let configHistorySequence = 0, configDetailSequence = 0, configHistoryOffset = null, configHistoryBusy = false;
+function configElement(tag, text, className) {
+  const element = document.createElement(tag);
+  if (text !== undefined) element.textContent = text;
+  if (className) element.className = className;
+  return element;
+}
+function configField(key) {
+  if (key === 'prompt') return 'prompts/worker.md';
+  if (key.startsWith('prompt_overrides.')) return 'prompts/' + key.slice(17) + '.md';
+  return ({worker_model:'Worker model',worker_reasoning:'Reasoning',worker_permissions:'Permissions',paused:'Paused',pause_reason:'Pause reason',prs_enabled:'Pull requests',worktree_enabled:'Worktrees',drafts_enabled:'Drafts',artifacts_enabled:'Artifacts'})[key] || key;
+}
+function configValue(value) {
+  if (value === null || value === undefined) return 'Inherited default';
+  if (value === '') return '(empty)';
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+}
+function configDiff(changes) {
+  const container = configElement('div', undefined, 'config-diff');
+  for (const [field, change] of Object.entries(changes || {})) {
+    const section = configElement('section', undefined, 'config-diff-field');
+    section.append(configElement('h4', configField(field)));
+    const columns = configElement('div', undefined, 'config-diff-columns');
+    for (const side of ['before', 'after']) {
+      const column = configElement('div', undefined, 'config-diff-' + side);
+      column.append(configElement('span', side === 'before' ? 'Before' : 'After', 'config-diff-label'), configElement('pre', configValue(change[side])));
+      columns.append(column);
+    }
+    section.append(columns); container.append(section);
+  }
+  if (!container.children.length) container.append(configElement('p', 'No changes needed. These settings already match.', 'field-help'));
+  return container;
+}
+async function loadConfigHistory(append = false) {
+  if (!projectSettingsProject || configHistoryBusy) return;
+  const sequence = ++configHistorySequence, project = projectSettingsProject;
+  $('#config-history-status').textContent = 'Loading activity…';
+  $('#config-history-refresh').disabled = true;
+  $('#config-history-more').disabled = true;
+  if (!append) { ++configDetailSequence; $('#config-history-list').replaceChildren(); $('#config-history-detail').hidden = true; }
+  try {
+    const value = await api({action:'project_config',operation:{command:'history',offset:append ? configHistoryOffset : 0}}, project);
+    if (sequence !== configHistorySequence || project !== projectSettingsProject) return;
+    $('#config-history-errors').replaceChildren();
+    for (const copy of value.working_copies || []) if (copy.error) {
+      $('#config-history-errors').append(configElement('p', copy.path + ': ' + copy.error, 'form-error'));
+    }
+    for (const revision of value.revisions) {
+      const row = configElement('li', undefined, 'config-history-entry');
+      const main = configElement('div', undefined, 'config-history-summary');
+      const heading = configElement('div', undefined, 'config-history-heading');
+      heading.append(configElement('strong', ({undo:'Undid a change',restore:'Restored a version',edit:'Updated configuration'})[revision.action] || revision.action));
+      const time = configElement('time', new Date(revision.created_at).toLocaleString());
+      time.dateTime = new Date(revision.created_at).toISOString(); heading.append(time);
+      const author = revision.actor || {};
+      main.append(heading, configElement('p', (author.id || 'Unknown editor') + ' · ' + (author.host || author.machine || 'Unknown machine') + ' · ' + (author.source || 'Unknown source'), 'config-history-author'));
+      const fields = configElement('div', undefined, 'config-history-fields');
+      for (const key of revision.fields) fields.append(configElement('span', configField(key)));
+      main.append(fields);
+      const button = configElement('button', 'View change', 'button'); button.type = 'button';
+      button.onclick = () => showConfigRevision(revision, project);
+      row.append(main, button); $('#config-history-list').append(row);
+    }
+    configHistoryOffset = value.next_offset;
+    $('#config-history-more').hidden = configHistoryOffset === null;
+    $('#config-history-status').textContent = $('#config-history-list').children.length ? '' : 'No changes recorded yet. New settings and prompt edits will appear here.';
+  } catch (error) {
+    if (sequence === configHistorySequence) $('#config-history-status').textContent = error.message;
+  } finally {
+    if (sequence === configHistorySequence) {
+      $('#config-history-refresh').disabled = false; $('#config-history-more').disabled = false;
+    }
+  }
+}
+async function showConfigRevision(revision, project) {
+  const sequence = ++configDetailSequence;
+  const detail = $('#config-history-detail');
+  detail.hidden = false; detail.replaceChildren(configElement('p', 'Loading change…'));
+  try {
+    const value = await api({action:'project_config',operation:{command:'view',revision:revision.id}}, project);
+    if (sequence !== configDetailSequence || project !== projectSettingsProject) return;
+    const render = (mode = 'view') => {
+      const title = mode === 'view' ? 'What changed' : mode === 'undo' ? 'Review undo' : 'Review restore';
+      const heading = configElement('div', undefined, 'config-activity-heading');
+      heading.append(configElement('h3', title));
+      const close = configElement('button', 'Close change', 'button'); close.type = 'button';
+      close.onclick = () => { detail.hidden = true; }; heading.append(close);
+      detail.replaceChildren(heading, configElement('p', mode === 'undo' ? 'Only the fields in this change will be reversed. Unrelated later edits stay.' : mode === 'restore' ? 'All settings and prompts will return to this version. This creates a new history entry.' : revision.id, 'field-help'));
+      const changes = value[mode === 'view' ? 'changes' : mode + '_changes'];
+      detail.append(configDiff(changes));
+      const actions = configElement('div', undefined, 'config-history-actions');
+      for (const command of mode === 'view' ? ['undo', 'restore'] : [mode]) {
+        const button = configElement('button', mode === 'view' ? command === 'undo' ? 'Undo this change…' : 'Restore this version…' : command === 'undo' ? 'Undo these changes' : 'Restore these settings', 'button');
+        button.type = 'button';
+        button.disabled = mode !== 'view' && !Object.keys(changes).length;
+        button.onclick = async () => {
+          if (mode === 'view') { render(command); return; }
+          if (JSON.stringify(projectSettingsDraft()) !== JSON.stringify(projectSettingsOriginal)) {
+            $('#config-history-status').textContent = 'Save or discard your unsaved settings before undoing or restoring.'; return;
+          }
+          configHistoryBusy = true; projectSettingsSaving = true;
+          for (const control of detail.querySelectorAll('button')) control.disabled = true;
+          setProjectSettingsDisabled(true);
+          try {
+            await mutate({action:'project_config',operation:{command,revision:revision.id,if_digest:value.digest}}, project);
+            projectSettingsSaving = false; configHistoryBusy = false;
+            await $('#project-settings-trigger').onclick();
+            selectProjectSettingsTab($('#settings-tab-activity'));
+            detailCache.clear(); await refreshProjects(project); updateHeader();
+            toast(command === 'undo' ? 'Change undone. History retained.' : 'Version restored. History retained.');
+          } catch (error) {
+            detail.append(configElement('p', error.message, 'form-error'));
+          } finally {
+            configHistoryBusy = false; projectSettingsSaving = false;
+            setProjectSettingsDisabled(false); projectSettingsChanged();
+            for (const control of detail.querySelectorAll('button')) control.disabled = false;
+          }
+        };
+        actions.append(button);
+      }
+      if (mode !== 'view') {
+        const back = configElement('button', 'Back', 'button'); back.type = 'button'; back.onclick = () => render(); actions.append(back);
+      }
+      detail.append(actions); detail.scrollIntoView({block:'nearest'});
+    };
+    render();
+  } catch (error) {
+    if (sequence === configDetailSequence) detail.replaceChildren(configElement('p', error.message, 'form-error'));
+  }
+}
+$('#config-history-refresh').onclick = () => loadConfigHistory();
+$('#config-history-more').onclick = () => loadConfigHistory(true);
+window.addEventListener('resize', () => {
+  if ($('#project-settings-dialog').open) $('.project-settings-tabs [aria-selected="true"]').scrollIntoView({block:'nearest',inline:'nearest'});
+});
