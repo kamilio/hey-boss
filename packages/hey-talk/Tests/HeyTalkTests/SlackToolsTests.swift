@@ -12,6 +12,10 @@ final class SlackToolsTests: XCTestCase {
             XCTAssertEqual(names.contains("t3_new_thread"), package == .t3)
         }
     }
+    func testSpokenChannelWordsMatchSlackNames() throws {
+        XCTAssertEqual(try SlackTools.action("slack_open_channel", values: ["name":" Release Notes "]), .channel("release-notes"))
+        XCTAssertEqual(try SlackTools.action("slack_open_channel", values: ["name":"#build_log"]), .channel("build_log"))
+    }
     func testAmbiguousNamesNeverSelectADestination() throws {
         let users = [["id":"U01", "name":"jane.s","real_name":"Jane Smith"],["id":"U02","name":"jane.t","real_name":"Jane Taylor"]]
         XCTAssertThrowsError(try SlackTools.recipients(["Jane"], users: users))

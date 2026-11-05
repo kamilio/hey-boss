@@ -27,6 +27,7 @@ enum SlackTools {
         if name == "slack_list_users", values.count == 1, let query = values["query"] as? String { return .users(query) }
         if name == "slack_open_channel", values.count == 1, let value = values["name"] as? String {
             let channel = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+                .split(whereSeparator: \.isWhitespace).joined(separator: "-")
             guard !channel.isEmpty else { throw TalkError("Missing channel name.") }
             return .channel(channel)
         }
