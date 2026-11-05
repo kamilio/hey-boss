@@ -16,6 +16,19 @@ app="$PWD/dist/Hey Talk.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Frameworks" "$app/Contents/Resources"
 cp .build/release/hey-talk "$app/Contents/MacOS/hey-talk"
 cp .build/release/hey-talk "$app/Contents/Helpers/hey-talk-inference"
+case "$(uname -m)" in
+  arm64) pocket_arch=aarch64; pocket_sha=ee9ca6c7c000ee72c5846e3a8ba01d08f56636d94a614d2259c3f12b8fd69afa ;;
+  x86_64) pocket_arch=x86_64; pocket_sha=f04baa94d4fc47a689cc9f11ca2b0ba869dc002f9e78e15d387c6ecaeb1d654b ;;
+  *) printf 'Unsupported Pocket TTS architecture\n' >&2; exit 1 ;;
+esac
+pocket="pocket-tts-3.3.0-$pocket_arch-apple-darwin"
+if ! printf '%s  %s\n' "$pocket_sha" "$vendor/$pocket.tar.gz" | shasum -a 256 -c - >/dev/null 2>&1; then
+  curl -fL --retry 2 -o "$vendor/$pocket.tar.gz.download" "https://github.com/kyutai-labs/pocket-tts/releases/download/v4.0.1/$pocket.tar.gz"
+  printf '%s  %s\n' "$pocket_sha" "$vendor/$pocket.tar.gz.download" | shasum -a 256 -c -
+  mv "$vendor/$pocket.tar.gz.download" "$vendor/$pocket.tar.gz"
+fi
+tar -xzf "$vendor/$pocket.tar.gz" -C "$vendor"
+cp "$vendor/$pocket/pocket-tts" "$app/Contents/Helpers/pocket-tts"
 cp "$runtime/lib/libsherpa-onnx-c-api.dylib" "$app/Contents/Frameworks/"
 cp "$runtime/lib/libonnxruntime.dylib" "$app/Contents/Frameworks/"
 if [ "$(uname -m)" = arm64 ]; then
@@ -56,5 +69,6 @@ for library in "$app/Contents/Frameworks/"*.dylib; do codesign --force --sign - 
 # The worker loads ad-hoc-signed native libraries and has no UI, microphone,
 # or Accessibility privileges. Keep the desktop executable hardened.
 codesign --force --sign - "$app/Contents/Helpers/hey-talk-inference"
+codesign --force --sign - "$app/Contents/Helpers/pocket-tts"
 ./sign-app.sh "$app"
 printf '\nBuilt: %s\nCLI: %s/Contents/MacOS/hey-talk --help\n' "$app" "$app"

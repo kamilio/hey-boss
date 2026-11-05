@@ -7,8 +7,10 @@ signal(SIGPIPE, SIG_IGN)
 let arguments = Array(CommandLine.arguments.dropFirst())
 do {
     if arguments.first == "--speech-worker" {
-        guard arguments.count == 4 else { throw TalkError("Invalid speech worker arguments") }
-        try runSpeechWorker(model: arguments[1], library: arguments[2], alignmentModel: arguments[3])
+        guard arguments.count == 1 || arguments.count == 4 else { throw TalkError("Invalid speech worker arguments") }
+        try runSpeechWorker(model: arguments.count == 4 ? arguments[1] : SpeechModel.directory.path,
+            library: arguments.count == 4 ? arguments[2] : ModelPaths.library.path,
+            alignmentModel: arguments.count == 4 ? arguments[3] : ModelPaths.directory.path)
     } else if arguments.first == "--worker" {
         guard arguments.count == 4 else { throw TalkError("Invalid worker arguments") }
         try runInferenceWorker(model: arguments[1], library: arguments[2], vocabulary: arguments[3])

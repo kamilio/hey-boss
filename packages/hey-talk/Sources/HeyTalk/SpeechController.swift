@@ -5,7 +5,7 @@ final class SpeechController {
     let settings = SpeechSettings()
     private let reader = SpeechTargetReader()
     private let queue = DispatchQueue(label: "hey-talk.speech-target", qos: .userInitiated)
-    private let engine = SupertonicSpeechEngine()
+    private let engine = LocalSpeechEngine()
     private let output = NativeSpeechOutput()
     private lazy var playback = SpeechPlayback(engine: engine, output: output)
     private let overlay = SpeechOverlay()
@@ -35,7 +35,7 @@ final class SpeechController {
     var status: [String: Any] {
         var result = settings.json
         result["state"] = playback.state.rawValue
-        result["model"] = "sherpa-onnx-supertonic-3-tts-int8-2026-05-11"; result["model_ready"] = SpeechModel.available
+        result["model"] = SpeechModel.name; result["voice"] = SpeechModel.voice; result["model_ready"] = SpeechModel.available
         result["rate"] = playback.rate; result["overlay"] = overlay.visible
         result["first_audio_ms"] = playback.firstAudioMS
         result["worker_pid"] = engine.pid
