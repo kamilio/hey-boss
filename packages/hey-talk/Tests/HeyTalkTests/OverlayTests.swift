@@ -5,27 +5,32 @@ import XCTest
 
 final class OverlayTests: XCTestCase {
     @MainActor func testT3ConfirmationIsSmallTemporaryAndLeavesDictationAlone() async throws {
-        let app = NSApplication.shared, overlay = Overlay()
+        let app = NSApplication.shared, oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        overlay.show(true)
         defer { overlay.show(false) }
-        func confirmations() -> [NSWindow] { app.windows.filter { $0.title == "Hey Talk — T3 action" && $0.isVisible } }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let root = try XCTUnwrap(panel.contentView), initial = panel.frame, count = app.windows.count
+        func notices(_ view: NSView) -> [OverlayNotice] {
+            (view as? OverlayNotice).map { [$0] } ?? view.subviews.flatMap(notices)
+        }
         for action: CorrectionAction in [.paste("hello"), .clearInput, .listThreads] { overlay.confirmT3Action(action) }
-        XCTAssertTrue(confirmations().isEmpty)
+        XCTAssertTrue(notices(root).isEmpty)
         overlay.confirmT3Action(.pinThread(true))
-        let notice = try XCTUnwrap(confirmations().first)
-        XCTAssertTrue(notice.ignoresMouseEvents)
-        XCTAssertFalse(notice.canBecomeKey)
-        XCTAssertLessThanOrEqual(notice.frame.height, 32)
-        XCTAssertLessThanOrEqual(notice.frame.width, 160)
-        let screen = try XCTUnwrap(notice.screen), display = screen.visibleFrame
-        XCTAssertEqual(notice.frame.midX, display.midX, accuracy: 1)
-        XCTAssertEqual(notice.frame.maxY, min(display.maxY, screen.frame.maxY - screen.safeAreaInsets.top) - 8, accuracy: 1)
         overlay.confirmT3Action(.pinThread(false))
         overlay.finishProcessing()
-        XCTAssertEqual(confirmations().count, 1)
-        try await Task.sleep(nanoseconds: 2_200_000_000)
-        XCTAssertEqual(confirmations().count, 1)
-        try await Task.sleep(nanoseconds: 1_500_000_000)
-        XCTAssertTrue(confirmations().isEmpty)
+        overlay.update(.listening)
+        let drawer = try XCTUnwrap(notices(root).first)
+        XCTAssertEqual(notices(root).count, 1)
+        XCTAssertEqual(drawer.subviews.compactMap { ($0 as? NSTextField)?.stringValue }, ["Thread unpinned"])
+        XCTAssertEqual(app.windows.count, count)
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertEqual(panel.frame.minY, initial.minY, accuracy: 1)
+        XCTAssertGreaterThan(panel.frame.height, initial.height)
+        XCTAssertLessThanOrEqual(panel.frame.height - initial.height, 40)
+        try await Task.sleep(nanoseconds: 3_600_000_000)
+        XCTAssertTrue(notices(root).isEmpty)
+        XCTAssertEqual(panel.frame, initial)
     }
 
     @MainActor func testWaitingPillNamesDestinationAndLetsUserCancelWithoutTakingFocus() throws {

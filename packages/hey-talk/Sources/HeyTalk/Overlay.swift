@@ -125,8 +125,7 @@ final class Overlay {
     private var pasteWait: PasteWaitView?
     var onCancelPaste: (() -> Void)?
     private var notice: OverlayNotice?
-    private var t3Confirmation: NSPanel?
-    private var modeNotice = false
+    private var compactNotice = false
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
@@ -255,7 +254,6 @@ final class Overlay {
     func show(_ visible: Bool) {
         enabled = visible
         if !visible {
-            t3Confirmation?.orderOut(nil); t3Confirmation = nil
             dockMotion?.stop(); dockMotion = nil
             dismissNotice(animated: false)
         }
@@ -333,7 +331,7 @@ final class Overlay {
         correctionIndicator.isHidden = correctionEnabled; submitIndicator.isHidden = autoSubmitEnabled
         completionDismiss?.cancel(); completionDismiss = nil
         connectingDelay?.cancel(); connectingDelay = nil
-        if !modeNotice { clearNotice() }
+        if !compactNotice { clearNotice() }
         self.waitingForAudio = waitingForAudio
         connecting.isHidden = true
         phase = next; expanded = next == .recording
@@ -580,7 +578,7 @@ final class Overlay {
     private func clearNotice() {
         noticeDismiss?.cancel(); noticeDismiss = nil
         notice?.removeFromSuperview(); notice = nil
-        modeNotice = false
+        compactNotice = false
         noticeRecordButton.isHidden = true
         pillContent.setAccessibilityRole(.button)
     }
@@ -591,14 +589,13 @@ final class Overlay {
         layout(animated: animated)
     }
     func error(_ message: String, accessibilityAction: Bool = false) {
-        presentNotice(message, accessibilityAction: accessibilityAction, isModeNotice: false)
+        presentNotice(message, accessibilityAction: accessibilityAction, compact: false)
     }
     func showModeNotice() {
         let message = autoMode ? "Auto mode on" : "Auto mode off"
-        presentNotice(message, accessibilityAction: false, isModeNotice: true)
+        presentNotice(message, accessibilityAction: false, compact: true)
     }
     func confirmT3Action(_ action: CorrectionAction) {
-        guard enabled, let screen = NSScreen.main else { return }
         let message: String
         switch action {
         case .pinThread(let pinned): message = pinned ? "Thread pinned" : "Thread unpinned"
@@ -608,39 +605,14 @@ final class Overlay {
         case .switchThread(let position): message = "Switched to chat \(position)"
         case .paste, .clearInput, .listThreads: return
         }
-        let label = NSTextField(labelWithString: message)
-        label.font = .systemFont(ofSize: 12, weight: .medium)
-        label.textColor = .white; label.sizeToFit()
-        let bounds = NSRect(x: 0, y: 0, width: ceil(label.frame.width) + 42, height: 30)
-        let content = NSView(frame: bounds)
-        content.wantsLayer = true; content.layer?.cornerRadius = bounds.height / 2; content.layer?.masksToBounds = true
-        content.layer?.backgroundColor = NSColor(white: 0.14, alpha: 0.97).cgColor
-        let check = NSImageView(frame: NSRect(x: 10, y: 8, width: 14, height: 14))
-        check.image = NSImage(systemSymbolName: "checkmark.circle.fill", accessibilityDescription: nil)
-        check.contentTintColor = TalkDesign.active
-        label.setFrameOrigin(NSPoint(x: 29, y: floor((bounds.height - label.frame.height) / 2)))
-        content.addSubview(check); content.addSubview(label)
-
-        let toast = RecordingPanel(contentRect: bounds, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        toast.title = "Hey Talk — T3 action"; toast.level = .popUpMenu
-        toast.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-        toast.backgroundColor = .clear; toast.isOpaque = false; toast.hasShadow = true
-        toast.ignoresMouseEvents = true; toast.hidesOnDeactivate = false; toast.contentView = content
-        let visible = screen.visibleFrame
-        toast.setFrameOrigin(NSPoint(x: round(visible.midX - bounds.width / 2), y: min(visible.maxY, screen.frame.maxY - screen.safeAreaInsets.top) - bounds.height - 8))
-        t3Confirmation?.orderOut(nil); t3Confirmation = toast
-        toast.orderFrontRegardless()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self, weak toast] in
-            guard let self, let toast, self.t3Confirmation === toast else { return }
-            toast.orderOut(nil); self.t3Confirmation = nil
-        }
+        presentNotice(message, accessibilityAction: false, compact: true)
     }
-    private func presentNotice(_ message: String, accessibilityAction: Bool, isModeNotice: Bool) {
+    private func presentNotice(_ message: String, accessibilityAction: Bool, compact: Bool) {
         guard enabled, pasteWait == nil else { return }
         clearNotice()
-        modeNotice = isModeNotice
+        compactNotice = compact
         let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
-        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() }, compact: isModeNotice)
+        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() }, compact: compact)
         notice = content
         pillContent.addSubview(content)
         noticeRecordButton.isHidden = false
@@ -656,7 +628,7 @@ final class Overlay {
         if !accessibilityAction {
             let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
             noticeDismiss = dismiss
-            DispatchQueue.main.asyncAfter(deadline: .now() + (isModeNotice ? 3 : 6), execute: dismiss)
+            DispatchQueue.main.asyncAfter(deadline: .now() + (compact ? 3 : 6), execute: dismiss)
         }
     }
 }
