@@ -9,6 +9,7 @@ final class CorrectionEvalTests: XCTestCase {
         for (speech, expected): (String, [CorrectionAction]) in [
             ("Go to Publish Artifact conversation.", [.listThreads, .switchThread(8)]),
             ("Go to chat three.", [.switchThread(3)]),
+            ("Now we can go to the first chat.", [.switchThread(1)]),
             ("Let's settle this thread.", [.settleThread]),
             ("Let's pin this thread.", [.pinThread(true)]),
             ("Unpin the chat.", [.pinThread(false)]),
@@ -25,7 +26,7 @@ final class CorrectionEvalTests: XCTestCase {
             }
             XCTAssertEqual(actions, expected, speech)
         }
-        for speech in ["Add a button that pins the current thread.", "How do I settle a thread?"] {
+        for speech in ["Add a button that pins the current thread.", "How do I settle a thread?", "Add a shortcut to go to the first chat."] {
             let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
                 correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code"] }, package: .t3) { continuation.resume(with: $0) }
             }

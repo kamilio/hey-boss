@@ -30,6 +30,25 @@ final class CorrectionTests: XCTestCase {
         }
     }
 
+    func testStandaloneOrdinalSwitchFinishesOnDeliveryWithoutCallingTheModel() {
+        let correction = client()
+        CorrectionProtocol.handle = { _ in XCTFail("A standalone ordinal switch should not call the model") }
+        var delivered: [CorrectionAction] = []
+        var finish: ((String) -> Void)?
+        var result: CorrectionAction?
+        correction.correct("Now we can go to the first chat.", vocabulary: [], package: .t3, perform: { action, next in
+            delivered.append(action); finish = next
+        }) { result = try? $0.get() }
+        XCTAssertNil(result)
+        XCTAssertEqual(delivered, [.switchThread(1)])
+        finish?("switched")
+        XCTAssertEqual(result, .switchThread(1))
+        XCTAssertEqual(T3Tools.ordinalSwitch("Let’s switch to the ninth thread!"), .switchThread(9))
+        for text in ["Say ‘go to the first chat’.", "Go to the first chat and pin it.", "Go to the tenth chat.", "Can we go to the first chat?"] {
+            XCTAssertNil(T3Tools.ordinalSwitch(text))
+        }
+    }
+
     func testT3NavigationRequiresAValidPositionAndNoUnexpectedArguments() throws {
         XCTAssertEqual(try T3Tools.action("t3_switch_thread", values: ["position": 8]), .switchThread(8))
         XCTAssertEqual(try T3Tools.action("t3_pin_thread", values: [:]), .pinThread(true))
