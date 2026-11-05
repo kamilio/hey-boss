@@ -72,6 +72,7 @@ enum PasteBlockReason: String {
     case accessibility, targetClosed = "target_closed", focusChanged = "focus_changed"
     case newThreadUnavailable = "new_thread_unavailable"
     case clearUnavailable = "clear_unavailable"
+    case slackUnavailable = "slack_unavailable"
     case t3Unavailable = "t3_unavailable"
     case unidentifiedField = "unidentified_field"
     case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
@@ -92,6 +93,7 @@ enum PasteBlockReason: String {
         }
         switch self {
         case .clearUnavailable: return "Couldn’t clear the original field."
+        case .slackUnavailable: return "Couldn’t navigate in Slack."
         case .t3Unavailable: return "Couldn’t finish the T3 action. Check the selected chat."
         case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
         case .accessibility: return "Text copied. Allow automatic paste."

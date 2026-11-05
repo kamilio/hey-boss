@@ -41,6 +41,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var pendingReply: (([String: Any]) -> Void)?
     private var pendingStartReply: (([String: Any]) -> Void)?
     private var target: NSRunningApplication? { didSet { updateSubmitIndicator() } }
+    private var slackTeam: String?
     private var recordingHost: String?
     private var targetName: String?
     private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
@@ -630,6 +631,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         clearAutomatic()
         automatic = focusedInput.map { AutoRecording(target: $0, followsFocus: $0.app.bundleIdentifier != "com.t3tools.t3code") }
         target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
+        slackTeam = paste && correctionSettings.enabled ? SlackTools.route(target)?.pathComponents[2] : nil
         recordingHost = BrowserPage.host(in: target)
         targetName = target?.localizedName
         if let target, (target.bundleIdentifier == "com.t3tools.t3code" && (paste || correctionSettings.enabled)) || (paste && (returnToField || correctionSettings.enabled)) {
@@ -706,6 +708,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
             if automatic?.followsFocus == true {
                 recordingHost = BrowserPage.host(in: input?.app)
+                slackTeam = SlackTools.route(input?.app)?.pathComponents[2]
             }
             automatic?.finish(in: input)
             target = autoTarget?.app; targetName = target?.localizedName
@@ -779,12 +782,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             overlay?.finishProcessing(); scheduleRelease()
             lastPasteBlock = reason
             if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
+            else if reason == .slackUnavailable { overlay?.showActivity(info["error"] as? String ?? "Slack unavailable", failed: true) }
             else if let action, reason == .t3Unavailable || reason == .newThreadUnavailable {
-                overlay?.confirmT3Action(action, failed: true)
+                overlay?.confirmAction(action, failed: true)
             }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
             else if let error = info["error"] as? String { overlay?.error(error) }
-            if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled"].contains(delivery) {
+            if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated"].contains(delivery) {
                 restartAutomatic(id: id)
             }
         }
@@ -821,6 +825,24 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let originalField = field
             save(action) {
                 guard self.paste else { finish("stdout"); return }
+                if case .slack(let command) = action {
+                    Task { @MainActor in
+                        do {
+                            guard let target, let team = self.slackTeam else { throw TalkError("Focus Slack") }
+                            try await SlackTools.navigate(command, app: target, team: team, isCurrent: current)
+                            guard current() else { return }
+                            self.overlay?.confirmAction(action)
+                            lastDelivery = "navigated"
+                            next("navigated")
+                        } catch {
+                            guard current() else { return }
+                            info["error"] = (error as? TalkError)?.localizedDescription ?? "Slack unavailable"
+                            info["status"] = "failed"
+                            finish("history", .slackUnavailable, action: action)
+                        }
+                    }
+                    return
+                }
                 let focused = { originalField?.isFocused() ?? !needsField }
                 Paste.deliver(action, target: target, originalField: originalField,
                               shouldPressEnter: allowsSubmit,
@@ -837,7 +859,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
                     }
                     guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason, action: action); return }
-                    self.overlay?.confirmT3Action(action)
+                    self.overlay?.confirmAction(action)
                     lastDelivery = delivery
                     next(delivery)
                 }
@@ -853,7 +875,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                }
                                return app
                            },
-                           threadActions: paste && field?.canUseThreadActions == true, canClear: paste && field != nil,
+                           package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : slackTeam != nil ? .slack : nil, canClear: paste && field != nil,
                            perform: paste ? perform : nil) { result in
             guard current() else { return }
             switch result {

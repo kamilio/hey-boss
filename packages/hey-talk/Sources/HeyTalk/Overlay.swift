@@ -639,10 +639,13 @@ final class Overlay {
         statusDismiss?.cancel(); statusDismiss = nil
         status?.removeFromSuperview(); status = nil
     }
-    func confirmT3Action(_ action: CorrectionAction, failed: Bool = false) {
+    func confirmAction(_ action: CorrectionAction, failed: Bool = false) {
         guard enabled, pasteWait == nil, notice == nil else { return }
         let message: String
         switch action {
+        case .slack(.users): message = "People"
+        case .slack(.chat): message = "Chat opened"
+        case .slack(.channel): message = "Channel opened"
         case .pinThread(let pinned): message = failed ? (pinned ? "Couldn’t pin" : "Couldn’t unpin") : (pinned ? "Pinned" : "Unpinned")
         case .settleThread: message = failed ? "Couldn’t settle" : "Settled"
         case .rename: message = failed ? "Couldn’t rename" : "Renamed"
@@ -651,6 +654,10 @@ final class Overlay {
         case .listThreads where failed: message = "Couldn’t read chats"
         case .paste, .clearInput, .listThreads: return
         }
+        showActivity(message, failed: failed)
+    }
+    func showActivity(_ message: String, failed: Bool) {
+        guard enabled, pasteWait == nil, notice == nil else { return }
         clearNotice()
         confirmation.stringValue = message
         confirmation.sizeToFit()

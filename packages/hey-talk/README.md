@@ -91,6 +91,8 @@ Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 s
 These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
 name and bundle identifier, plus the current T3 thread title, refreshed after navigation. Auto Dictation resumes listening
 after switching, pinning, unpinning, or settling.
+In the Slack desktop app, say “open the engineering channel”, “open my chat with Jane Smith and Lee Park”, or “list Slack users”. Slack opens the matching conversation, including group DMs, without posting a message. Ambiguous names need a full name or handle. The people directory can also filter by a spoken name. These tools reuse the local login from `wire slack login`; the directory stays on this Mac. To keep ordinary Slack dictation manual, use `hey-talk enter-exceptions add com.tinyspeck.slackmacgap`.
+Each app owns its tool definitions, argument parsing, and navigation in `Sources/HeyTalk/Tools/`. Only the active app’s package is offered to the model.
 In any recognized editable field, say “clear this input” to select and delete its contents without submitting.
 Hey Talk gives preparatory tool results back to the model so it can take the next requested action. For example,
 “clear this input, then paste Check publishing” clears the field before inserting the new text. With Auto Submit on,

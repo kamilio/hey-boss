@@ -21,10 +21,10 @@ final class OverlayTests: XCTestCase {
         }
         try await Task.sleep(nanoseconds: 350_000_000)
         let anchor = try iconX()
-        for action: CorrectionAction in [.paste("hello"), .clearInput, .listThreads] { overlay.confirmT3Action(action) }
+        for action: CorrectionAction in [.paste("hello"), .clearInput, .listThreads] { overlay.confirmAction(action) }
         XCTAssertEqual(panel.frame, initial)
-        overlay.confirmT3Action(.pinThread(true))
-        overlay.confirmT3Action(.pinThread(false))
+        overlay.confirmAction(.pinThread(true))
+        overlay.confirmAction(.pinThread(false))
         overlay.finishProcessing()
         overlay.update(.listening)
         try await Task.sleep(nanoseconds: 400_000_000)
@@ -221,7 +221,7 @@ final class OverlayTests: XCTestCase {
         let off = try XCTUnwrap(notices(root).first)
         XCTAssertEqual(try XCTUnwrap(off.subviews.compactMap { $0 as? NSTextField }.first).stringValue, "Auto mode off")
         overlay.update(.listening)
-        overlay.confirmT3Action(.pinThread(true))
+        overlay.confirmAction(.pinThread(true))
         XCTAssertNotNil(off.superview)
         let activity = try XCTUnwrap(off.superview?.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Pinned" })
         XCTAssertEqual(activity.textColor, .labelColor)
@@ -235,7 +235,7 @@ final class OverlayTests: XCTestCase {
         close.performClick(nil)
         XCTAssertTrue(notices(root).isEmpty)
         XCTAssertFalse(activity.isHidden)
-        overlay.confirmT3Action(.pinThread(false), failed: true)
+        overlay.confirmAction(.pinThread(false), failed: true)
         XCTAssertEqual(activity.stringValue, "Couldn’t unpin")
         XCTAssertEqual(symbol.contentTintColor, TalkDesign.failure)
         XCTAssertEqual(face.accent, TalkDesign.failure)

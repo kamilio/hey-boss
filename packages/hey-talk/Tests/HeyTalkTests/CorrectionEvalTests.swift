@@ -16,7 +16,7 @@ final class CorrectionEvalTests: XCTestCase {
         ] {
             var actions: [CorrectionAction] = []
             let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
-                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"] }, threadActions: true, perform: { action, next in
+                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"] }, package: .t3, perform: { action, next in
                     actions.append(action)
                     if action == .listThreads {
                         next(#"{"current_thread":"Voice tools","threads":[{"position":1,"title":"Voice tools","current":true},{"position":8,"title":"Publish Artifacts Publicly","current":false}]}"#)
@@ -27,7 +27,7 @@ final class CorrectionEvalTests: XCTestCase {
         }
         for speech in ["Add a button that pins the current thread.", "How do I settle a thread?"] {
             let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
-                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code"] }, threadActions: true) { continuation.resume(with: $0) }
+                correction.correct(speech, vocabulary: [], app: { ["name": "T3 Code"] }, package: .t3) { continuation.resume(with: $0) }
             }
             guard case .paste = action else { XCTFail("Unexpected action for \(speech)"); continue }
         }
@@ -60,7 +60,7 @@ final class CorrectionEvalTests: XCTestCase {
         let correction = Correction()
         func run(_ speech: String, context: String = "") async throws -> CorrectionAction {
             try await withCheckedThrowingContinuation { continuation in
-                correction.correct(speech, vocabulary: ["hey-boss"], appContext: context, threadActions: true, canClear: true) { continuation.resume(with: $0) }
+                correction.correct(speech, vocabulary: ["hey-boss"], appContext: context, package: .t3, canClear: true) { continuation.resume(with: $0) }
             }
         }
         let spoken = "So start a new thread. And then I want to check whether the thinking of publish sites or pages is working."
@@ -90,7 +90,7 @@ final class CorrectionEvalTests: XCTestCase {
         let correction = Correction()
         func run(_ transcript: String, context: String? = nil, threadActions: Bool = true) async throws -> CorrectionAction {
             try await withCheckedThrowingContinuation { continuation in
-                correction.correct(transcript, vocabulary: vocabulary, appContext: context, threadActions: threadActions) { continuation.resume(with: $0) }
+                correction.correct(transcript, vocabulary: vocabulary, appContext: context, package: threadActions ? .t3 : nil) { continuation.resume(with: $0) }
             }
         }
         struct Suite: Decodable {
