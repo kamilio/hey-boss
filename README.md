@@ -428,7 +428,7 @@ conversation:
   root: ~/Workspace/root
 ```
 
-Desktop builds fetch Poe Agent directly from [Poe Code on GitHub](https://github.com/poe-platform/poe-code), build it from main, and bundle its runtime with the app. No published package is needed. The installed revision stays stable until the next desktop build; `hey-boss upgrade --force` refreshes it even when the app source has not changed.
+Desktop builds require Node 22+ and npm. They fetch Poe Agent directly from [Poe Code on GitHub](https://github.com/poe-platform/poe-code), build it from main, and bundle its runtime with the app. No published package is needed. The installed revision stays stable until the next desktop build; `hey-boss upgrade --force` refreshes it even when the app source has not changed.
 
 To diagnose a voice cutoff, run `/usr/bin/log show --last 1h --predicate 'subsystem == "local.hey-boss.desktop" AND category == "voice"'`. The local log records turn timing, send reasons, microphone reconnects, and transcript lengths without storing audio or message text.
 
