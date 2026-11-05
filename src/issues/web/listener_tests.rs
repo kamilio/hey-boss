@@ -444,6 +444,61 @@ fn home_service_defaults_to_a_visible_real_project_without_overriding_explicit_c
 }
 
 #[test]
+fn private_pages_support_seeking_in_large_media() {
+    let fixture = Fixture::start();
+    let source = fixture.root.join("recordings");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(source.join("index.html"), "<audio src='episode.mp3' controls></audio>").unwrap();
+    let audio: Vec<u8> = (0..2 * crate::pages::CHUNK_SIZE + 37).map(|i| (i % 251) as u8).collect();
+    std::fs::write(source.join("episode.mp3"), &audio).unwrap();
+    std::fs::write(source.join("empty.mp3"), []).unwrap();
+    crate::pages::publish(&fixture.root.join("issues.db"), &source, "recordings").unwrap();
+    let client = reqwest::blocking::Client::builder().no_proxy().build().unwrap();
+    let base = format!("http://{}", fixture.addresses[0]);
+    let page: Value = client.get(format!("{base}/api/pages?name=recordings")).send().unwrap().json().unwrap();
+    let url = format!("{base}{}", page["content_url"].as_str().unwrap().replace("index.html", "episode.mp3"));
+    let full = client.get(&url).send().unwrap();
+    let etag = full.headers()["etag"].clone();
+    assert_eq!(full.headers()["content-length"], audio.len().to_string());
+    assert_eq!(full.headers()["accept-ranges"], "bytes");
+    assert_eq!(full.bytes().unwrap().as_ref(), audio.as_slice());
+    for (range, start, end) in [
+        ("bytes=0-1".to_owned(), 0, 1),
+        ("bytes=1048570-1048580".to_owned(), 1048570, 1048580),
+        ("bytes=2097152-".to_owned(), 2097152, audio.len() - 1),
+        ("bytes=-19".to_owned(), audio.len() - 19, audio.len() - 1),
+        ("bytes=2097152-9999999".to_owned(), 2097152, audio.len() - 1),
+        ("bytes=-9999999".to_owned(), 0, audio.len() - 1),
+    ] {
+        let response = client.get(&url).header("Range", &range).header("If-Range", etag.clone()).send().unwrap();
+        assert_eq!(response.status(), 206, "{range}");
+        assert_eq!(response.headers()["content-range"], format!("bytes {start}-{end}/{}", audio.len()));
+        assert_eq!(response.headers()["content-length"], (end - start + 1).to_string());
+        assert_eq!(response.bytes().unwrap().as_ref(), &audio[start..=end]);
+    }
+    for range in ["bytes=9999999-", "bytes=-0", "bytes=20-10"] {
+        let response = client.get(&url).header("Range", range).send().unwrap();
+        assert_eq!(response.status(), 416);
+        assert_eq!(response.headers()["content-range"], format!("bytes */{}", audio.len()));
+        assert!(response.bytes().unwrap().is_empty());
+    }
+    let response = client.get(url.replace("episode.mp3", "empty.mp3")).header("Range", "bytes=0-").send().unwrap();
+    assert_eq!(response.status(), 416);
+    assert_eq!(response.headers()["content-range"], "bytes */0");
+    let response = client.head(&url).header("Range", "bytes=10-19").send().unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-length"], audio.len().to_string());
+    assert!(response.bytes().unwrap().is_empty());
+    let response = client.get(&url).header("Range", "bytes=10-19").header("If-None-Match", etag).send().unwrap();
+    assert_eq!(response.status(), 304);
+    for (range, validator) in [("bytes=10-19", "\"old-version\""), ("bytes=0-1,10-19", "\"old-version\"")] {
+        let response = client.get(&url).header("Range", range).header("If-Range", validator).send().unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.bytes().unwrap().as_ref(), audio.as_slice());
+    }
+}
+
+#[test]
 fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletion() {
     let fixture = Fixture::start();
     let database = fixture.root.join("issues.db");
