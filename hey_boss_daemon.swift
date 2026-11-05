@@ -7383,6 +7383,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var rows: [ConversationText] = []
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
+    private struct ToolActivity: Codable {
+        let id: String
+        let afterMessage: Int
+        let description: String
+        let command: String
+        var output: String
+        var state: String
+    }
+    private var activities: [ToolActivity] = []
+    private var toolPanels: [NSButton: NSScrollView] = [:]
     struct Capture: Codable { let source: String; let text: String? }
     private struct Message: Codable {
         var text: String
@@ -7407,6 +7417,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var draftText: String?
         let directory: URL?
         let thread: String?
+        var activities: [ToolActivity]?
     }
     private let saveURL: URL
     private var messages: [Message] = []
@@ -7422,11 +7433,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let recognizer = SFSpeechRecognizer()
     var phase: Phase = .idle
     var audio: ReviewAudio?
-    private let session = URLSession(configuration: {
-        let config = URLSessionConfiguration.ephemeral
-        config.connectionProxyDictionary = [:]
-        return config
-    }())
     var recording: Data?
     private var resumePlayback: Timer?
     var decoding: SFSpeechRecognitionTask?
@@ -7654,7 +7660,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
-        rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); pendingCapture = nil
+        rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
         if phase != next {
@@ -7886,65 +7892,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return
         }
         save()
+        let closing = closingWorkspaces[agentStateURL.path]
         reply = Task { @MainActor [weak self] in
-            guard let self else { return }
+            await closing?.value
+            guard !Task.isCancelled, let self else { return }
+            self.reply = nil
             do {
-                try Task.checkCancellation()
-                let (bytes, response) = try await session.bytes(for: conversationRequest())
-                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-                    throw StorageError(description: "Sol is unavailable: the local proxy returned HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0).")
-                }
-                for try await line in bytes.lines where line.hasPrefix("data:") {
-                    try Task.checkCancellation()
-                    let data = Data(line.dropFirst(5).utf8)
-                    guard let event = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                        throw StorageError(description: "Unreadable response from Sol.")
-                    }
-                    if try responseEvent(event) { return }
-                }
-                throw StorageError(description: "Sol disconnected before finishing this reply.")
-            } catch {
-                guard !Task.isCancelled else { return }
-                generationFailed(error)
-            }
+                if process == nil { try startSol() }
+                try write(["turn": question, "history": Array(conversationHistory.dropLast())])
+            } catch { generationFailed(error) }
         }
     }
-    func conversationRequest() throws -> URLRequest {
-        guard let instructions, !instructions.isEmpty else { throw StorageError(description: "The conversation prompt is missing. Reinstall Hey Boss.") }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 120)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
-        if FileManager.default.fileExists(atPath: access.path) {
-            let keys = try JSONSerialization.jsonObject(with: Data(contentsOf: access)) as? [String: Any]
-            guard let key = keys?["local"] as? String, !key.isEmpty else { throw StorageError(description: "Hey Proxy’s local access key is invalid.") }
-            request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+    var conversationHistory: [[String: String]] {
+        messages.filter { $0.speaker != "Conversation" }.map {
+            ["role": $0.speaker == "You" ? "user" : "assistant", "content": $0.content]
         }
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": "gpt-6.1-sol", "stream": true, "store": false,
-            "text": ["verbosity": "low"], "instructions": instructions,
-            "input": messages.filter { $0.speaker != "Conversation" }.map {
-                ["role": $0.speaker == "You" ? "user" : "assistant", "content": $0.content]
-            }
-        ])
-        return request
     }
-    func responseEvent(_ event: [String: Any]) throws -> Bool {
-        switch event["type"] as? String {
-        case "response.output_text.delta", "response.refusal.delta":
-            guard let delta = event["delta"] as? String else { throw StorageError(description: "Unreadable text from Sol.") }
-            stream += delta; publish(final: false)
-        case "response.completed":
-            guard !stream.isEmpty else { throw StorageError(description: "Sol returned no reply.") }
-            reply = nil; finishTurn(stream); return true
-        case "error", "response.failed", "response.incomplete":
-            let response = event["response"] as? [String: Any]
-            let error = (response?["error"] ?? event["error"]) as? [String: Any]
-            throw StorageError(description: error?["message"] as? String ?? event["message"] as? String ?? "Sol couldn’t finish this reply. Try again.")
-        default: break
-        }
-        return false
-    }
+    private var agentStateURL: URL { chatURL(library.selected).deletingPathExtension().appendingPathExtension("agent.json") }
     func generationFailed(_ error: Error) {
         reply = nil
         if !stream.isEmpty { finishMessage(stream) }
@@ -8062,7 +8026,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         stream = ""; published = ""; messageLabel = nil; narratedItems.removeAll()
     }
     private func finishTurn(_ text: String) {
-        if lastMessage != text || !stream.isEmpty { finishMessage(text) }
+        if !text.isEmpty && (lastMessage != text || !stream.isEmpty) { finishMessage(text) }
         dismissApprovals(); turnDone = true; updateComposerActions(); save(); playNext()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
@@ -8109,8 +8073,23 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func startCodex(_ folder: URL) throws {
-        let child = Process(), stdin = Pipe(), stdout = Pipe()
+        let child = Process()
         child.executableURL = URL(fileURLWithPath: cli); child.arguments = ["workspace-chat"] + (thread.map { ["--resume", $0] } ?? []); child.currentDirectoryURL = folder
+        try startBridge(child)
+    }
+    func startSol() throws {
+        guard let resources = Bundle.main.resourceURL else { throw StorageError(description: "The conversation agent is missing. Reinstall Hey Boss.") }
+        let child = Process()
+        child.executableURL = resources.appendingPathComponent("node")
+        child.arguments = [resources.appendingPathComponent("conversation-agent.mjs").path, agentStateURL.path]
+        var environment = ProcessInfo.processInfo.environment
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        environment["PATH"] = home + "/.local/bin:" + home + "/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        child.environment = environment
+        try startBridge(child)
+    }
+    private func startBridge(_ child: Process) throws {
+        let stdin = Pipe(), stdout = Pipe()
         child.standardInput = stdin; child.standardOutput = stdout
         try child.run(); process = child; writer = stdin.fileHandleForWriting
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -8124,14 +8103,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     let line = Data(pending[..<i]); pending.removeSubrange(...i)
                     onMain {
                         guard let self, self.process === child else { return }
-                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.workspaceFailed("Unreadable response from Codex."); return }
+                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.workspaceFailed("Unreadable response from the agent."); return }
                         self.event(event)
                     }
                 }
             }
             onMain {
                 guard let self, self.process === child else { return }
-                self.workspaceFailed("Codex disconnected before finishing this turn.")
+                self.workspaceFailed("The agent disconnected before finishing this turn.")
             }
         }
     }
@@ -8140,10 +8119,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var data = try JSONSerialization.data(withJSONObject: command); data.append(10); try writer.write(contentsOf: data)
     }
     func event(_ envelope: [String:Any]) {
-        if let error = envelope["error"] as? String { workspaceFailed(error); return }
+        if let error = envelope["error"] as? String {
+            if directory == nil { closeWorkspace(); generationFailed(StorageError(description: error)) }
+            else { workspaceFailed(error) }
+            return
+        }
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
         switch kind {
+        case "AgentAccepted":
+            updateComposerActions(); save()
+        case "AgentStatus":
+            if phase != .speaking, let text = data["text"] as? String { state(.thinking, text) }
         case "Session":
             thread = data["id"] as? String
             folderTurnAccepted = thread != nil && data["accepted"] as? Bool == true
@@ -8152,11 +8139,27 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.rangeOfCharacter(from: .newlines) != nil { publish(final: false) } }
         case "Message":
             if let text = data["text"] as? String {
-                finishMessage(text)
-                if !text.isEmpty { save(unfinishedWorkspace: true) }
+                if lastMessage != text || !stream.isEmpty { finishMessage(text) }
+                if !text.isEmpty { save(unfinishedWorkspace: directory != nil) }
             }
         case "ToolStarted", "ToolCompleted":
             guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
+            if let description = item["description"] as? String {
+                if !stream.isEmpty { finishMessage(stream) }
+                let isNew = !activities.contains { $0.id == id }
+                let activity = ToolActivity(id: id, afterMessage: messages.count, description: description,
+                    command: item["command"] as? String ?? "", output: item["aggregatedOutput"] as? String ?? "",
+                    state: kind == "ToolStarted" ? "Running" : data["failed"] as? Bool == true ? "Failed" : "Completed")
+                if let index = activities.firstIndex(where: { $0.id == id }) {
+                    activities[index].output = activity.output; activities[index].state = activity.state
+                    renderTool(activities[index])
+                } else { activities.append(activity); renderTool(activity) }
+                if isNew && kind == "ToolStarted", audio != nil {
+                    let label = ConversationText(wrappingLabelWithString: description)
+                    speech.append((label, NSRange(location: 0, length: description.utf16.count), description)); playNext()
+                }
+                save(); return
+            }
             let follow = atEndOfChat
             let button = tools[id] ?? NSButton()
             let files = (item["changes"] as? [[String:Any]])?.compactMap { $0["path"] as? String }.joined(separator: ", ")
@@ -8181,9 +8184,32 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if showing, let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window); presentApproval() }
         case "TurnCompleted":
             if data["status"] as? String == "Completed" { finishTurn(data["output"] as? String ?? "") }
-            else { workspaceFailed("Codex did not finish this turn.") }
+            else { workspaceFailed("The agent did not finish this turn.") }
         default: break
         }
+    }
+    private func renderTool(_ activity: ToolActivity) {
+        let follow = atEndOfChat
+        let button = tools[activity.id] ?? NSButton()
+        let failed = activity.state == "Failed", running = activity.state == "Running"
+        button.attributedTitle = NSAttributedString(string: " " + activity.description, attributes: [
+            .font: NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.secondaryLabelColor])
+        button.image = NSImage(systemSymbolName: running ? "circle.dotted" : failed ? "exclamationmark.circle" : activity.state == "Interrupted" ? "stop.circle" : "checkmark.circle", accessibilityDescription: activity.state)
+        button.imagePosition = .imageLeading; button.isBordered = false
+        button.contentTintColor = failed ? .systemOrange : .tertiaryLabelColor
+        button.lineBreakMode = .byTruncatingTail; button.toolTip = activity.state + " · Show command and output"
+        button.setAccessibilityLabel(activity.description + " · " + activity.state)
+        button.target = self; button.action = #selector(showTool(_:))
+        if tools[activity.id] == nil {
+            tools[activity.id] = button
+            let group = NSStackView(); group.orientation = .vertical; group.alignment = .leading; group.spacing = 5
+            group.addArrangedSubview(button); turns.addArrangedSubview(group)
+            group.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
+            button.widthAnchor.constraint(lessThanOrEqualTo: group.widthAnchor).isActive = true
+        }
+        details[button] = activity.command + "\n\n" + activity.state + (activity.output.isEmpty ? "" : "\n" + activity.output)
+        if let panel = toolPanels[button], let field = panel.documentView as? NSTextView { field.string = details[button]! }
+        if follow { revealLatest() }
     }
     func detailView(_ text: String) -> NSScrollView {
         let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 145))
@@ -8193,6 +8219,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         scroller.documentView = field; scroller.hasVerticalScroller = true; return scroller
     }
     @objc func showTool(_ sender: NSButton) {
+        if let group = sender.superview as? NSStackView, group !== turns {
+            if let panel = toolPanels[sender] { panel.isHidden.toggle() }
+            else {
+                let panel = detailView(details[sender] ?? sender.title)
+                panel.drawsBackground = false; (panel.documentView as? NSTextView)?.drawsBackground = false
+                group.addArrangedSubview(panel); panel.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
+                panel.heightAnchor.constraint(equalToConstant: 145).isActive = true; toolPanels[sender] = panel
+            }
+            return
+        }
         let alert = NSAlert(); alert.messageText = "Tool details"; alert.accessoryView = detailView(details[sender] ?? sender.title)
         alert.addButton(withTitle: "Done"); alert.beginSheetModal(for: window)
     }
@@ -8222,11 +8258,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     private func closeWorkspace() {
-        if let process, let thread, process.isRunning {
+        let key = directory == nil ? agentStateURL.path : thread
+        if let process, let key, process.isRunning {
             // A resumed Codex thread has one writer until its previous helper exits.
-            closingWorkspaces[thread] = Task { @MainActor [weak self] in
+            closingWorkspaces[key] = Task { @MainActor [weak self] in
                 await Task.detached { process.waitUntilExit() }.value
-                self?.closingWorkspaces[thread] = nil
+                self?.closingWorkspaces[key] = nil
             }
         }
         process = nil; try? writer?.close(); writer = nil
@@ -8242,8 +8279,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        let hadStream = !stream.isEmpty
+        if !stream.isEmpty { finishMessage(stream) }
+        for index in activities.indices where activities[index].state == "Running" {
+            activities[index].state = "Interrupted"; renderTool(activities[index])
+        }
         let unfinishedWorkspace = directory != nil && answering && !turnDone && (folderTurnAccepted || lastMessage?.isEmpty == false)
-        let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
+        let notice = failure ?? (hadStream || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
         save()
         textFlush?.invalidate(); textFlush = nil
@@ -8276,7 +8318,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread)
+                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, activities: activities)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
@@ -8285,7 +8327,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func apply(_ saved: Saved) {
         directory = saved.directory; thread = saved.thread
         pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
-        for message in saved.messages { append(message.text, from: message.speaker, capture: message.capture) }
+        activities = (saved.activities ?? []).map { activity in
+            var value = activity
+            if value.state == "Running" { value.state = "Interrupted" }
+            return value
+        }
+        for message in saved.messages {
+            append(message.text, from: message.speaker, capture: message.capture)
+            for activity in activities where activity.afterMessage == messages.count { renderTool(activity) }
+        }
         refreshScope()
         state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
     }
