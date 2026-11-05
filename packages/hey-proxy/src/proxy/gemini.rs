@@ -11,9 +11,9 @@ pub(super) mod continuation;
 use continuation::Continuation;
 
 #[cfg(test)]
-mod continuation_tests;
-#[cfg(test)]
 mod bootstrap_tests;
+#[cfg(test)]
+mod continuation_tests;
 
 pub(super) struct GeminiState {
     pub codec: ReasoningCodec,
@@ -50,6 +50,31 @@ impl GeminiState {
             codec: ReasoningCodec::new(&key),
         })
     }
+}
+
+fn read_failure(error: &reqwest::Error) -> &'static str {
+    use std::{error::Error, io::ErrorKind};
+    if error.is_timeout() {
+        return "timeout";
+    }
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                ErrorKind::ConnectionReset => return "connection_reset",
+                ErrorKind::UnexpectedEof => return "incomplete_body",
+                _ => {}
+            }
+        }
+        if cause
+            .downcast_ref::<hyper::Error>()
+            .is_some_and(|e| e.is_incomplete_message())
+        {
+            return "incomplete_body";
+        }
+        source = cause.source();
+    }
+    "other_read_error"
 }
 
 fn sse_bytes(event: &Value) -> Bytes {
@@ -323,7 +348,13 @@ pub(super) async fn forward(
                 }
             };
             let (bytes,eof,interrupted)=match chunk {
-                Ok(Some(bytes))=>(bytes,false,false),Ok(None)=>(Bytes::new(),true,false),Err(_)=>(Bytes::new(),false,true),
+                Ok(Some(bytes))=>(bytes,false,false),Ok(None)=>(Bytes::new(),true,false),Err(err)=>{
+                    let cause = read_failure(&err);
+                    // Service logs remain available when request history is disabled.
+                    eprintln!("Gemini stream read failed: cause={cause} started={started} received_bytes={received}");
+                    proxy.service.logs.update(proxy.log_id,"gemini_stream_read_failed",json!({"cause":cause,"started":started,"received_bytes":received}), |_| true);
+                    (Bytes::new(),false,true)
+                },
             };
             let frame_events=(||->Result<Vec<Value>> {
                 received = received.saturating_add(bytes.len());

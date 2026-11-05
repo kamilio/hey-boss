@@ -301,3 +301,41 @@ async fn stream_bootstrap_honors_deadline_fallback_owner_and_final_sse_frame() {
         upstream.abort();
     }
 }
+
+#[tokio::test]
+async fn gemini_read_failure_distinguishes_timeout_reset_and_truncated_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    for expected in ["timeout", "connection_reset", "incomplete_body"] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (read_first, first_read) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            socket.read(&mut [0; 1024]).await.unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nx")
+                .await
+                .unwrap();
+            first_read.await.unwrap();
+            if expected == "connection_reset" {
+                socket.set_zero_linger().unwrap();
+            }
+            if expected == "timeout" {
+                std::future::pending::<()>().await;
+            }
+        });
+        let mut response = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.chunk().await.unwrap().unwrap(), "x");
+        read_first.send(()).unwrap();
+        let error = response.chunk().await.unwrap_err();
+        assert_eq!(read_failure(&error), expected, "{error:?}");
+        server.abort();
+    }
+}
