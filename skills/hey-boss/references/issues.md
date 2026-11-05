@@ -57,4 +57,6 @@ assigned or reserved work. Add `--request-id ID` for an explicit retry key; othe
 the guarded draft edit derives a stable key and returns it as `request_id`.
 Missing `issue_draft` support returns `fleet_capability_unsupported` before sending;
 disconnection never falls back to a replica write. A timeout may mean a write was
-saved: retry the identical command/key. Explicit `--supervisor --draft` also works; undrafting is not supported on this route.
+saved: retry the identical command/key. Explicit `--supervisor --draft` also works. `issue undraft NUMBER` routes through
+the tunnel with `issue_undraft` support and version guards; assigned or reserved
+work is refused.
