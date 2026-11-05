@@ -2,6 +2,13 @@ import Foundation
 import TalkCore
 
 enum T3Tools {
+    static func ordinalSwitch(_ transcript: String) -> CorrectionAction? {
+        let words = transcript.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard let match = words.wholeMatch(of: #/(?:(?:now,? )?we can |let['’]s )?(?:go|switch) to the (\w+) (?:chat|thread|conversation)[.!]?/#),
+              let index = ["first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth"].firstIndex(of: String(match.1)) else { return nil }
+        return .switchThread(index + 1)
+    }
+
     static func definitions(prompt: (String) throws -> String) throws -> [[String: Any]] {
         func tool(_ name: String, _ properties: [String: [String: Any]] = [:]) throws -> [String: Any] {
             try ToolPackage.tool(name, properties, prompt: prompt)

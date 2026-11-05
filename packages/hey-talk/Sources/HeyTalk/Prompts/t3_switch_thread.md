@@ -1,1 +1,1 @@
-Go to T3 chat 1–9. “Go to chat three” means position 3 directly. For a named chat, read t3_list_threads first; never guess its position.
+Switch directly by position (1–9): “the first chat” is 1, “chat three” is 3. Only look up a thread with t3_list_threads when the speaker gives a name.

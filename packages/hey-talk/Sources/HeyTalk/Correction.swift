@@ -164,7 +164,10 @@ final class Correction {
                 } catch { completion(.failure(error)) }
             }
         }
-        turn([], last: nil, count: 0)
+        if package == .t3, let action = T3Tools.ordinalSwitch(text) {
+            if let perform { perform(action) { _ in completion(.success(action)) } }
+            else { completion(.success(action)) }
+        } else { turn([], last: nil, count: 0) }
     }
     func cancel() { task?.cancel(); task = nil }
     deinit { task?.cancel() }
