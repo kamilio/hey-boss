@@ -12,7 +12,7 @@ enum T3Tools {
             tool("t3_new_thread", ["project": ["type": "string"], "text": ["type": "string"]]),
             tool("t3_list_threads"),
             tool("t3_switch_thread", ["position": ["type": "integer", "minimum": 1, "maximum": 9]]),
-            tool("t3_settle_thread"), tool("t3_pin_thread", ["pinned": ["type": "boolean"]])
+            tool("t3_settle_thread"), tool("t3_pin_thread"), tool("t3_unpin_thread")
         ]
     }
 
@@ -33,9 +33,8 @@ enum T3Tools {
                   let position = values["position"] as? Int, (1...9).contains(position) else { throw TalkError("Choose a T3 thread from 1 to 9.") }
             return .switchThread(position)
         case "t3_settle_thread" where values.isEmpty: return .settleThread
-        case "t3_pin_thread" where values.count == 1:
-            guard let pinned = values["pinned"] as? NSNumber, CFGetTypeID(pinned) == CFBooleanGetTypeID() else { throw TalkError("Choose whether to pin or unpin the T3 thread.") }
-            return .pinThread(pinned.boolValue)
+        case "t3_pin_thread" where values.isEmpty: return .pinThread(true)
+        case "t3_unpin_thread" where values.isEmpty: return .pinThread(false)
         default: throw TalkError("Invalid T3 tool call.")
         }
     }

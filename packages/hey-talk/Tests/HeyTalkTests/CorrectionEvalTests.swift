@@ -11,7 +11,8 @@ final class CorrectionEvalTests: XCTestCase {
             ("Go to chat three.", [.switchThread(3)]),
             ("Let's settle this thread.", [.settleThread]),
             ("Let's pin this thread.", [.pinThread(true)]),
-            ("Unpin this thread.", [.pinThread(false)])
+            ("Unpin the chat.", [.pinThread(false)]),
+            ("Stop pinning this chat.", [.pinThread(false)])
         ] {
             var actions: [CorrectionAction] = []
             let _: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
