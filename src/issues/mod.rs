@@ -635,6 +635,8 @@ pub enum Operation {
     },
     Undraft {
         number: i64,
+        #[serde(default)]
+        if_version: Option<i64>,
     },
     Claim {
         number: i64,
@@ -863,7 +865,7 @@ impl Operation {
             | Self::Comments { number, .. }
             | Self::Edit { number, .. }
             | Self::SetYolo { number, .. }
-            | Self::Undraft { number }
+            | Self::Undraft { number, .. }
             | Self::Claim { number, .. }
             | Self::Ready { number, .. }
             | Self::AssignBoss { number, .. }

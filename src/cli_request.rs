@@ -21,6 +21,7 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
             missing(&value["if_version"])
         }
         "edit" => value["if_version"].is_null() && (supervisor || value["draft"] == true),
+        "undraft" => value["if_version"].is_null(),
         "move" => value["if_order_version"].is_null(),
         "reopen" | "set_blockers" => supervisor && value["if_version"].is_null(),
         "ready" => value["guard"].is_null(),
@@ -182,7 +183,7 @@ fn prepare(
     let authority = supervisor
         || matches!(
             operation["action"].as_str(),
-            Some("assign" | "ready" | "move")
+            Some("assign" | "ready" | "move" | "undraft")
         )
         || (operation["action"] == "batch" && !operation["matching"].is_null())
         || (operation["action"] == "edit" && operation["draft"] == true);
@@ -237,6 +238,7 @@ fn prepare(
                 Operation::Ready { guard: Some(_), .. }
                     | Operation::Batch { .. }
                     | Operation::Move { .. }
+                    | Operation::Undraft { .. }
             ))
     {
         let key = serde_json::to_vec(&json!([

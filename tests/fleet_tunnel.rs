@@ -19,8 +19,8 @@ struct Fleet {
 impl Fleet {
     fn new() -> Self {
         static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let root = PathBuf::from(format!(
-            "/tmp/hb-tunnel-{}-{}",
+        let root = std::env::current_dir().unwrap().join(format!(
+            ".t-{}-{}",
             std::process::id(),
             SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -507,6 +507,79 @@ fn companion_moves_persist_with_guarded_retries_and_no_offline_fallback() {
         ),
         json!([[0]])
     );
+}
+
+#[test]
+fn companion_undraft_is_guarded_and_retries_preserve_later_changes() {
+    let mut f = Fleet::new();
+    f.start();
+    f.sql(
+        "main",
+        "UPDATE fleet_meta SET node='tunnel-main' WHERE id=1",
+    );
+    f.issue("main", &["create", "--title", "Future chore", "--draft"], 0);
+    let args = ["undraft", "1", "--request-id", "release-once"];
+    let saved = f.issue("peer", &args, 0);
+    assert_eq!(saved["store"]["host"], "supervisor");
+    assert_eq!(saved["issue"]["draft"], false);
+    assert_eq!(saved["issue"]["assignee"], Value::Null);
+    f.issue("main", &["edit", "1", "--draft"], 0);
+    assert_eq!(f.issue("peer", &args, 0), saved);
+    assert_eq!(f.issue("main", &["view", "1"], 0)["issue"]["draft"], true);
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "undraft",
+                "1",
+                "--if-version",
+                "1",
+                "--request-id",
+                "stale-release"
+            ],
+            4
+        )["error"]["code"],
+        "conflict"
+    );
+    f.sql("main", "INSERT INTO worker_runs(id,project_id,issue_number,actor_id,state,started_at,updated_at,reservation_expires,job,owner_pid,owner_start,machine) VALUES('reserved','named:Tunnel QA',1,'codex:worker','starting',1,1,9223372036854775807,'{}',123,'test','other')");
+    assert_eq!(
+        f.issue(
+            "peer",
+            &[
+                "undraft",
+                "1",
+                "--supervisor",
+                "--request-id",
+                "reserved-release"
+            ],
+            4
+        )["error"]["code"],
+        "conflict"
+    );
+    assert_eq!(f.issue("main", &["view", "1"], 0)["issue"]["draft"], true);
+    assert_eq!(
+        f.sql(
+            "main",
+            "SELECT count(*) FROM worker_runs WHERE id='reserved' AND finished_at IS NULL"
+        ),
+        json!([[1]])
+    );
+    f.sql("main", "DELETE FROM worker_runs WHERE id='reserved'");
+    assert_eq!(
+        f.issue("peer", &["undraft", "1", "--supervisor"], 0)["issue"]["draft"],
+        false
+    );
+    f.issue("main", &["edit", "1", "--draft"], 0);
+    f.services[2].kill().unwrap();
+    f.services[2].wait().unwrap();
+    // No source mutation is acknowledged when the authority is unavailable.
+    let denied = f.issue(
+        "peer",
+        &["undraft", "1", "--request-id", "offline-release"],
+        1,
+    );
+    assert_eq!(denied["error"]["code"], "fleet_unavailable");
+    assert_eq!(f.issue("main", &["view", "1"], 0)["issue"]["draft"], true);
 }
 
 #[test]
