@@ -36,8 +36,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var autoMenuItem: NSMenuItem?
     private lazy var historyWindow = HistoryWindow(history: history)
     private lazy var accessibilitySetup = AccessibilitySetup()
-    private var session = RecordingSession() { didSet { updateSubmitIndicator() } }
+    private var session = RecordingSession() { didSet {
+        updateSubmitIndicator()
+        if session.phase == .idle || session.phase == .failed { refreshConversation() }
+    } }
     private var overlay: Overlay?
+    private var conversation: [String: Any]?
+    private var conversationLevel = 0.0
+    private var conversationRevision = 0
+    private var openingConversation = false
     private var hotkey: Hotkey?
     private var menuItem: NSStatusItem?
     private var pendingReply: (([String: Any]) -> Void)?
@@ -71,6 +78,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         do { try server.start() }
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(conversationChanged(_:)), name: .init("local.hey-boss.conversation"), object: "local.hey-boss.desktop")
+        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshConversation), name: name, object: nil)
+        }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(updateSubmitIndicator),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
         // Switching tabs doesn't activate a new application.
@@ -108,18 +119,19 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .toggleSpeechMode: self.speech.toggleEnabled()
             case .chatWithContext: self.chatWithContext()
             case .cancel:
-                if self.speech.active { self.speech.stop() }
+                if self.conversation != nil { self.controlConversation("stop") }
+                else if self.speech.active { self.speech.stop() }
                 else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil || self.waitingPaste != nil { self.cancelDictation() }
             case .none: break
             }
         }
         speech.canOffer = { [weak self] in
             guard let self else { return false }
-            return self.waitingPaste == nil && self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil)
+            return self.conversation == nil && self.waitingPaste == nil && self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil)
         }
         speech.willPlay = { [weak self] in
             guard let self else { return false }
-            guard self.waitingPaste == nil && self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil) else {
+            guard self.conversation == nil, self.waitingPaste == nil && self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil) else {
                 self.overlay?.error("Finish dictating before reading aloud."); return false
             }
             if self.autoTarget != nil || self.autoRestart != nil { self.cancel() }
@@ -189,6 +201,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         vocabularyTimer.setEventHandler { [weak self] in self?.refreshVocabulary() }
         vocabularyTimer.resume(); self.vocabularyTimer = vocabularyTimer
         showOverlay(overlayEnabled)
+        refreshConversation()
         applyAutoMode()
         if CommandLine.arguments.contains("--show-history") { showHistory() }
         for number in [SIGTERM, SIGINT] {
@@ -209,6 +222,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         historyWindow.show(keepingFocus: session.phase == .recording)
     }
     @objc private func chatWithContext() {
+        guard !openingConversation else { return }
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
@@ -216,19 +230,32 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         if autoTarget != nil || autoRestart != nil { cancel() }
         if speech.active { speech.stop() }
+        openingConversation = true
+        showOverlay(true)
+        applyConversation(["active": true, "phase": "starting", "message": "Opening chat…", "action": "Cancel opening chat"])
         let source = app.bundleIdentifier == "local.hey-boss.desktop" ? nil : (app.localizedName ?? app.executableURL?.lastPathComponent ?? "Current app")
+        let revision = conversationRevision
         contextQueue.async {
             do {
                 let text = source.flatMap { _ in AppContext.capture(pid: app.processIdentifier) }
+                guard DispatchQueue.main.sync(execute: { self.openingConversation && self.conversationRevision == revision }) else { return }
                 var request: [String: Any] = ["command": "conversation_context", "sync": false]
                 request["title"] = source; request["description"] = text
-                guard try self.chatRequest(request) == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
+                guard try self.chatRequest(request)?["status"] as? String == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
+                DispatchQueue.main.async {
+                    guard self.openingConversation, self.conversationRevision == revision else { return }
+                    self.openingConversation = false; self.refreshConversation()
+                }
             } catch {
-                DispatchQueue.main.async { self.showOverlay(true); self.overlay?.error("Couldn’t open chat: " + error.localizedDescription) }
+                DispatchQueue.main.async {
+                    guard self.openingConversation, self.conversationRevision == revision else { return }
+                    self.openingConversation = false; self.applyConversation(nil)
+                    self.showOverlay(true); self.overlay?.error("Couldn’t open chat: " + error.localizedDescription)
+                }
             }
         }
     }
-    private func chatRequest(_ request: [String: Any]) throws -> String? {
+    private func chatRequest(_ request: [String: Any]) throws -> [String: Any]? {
         let job = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.hey-boss.plist")
         guard let sockets = NSDictionary(contentsOf: job)?["Sockets"] as? [String: [String: Any]],
               let path = sockets["Listener"]?["SockPathName"] as? String else {
@@ -239,14 +266,81 @@ final class TalkService: NSObject, NSApplicationDelegate {
         try Wire.write(Wire.json(request), to: fd, timeout: 5)
         shutdown(fd, SHUT_WR)
         let reply = try JSONSerialization.jsonObject(with: Wire.response(from: fd)) as? [String: Any]
-        return reply?["status"] as? String
+        return reply
+    }
+    @objc private func conversationChanged(_ notification: Notification) {
+        if let level = notification.userInfo?["level"] as? Double { conversationLevel = level; return }
+        guard !openingConversation else { return }
+        guard let state = notification.userInfo as? [String: Any] else { return }
+        applyConversation(state)
+    }
+    @objc private func refreshConversation() {
+        guard !openingConversation else { return }
+        guard !NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.desktop").isEmpty else { applyConversation(nil); return }
+        let revision = conversationRevision
+        contextQueue.async {
+            let state = (try? self.chatRequest(["command": "conversation_status", "sync": false]))?["conversation"] as? [String: Any]
+            DispatchQueue.main.async {
+                guard self.conversationRevision == revision, !self.openingConversation else { return }
+                self.applyConversation(state)
+            }
+        }
+    }
+    private func applyConversation(_ state: [String: Any]?) {
+        conversationRevision += 1
+        let next = state?["active"] as? Bool == true ? state : nil
+        if next != nil, waitingPaste != nil || session.phase == .processing || (session.phase == .recording && autoTarget == nil) {
+            if next?["microphone"] as? Bool == true {
+                contextQueue.async { _ = try? self.chatRequest(["command": "conversation_control", "title": "dictation_busy", "sync": false]) }
+            }
+            return
+        }
+        if next != nil, conversation == nil {
+            if autoTarget != nil || autoRestart != nil { cancel() }
+            if speech.active { speech.stop() }
+        }
+        let previous = conversation != nil
+        conversation = next; conversationLevel = 0
+        if next != nil || previous {
+            overlay?.showConversation(next)
+            if next == nil { overlay?.update(session.phase) }
+        }
+        if next == nil, previous {
+            focusTrigger.reset()
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.conversation == nil else { return }
+                self.focusedInputChanged(FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs))
+            }
+        }
+        hotkey?.captureEscape((next != nil && next?["phase"] as? String != "idle") || speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
+    }
+    private func controlConversation(_ action: String = "toggle") {
+        if openingConversation {
+            openingConversation = false; applyConversation(nil)
+            contextQueue.async { _ = try? self.chatRequest(["command": "conversation_control", "title": "stop", "sync": false]) }
+            return
+        }
+        if conversation?["phase"] as? String == "idle", action == "toggle" {
+            var starting = conversation ?? [:]
+            starting["phase"] = "starting"; starting["message"] = "Starting…"; starting["action"] = "Stop voice"
+            applyConversation(starting)
+        }
+        let revision = conversationRevision
+        contextQueue.async {
+            let result = try? self.chatRequest(["command": "conversation_control", "title": action, "sync": false])
+            DispatchQueue.main.async {
+                guard self.conversationRevision == revision else { return }
+                self.applyConversation(result?["conversation"] as? [String: Any])
+            }
+        }
     }
     private func recordShortcut() {
+        if conversation != nil { controlConversation(); return }
         guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "local.hey-boss.desktop",
               session.phase == .idle || session.phase == .failed else { toggle(); return }
         contextQueue.async {
             // Other Hey Boss windows still use ordinary dictation.
-            if (try? self.chatRequest(["command": "conversation_toggle", "sync": false])) != "ok" {
+            if (try? self.chatRequest(["command": "conversation_toggle", "sync": false]))?["status"] as? String != "ok" {
                 DispatchQueue.main.async {
                     if NSWorkspace.shared.frontmostApplication == app { self.toggle() }
                 }
@@ -266,20 +360,25 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onChatWithContext = { [weak self] in self?.chatWithContext() }
+            view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }
+            view.onStopConversation = { [weak self] in self?.controlConversation("stop") }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
             view.onOpenAccessibility = { [weak self] in
                 self?.accessibilitySetup.show()
                 self?.accessibilitySetup.openSettings()
             }
-            view.level = { [weak self] in self?.capture.level ?? 0 }
+            view.level = { [weak self] in
+                guard let self else { return 0 }
+                return self.conversation == nil ? self.capture.level : self.conversationLevel
+            }
             view.setAutoMode(autoSettings.enabled)
             view.setCorrection(correctionSettings.enabled)
             overlay = view
         }
-        updateSubmitIndicator()
         overlayEnabled = show; overlay?.show(show)
         overlayMenuItem?.title = show ? "Hide Pill" : "Show Pill"
         updateStatusTooltip()
+        DispatchQueue.main.async { [weak self] in self?.updateSubmitIndicator() }
     }
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
     @objc private func updateSubmitIndicator() {
@@ -328,6 +427,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } else { autoSubmitKey.stop() }
     }
     private func focusedInputChanged(_ input: FocusedInput?, notice: String? = nil) {
+        guard conversation == nil, !openingConversation else { return }
         if input != autoTarget { autoSubmitKey.passNextEnter = false }
         if session.phase == .listening, input != autoTarget {
             cancel()
@@ -379,6 +479,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: restart)
     }
     @objc private func toggle() {
+        if conversation != nil { controlConversation(); return }
         switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: true) {
         case .stop(let submit): pressEnter = submit; stop { _ in }
         case .start(let submit): start(showOverlay: overlayEnabled, paste: true, pressEnter: submit) { _ in }
@@ -404,6 +505,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } catch { overlay?.error(error.localizedDescription) }
     }
     @objc private func cancelDictation() {
+        if conversation != nil { controlConversation("stop"); return }
         if let wait = waitingPaste, wait.timer.isValid,
            !Paste.copyAndStopWaiting(wait.text, retry: wait.timer, to: .general) {
             overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: wait.timer)
@@ -436,6 +538,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         ]
         value["vocabulary_sync"] = vocabularySync
         value["speech"] = speech.status
+        value["conversation"] = conversation
         value["speech_hotkey_registered"] = hotkey?.speechRegistered ?? false
         value["speech_mode_hotkey_registered"] = hotkey?.speechModeRegistered ?? false
         if let input = capture.activeInput { value["active_input"] = input.json }
@@ -623,7 +726,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func start(showOverlay: Bool, paste: Bool, pressEnter: Bool = false, focusedInput: FocusedInput? = nil,
                        reply: @escaping ([String: Any]) -> Void) {
+        guard conversation == nil else { reply(failure("Stop voice chat before starting dictation.")); return }
         if session.phase == .listening { cancel() }
+        if session.phase == .idle || session.phase == .failed {
+            self.showOverlay(showOverlay)
+            overlay?.preparing(focusedInput == nil ? .recording : .listening)
+        }
         let id: UInt64
         do { id = try session.begin(listening: focusedInput != nil) } catch { reply(failure(error.localizedDescription)); return }
         speech.stop()
@@ -640,8 +748,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
             if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
-        idleRelease?.cancel(); self.showOverlay(showOverlay)
-        overlay?.preparing(session.phase); hotkey?.captureEscape(true)
+        idleRelease?.cancel(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
             guard self.session.generation == id, self.session.phase == .recording || self.session.phase == .listening else { return }
             let start = ProcessInfo.processInfo.systemUptime

@@ -35,7 +35,7 @@ func agentRevision() throws -> String {
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
@@ -150,6 +150,8 @@ try Data(contentsOf: root.appendingPathComponent("assets/hey-boss.icns"))
     .write(to: resources.appendingPathComponent("hey-boss.icns"), options: .atomic)
 try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
     .write(to: resources.appendingPathComponent("conversation.md"), options: .atomic)
+try Data(contentsOf: root.appendingPathComponent("assets/conversation-title.md"))
+    .write(to: resources.appendingPathComponent("conversation-title.md"), options: .atomic)
 let buildAgent = Process()
 buildAgent.executableURL = URL(fileURLWithPath: "/usr/bin/env")
 buildAgent.arguments = ["node", root.appendingPathComponent("assets/build-conversation-agent.mjs").path, resources.path, try agentRevision()]

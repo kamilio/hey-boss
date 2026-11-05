@@ -154,6 +154,7 @@ final class Overlay {
     private var dockRestY: CGFloat?
     private var dockMotion: DockMotion?
     private var phase: Phase = .idle
+    private var conversation: [String: Any]?
     private var expanded = false
     private var enabled = true
     private var pasteWait: PasteWaitView?
@@ -173,6 +174,8 @@ final class Overlay {
     var onToggleCorrection: (() -> Void)?
     var onShowHistory: (() -> Void)?
     var onChatWithContext: (() -> Void)?
+    var onInterruptConversation: (() -> Void)?
+    var onStopConversation: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
@@ -374,7 +377,22 @@ final class Overlay {
         }
     }
     func update(_ next: Phase) {
+        guard conversation == nil else { return }
         update(next, waitingForAudio: false)
+    }
+    func showConversation(_ state: [String: Any]?) {
+        conversation = state
+        guard let state else { update(.idle); return }
+        let name = state["phase"] as? String
+        let busy = ["decoding", "thinking", "starting"].contains(name) && state["approval"] as? Bool != true
+        let next: Phase = name == "recording" ? .recording : busy ? .processing : .idle
+        clearStatus(); clearNotice()
+        update(next, waitingForAudio: false)
+        connecting.stringValue = state["message"] as? String ?? "Ready"
+        connecting.isHidden = false
+        correctionIndicator.isHidden = true; submitIndicator.isHidden = true
+        glow.isHidden = true
+        updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
         pasteWait?.removeFromSuperview(); pasteWait = nil
@@ -392,12 +410,12 @@ final class Overlay {
         wave.alphaValue = waitingForAudio ? 0.35 : 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
-        glow.isHidden = next != .processing; halo.isHidden = next != .processing
+        glow.isHidden = next != .processing; halo.isHidden = next != .processing && !waitingForAudio
         if next == .processing { processingStarted = ProcessInfo.processInfo.systemUptime; glow.strokeEnd = 0.02 }
         updateAccessibilityLabel()
         layout(animated: true); updateTimer()
         if next != .processing { glow.removeAllAnimations(); halo.removeAllAnimations() }
-        if next == .processing {
+        if next == .processing || waitingForAudio {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 let pulse = CABasicAnimation(keyPath: "opacity")
                 pulse.fromValue = 0.55; pulse.toValue = 1; pulse.duration = 0.95
@@ -438,8 +456,9 @@ final class Overlay {
         updateAccessibilityLabel(); layout(animated: true)
     }
     func preparing(_ phase: Phase = .recording) {
-        guard !waitingForAudio else { return }
+        guard conversation == nil, !waitingForAudio else { return }
         update(phase, waitingForAudio: true)
+        connecting.stringValue = "Connecting…"
         let delay = DispatchWorkItem { [weak self] in
             guard let self, self.waitingForAudio else { return }
             self.connecting.isHidden = false
@@ -447,6 +466,7 @@ final class Overlay {
         }
         connectingDelay = delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: delay)
+        panel.displayIfNeeded()
     }
     func setAutoMode(_ enabled: Bool) {
         autoMode = enabled
@@ -454,17 +474,28 @@ final class Overlay {
     }
     func setCorrection(_ enabled: Bool) {
         correctionEnabled = enabled
-        correctionIndicator.isHidden = enabled || pasteWait != nil
+        correctionIndicator.isHidden = enabled || pasteWait != nil || conversation != nil
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func setAutoSubmit(_ enabled: Bool) {
         guard autoSubmitEnabled != enabled else { return }
         autoSubmitEnabled = enabled
-        submitIndicator.isHidden = enabled || pasteWait != nil
+        submitIndicator.isHidden = enabled || pasteWait != nil || conversation != nil
         updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
     }
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
+        if let conversation {
+            let action = menu.addItem(withTitle: conversation["action"] as? String ?? "Start voice", action: #selector(recordFromNotice), keyEquivalent: "")
+            action.target = self
+            if conversation["interrupt"] as? Bool == true {
+                menu.addItem(withTitle: "Listen for next message", action: #selector(interruptConversation), keyEquivalent: "").target = self
+            }
+            if conversation["phase"] as? String == "recording" {
+                menu.addItem(withTitle: "Cancel recording", action: #selector(stopConversation), keyEquivalent: "").target = self
+            }
+            return menu
+        }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
         history.target = self
         for (section, items) in [
@@ -501,7 +532,17 @@ final class Overlay {
     @objc private func toggleCorrection() { onToggleCorrection?() }
     @objc private func showHistory() { onShowHistory?() }
     @objc private func chatWithContext() { onChatWithContext?() }
+    @objc private func interruptConversation() { onInterruptConversation?() }
+    @objc private func stopConversation() { onStopConversation?() }
     private func updateModeAppearance() {
+        if let conversation {
+            let recording = ["listening", "recording"].contains(conversation["phase"] as? String)
+            let color = conversation["approval"] as? Bool == true ? NSColor.systemOrange : recording ? TalkDesign.active : TalkDesign.accent
+            pillContent.accent = color; identity.color = color; wave.color = color
+            autoHalo.isHidden = true
+            pillContent.toolTip = (conversation["detail"] as? String ?? "") + " · " + (conversation["action"] as? String ?? "") + " · Hyper+R"
+            return
+        }
         let tint = resultIcon.isHidden ? nil : resultIcon.contentTintColor
         pillContent.accent = tint ?? (autoMode ? TalkDesign.automatic : phase == .recording ? TalkDesign.active : TalkDesign.accent)
         let rim = tint ?? TalkDesign.automatic
@@ -520,6 +561,11 @@ final class Overlay {
         pillContent.toolTip = "AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
     private func updateAccessibilityLabel() {
+        if let conversation {
+            pillContent.setAccessibilityRole(.button)
+            pillContent.setAccessibilityLabel("Chat · " + (conversation["message"] as? String ?? "Ready") + " · " + (conversation["action"] as? String ?? "Start voice"))
+            return
+        }
         if let pasteWait {
             pillContent.setAccessibilityRole(.group)
             pillContent.setAccessibilityLabel(pasteWait.accessibilityLabel())
@@ -535,10 +581,11 @@ final class Overlay {
             if glass.style != style { glass.style = style }
         }
         let showConnecting = !connecting.isHidden
+        let statusWidth: CGFloat = conversation != nil && !expanded ? 144 : 200
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26
         let rightExtension = status?.frame.width ?? 0
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
-            ?? (showConnecting ? NSSize(width: 200, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
+            ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
         let target = NSSize(width: max(200, size.width + 96, size.width + 2 * max(leftExtension, rightExtension) + 16), height: size.height + 48)
         layoutRevision += 1
         let revision = layoutRevision
@@ -565,6 +612,10 @@ final class Overlay {
         glow.path = rim
         halo.frame = CGRect(x: center - 32, y: 8, width: 64, height: 44)
         halo.path = CGPath(roundedRect: CGRect(x: 4, y: 4, width: 56, height: 36), cornerWidth: 18, cornerHeight: 18, transform: nil)
+        if conversation != nil {
+            halo.frame = frame
+            halo.path = CGPath(roundedRect: CGRect(origin: .zero, size: frame.size), cornerWidth: 18, cornerHeight: 18, transform: nil)
+        }
         let outline = CGPath(roundedRect: frame, cornerWidth: 18, cornerHeight: 18, transform: nil)
         let autoOutline = CGPath(roundedRect: frame.insetBy(dx: -0.5, dy: -0.5), cornerWidth: 18.5, cornerHeight: 18.5, transform: nil)
         if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -585,15 +636,16 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let contentOrigin = leftExtension + (size.width - (showConnecting ? 200 : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded ? contentOrigin + 9 : leftExtension + (size.width - 22) / 2
+        let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
+        let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (size.width - 22) / 2
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
-            connecting.frame = NSRect(x: contentOrigin + 102, y: 10, width: 90, height: 17)
+            let labelX: CGFloat = expanded ? 102 : 40
+            connecting.frame = NSRect(x: contentOrigin + labelX, y: 10, width: statusWidth - labelX - 8, height: 17)
         } completionHandler: { [weak self] in
             guard shrinking, self?.layoutRevision == revision else { return }
             self?.layout(animated: false)
@@ -608,7 +660,7 @@ final class Overlay {
         noticeRecordButton.isHidden = notice == nil && status == nil
         pillContent.setAccessibilityRole(pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
-        noticeRecordButton.setAccessibilityLabel(phase == .recording ? "Stop dictation" : "Start dictation")
+        noticeRecordButton.setAccessibilityLabel(conversation?["action"] as? String ?? (phase == .recording ? "Stop dictation" : "Start dictation"))
     }
     private func resizePanel(to windowSize: NSSize) {
         guard panel.frame.size != windowSize else { return }
@@ -631,6 +683,7 @@ final class Overlay {
     private func updateTimer() {
         timer?.invalidate(); timer = nil
         if phase == .processing, enabled {
+            guard conversation == nil else { return }
             let ticker = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 CATransaction.begin()

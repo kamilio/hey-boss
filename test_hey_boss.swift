@@ -71,6 +71,9 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_POLISH"] {
+        app.finishLaunching(); auditChatPolish(root); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENT"] {
         app.setActivationPolicy(.regular)
         DispatchQueue.main.async { auditConversationAgent(root); exit(0) }
@@ -4513,6 +4516,47 @@ func auditReviewEcho() {
 #if canImport(FoundationModels)
 import FoundationModels
 @available(macOS 26, *)
+func auditChatPolish(_ root: String) {
+    let saved = URL(fileURLWithPath: root).appendingPathComponent("current.json")
+    try! FileManager.default.createDirectory(at: saved.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let chat = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
+    func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+    chat.append("Can we pin messages in Slack?", from: "You")
+    chat.append("The Slack tool can read channels and threads.", from: "Hey Boss")
+    precondition(!views(chat.turns).compactMap { $0 as? NSTextField }.contains { ["You", "Hey Boss"].contains($0.stringValue) })
+    for phase: VoiceConversation.Phase in [.idle, .starting, .listening, .recording, .decoding, .thinking, .speaking] {
+        chat.state(phase, "Test state")
+        precondition(chat.voiceStatus["phase"] as? String == phase.rawValue)
+        precondition(chat.voiceStatus["action"] as? String == chat.meter.accessibilityLabel())
+        precondition(chat.meter.isEnabled, "Every active phase must be cancellable")
+    }
+    chat.approvalSheet = NSAlert(); chat.state(.thinking, "Waiting for approval")
+    precondition(chat.voiceStatus["message"] as? String == "Needs approval" && chat.meter.accessibilityLabel() == "Open chat")
+    chat.approvalSheet = nil
+    chat.state(.idle, "Ready")
+    chat.generateTitle()
+    let deadline = Date().addingTimeInterval(60)
+    while chat.titleTask != nil && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    precondition(chat.titleTask == nil)
+    if SystemLanguageModel.default.isAvailable {
+        let index = try! JSONSerialization.jsonObject(with: Data(contentsOf: saved)) as! [String: Any]
+        let item = (index["chats"] as! [[String: Any]]).first!
+        let title = item["title"] as! String
+        precondition(item["generatedTitle"] as? Bool == true && (1...3).contains(title.split(whereSeparator: \.isWhitespace).count), title)
+        precondition(["slack", "pin", "message"].contains { title.lowercased().contains($0) }, "The title must describe the topic, not answer the question: \(title)")
+        print("PASS Apple title: \(title)")
+        let reopened = VoiceConversation(cli: chat.cli, saveURL: saved)
+        let row = reopened.tableView(reopened.historyList, viewFor: nil, row: 0) as! NSTableCellView
+        precondition(row.textField?.stringValue == title)
+    }
+    print("PASS chat states, cancellable transcription, and speaker label removal")
+    if ProcessInfo.processInfo.environment["HEY_BOSS_CHAT_INSPECT"] == "1" {
+        NSApp.setActivationPolicy(.regular); chat.show(); chat.state(.listening, "Listening")
+        withExtendedLifetime(chat) { NSApp.run() }
+    }
+}
+
+@available(macOS 26, *)
 func auditConversation(_ root: String) {
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
     let measured = "Use a ¼-inch bit and 5/16\" coils.", reading = ReaderVoice.spokenMeasurements(measured)
@@ -5145,7 +5189,7 @@ func auditConversationAgent(_ root: String) {
 func auditSolChat(_ root: String) {
     let saved = URL(fileURLWithPath: root).appendingPathComponent("stream/current.json")
     let chat = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: saved)
-    precondition(chat.status.stringValue == "GPT-6.1 Sol", "Ordinary chats must use GPT-6.1 Sol")
+    precondition(chat.settings.menu.items.contains(where: { $0.title == "GPT-6.1 Sol" && $0.state == .on }), "Ordinary chats must use GPT-6.1 Sol")
     let audio = ReviewAudio()
     audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
     audio.engine.mainMixerNode.outputVolume = 0; try! audio.engine.start()

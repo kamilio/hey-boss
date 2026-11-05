@@ -5280,6 +5280,18 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         chat.meter.performClick(nil); return true
     }
     @available(macOS 26, *)
+    var conversationStatus: [String: Any] { (conversationWindow as? VoiceConversation)?.voiceStatus ?? ["active": false] }
+    @available(macOS 26, *)
+    func controlConversation(_ action: String?) -> Bool {
+        guard let chat = conversationWindow as? VoiceConversation, chat.voiceStatus["active"] as? Bool == true else { return false }
+        if chat.window.attachedSheet != nil, action != "stop" { chat.show(); return true }
+        if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
+        else if action == "stop" { chat.stop("Microphone off") }
+        else if action == "interrupt" { chat.listenForNextTurn() }
+        else { chat.toggle() }
+        return true
+    }
+    @available(macOS 26, *)
     func currentConversation() -> VoiceConversation {
         let conversation = conversationWindow as? VoiceConversation ?? VoiceConversation(cli: cli ?? "/opt/homebrew/bin/hey-boss")
         conversationWindow = conversation; return conversation
@@ -7206,6 +7218,10 @@ func recognizeTurn(_ buffer: AVAudioPCMBuffer, recognizer: SFSpeechRecognizer,
 
 #if canImport(FoundationModels)
 @available(macOS 26, *)
+@Generable
+struct ConversationTitle { var title: String }
+
+@available(macOS 26, *)
 final class ConversationMeter: NSButton {
     private(set) var phase = VoiceConversation.Phase.idle
     private var heights = Array(repeating: CGFloat(4), count: 11)
@@ -7259,6 +7275,9 @@ final class ConversationMeter: NSButton {
             return sqrt(samples.reduce(0) { let v = Double($1)/32768; return $0 + v*v } / Double(max(1, samples.count)))
         }
         heights.removeFirst(); heights.append(4 + 18 * pow(min(1, rms * 8), 0.75)); needsLayout = true
+        if Bundle.main.bundleIdentifier == "local.hey-boss.desktop" {
+            DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: ["level": rms], deliverImmediately: true)
+        }
     }
     override func viewDidChangeEffectiveAppearance() { super.viewDidChangeEffectiveAppearance(); needsLayout = true }
     override func layout() {
@@ -7340,7 +7359,7 @@ final class ConversationWindow: NSWindow {
         if event.type == .keyDown, event.keyCode == 53, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
            attachedSheet == nil, let chat = delegate as? VoiceConversation,
            chat.phase != .idle, (firstResponder as? NSTextView)?.hasMarkedText() != true {
-            chat.stop(chat.phase == .thinking || chat.phase == .speaking ? "Reply stopped" : "Microphone off")
+            chat.stop(chat.audio == nil ? "Reply stopped" : "Voice off")
             return
         }
         super.sendEvent(event)
@@ -7349,16 +7368,17 @@ final class ConversationWindow: NSWindow {
 
 @available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
-    enum Phase { case idle, starting, listening, recording, decoding, thinking, speaking }
+    enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let historyList = NSTableView()
     private let split = NSSplitViewController()
     private let emptyHistory = NSTextField(wrappingLabelWithString: "Your conversations appear here.")
     private struct Chat: Codable {
         let id: UUID
-        let title: String
+        var title: String
         let workspace: String
         let updated: Date
+        var generatedTitle: Bool?
     }
     private struct Library: Codable {
         var selected = UUID()
@@ -7368,6 +7388,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var chats: [Chat] = []
     }
     private var library = Library()
+    var titleTask: Task<Void, Never>?
     private var refreshingHistory = false
     let status = NSTextField(wrappingLabelWithString: "")
     let meter = ConversationMeter()
@@ -7505,11 +7526,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
-        refreshScope(); state(.idle, "GPT-6.1 Sol"); window.initialFirstResponder = input; window.center(); restore()
+        refreshScope(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if !rows.isEmpty { revealLatest() }
+        generateTitle()
     }
     func openWithContext(source: String?, text: String?) {
         show()
@@ -7610,9 +7632,40 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func rememberTurn() {
         guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
-        let chat = Chat(id: library.selected, title: String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
-                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date())
+        let previous = library.chats.first { $0.id == library.selected }
+        let chat = Chat(id: library.selected, title: previous?.title ?? String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
+                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date(), generatedTitle: previous?.generatedTitle)
         library.chats.removeAll { $0.id == chat.id }; library.chats.insert(chat, at: 0); refreshHistory()
+    }
+    func generateTitle() {
+        guard titleTask == nil, SystemLanguageModel.default.isAvailable,
+              let url = Bundle.main.url(forResource: "conversation-title", withExtension: "md"),
+              let instruction = try? String(contentsOf: url, encoding: .utf8), !instruction.isEmpty else { return }
+        if !messages.isEmpty, !library.chats.contains(where: { $0.id == library.selected }) { rememberTurn(); save() }
+        let pending = library.chats.filter { $0.generatedTitle != true }
+        guard !pending.isEmpty else { return }
+        titleTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { titleTask = nil }
+            for chat in pending {
+                guard !Task.isCancelled else { return }
+                guard let data = try? Data(contentsOf: chatURL(chat.id)), let saved = try? JSONDecoder().decode(Saved.self, from: data) else { continue }
+                let turns = saved.messages.filter { $0.speaker != "Conversation" }
+                guard turns.contains(where: { $0.speaker != "You" }) else { continue }
+                let content = turns.prefix(6).map { $0.speaker + ": " + $0.text.prefix(1000) }.joined(separator: "\n")
+                do {
+                    let session = LanguageModelSession()
+                    let response = try await session.respond(to: content + "\n\n" + instruction, generating: ConversationTitle.self,
+                        options: GenerationOptions(sampling: .greedy, maximumResponseTokens: 64))
+                    guard !Task.isCancelled else { return }
+                    let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"“”")))
+                        .split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ")
+                    guard !title.isEmpty, let index = library.chats.firstIndex(where: { $0.id == chat.id }) else { continue }
+                    library.chats[index].title = title; library.chats[index].generatedTitle = true
+                    try writeLibrary(); refreshHistory()
+                } catch { /* Keep the existing title when the local model is unavailable or refuses. */ }
+            }
+        }
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         let row = historyList.selectedRow
@@ -7655,7 +7708,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let sheet = window.attachedSheet { window.endSheet(sheet) }
         library.selected = UUID(); refreshHistory(); restoreError = nil; thread = nil; directory = url; clearTurns(); input.stringValue = ""; refreshScope()
         pendingCapture = capture
-        state(.idle, url == nil ? "GPT-6.1 Sol" : "Codex workspace"); window.makeFirstResponder(input)
+        state(.idle, "Voice off"); window.makeFirstResponder(input)
         return save()
     }
     func clearTurns() {
@@ -7669,14 +7722,37 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         phase = next; status.stringValue = message
         meter.show(next)
-        let voiceAction = next == .idle ? "Start voice" : next == .recording ? "Send voice message" : audio == nil ? "Stop reply" : "Stop voice"
-        meter.isEnabled = next != .decoding
-        meter.toolTip = meter.isEnabled ? voiceAction + " (Hyper+R)" : message
-        meter.setAccessibilityLabel(meter.isEnabled ? voiceAction : message)
+        let voiceAction = voiceStatus["action"] as! String
+        meter.isEnabled = true
+        meter.toolTip = voiceAction + " (Hyper+R)"
+        meter.setAccessibilityLabel(voiceAction)
         meter.setAccessibilityValue(message)
         updateComposerActions()
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
+    var voiceStatus: [String: Any] {
+        let action = approvalSheet != nil ? "Open chat" : phase == .idle ? "Start voice" : phase == .recording ? "Send voice message" : audio != nil || [.starting, .listening, .decoding].contains(phase) ? "Stop voice" : "Stop reply"
+        let label: String
+        switch phase {
+        case .idle: label = "Voice off"
+        case .starting: label = "Starting…"
+        case .listening: label = "Listening"
+        case .recording: label = "Recording"
+        case .decoding: label = "Transcribing…"
+        case .thinking: label = "Thinking…"
+        case .speaking: label = "Speaking"
+        }
+        return ["active": window.isVisible && (window.isKeyWindow || phase != .idle), "phase": phase.rawValue,
+                "microphone": phase == .starting || (audio != nil && audio?.stopped == false),
+                "approval": approvalSheet != nil,
+                "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
+    }
+    private func publishVoiceStatus() {
+        guard Bundle.main.bundleIdentifier == "local.hey-boss.desktop" else { return }
+        DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: voiceStatus, deliverImmediately: true)
+    }
+    func windowDidBecomeKey(_ notification: Notification) { publishVoiceStatus() }
+    func windowDidResignKey(_ notification: Notification) { publishVoiceStatus() }
     func modelReady() -> Bool {
         if let restoreError { state(.idle, restoreError); return false }
         return true
@@ -7692,8 +7768,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         listenNext.isHidden = !canListenNext
         listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
         listenNext.toolTip = turnDone ? "Stop reading this answer and listen for your next message" : "Stop this reply and listen for your next message"
+        publishVoiceStatus()
     }
-    @objc private func listenForNextTurn() {
+    @objc func listenForNextTurn() {
         guard canListenNext else { return }
         interruptPlayback()
         if !turnDone { cancelTurn() }
@@ -7718,9 +7795,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func toggle() {
         if phase == .recording { if recording?.isEmpty == false { endRecording("manual") }; return }
-        if phase == .decoding { return }
-        guard phase == .idle else { stop("Conversation ended"); return }
+        guard phase == .idle else { stop("Voice off"); return }
         guard modelReady() else { return }
+        state(.starting, "Starting…")
+        window.displayIfNeeded()
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
         let audio = ReviewAudio(); audio.conversation = true; self.audio = audio
         state(.starting, "Opening microphone…")
@@ -7827,24 +7905,22 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let row = NSView(), card = NSBox()
         card.boxType = .custom; card.cornerRadius = 12; card.borderWidth = 0
         card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
-        let who = NSTextField(labelWithString: speaker)
-        who.font = .systemFont(ofSize: 11, weight: .semibold); who.textColor = mine ? .controlAccentColor : .secondaryLabelColor
         let label = ConversationText(wrappingLabelWithString: text); label.isSelectable = true
+        label.setAccessibilityLabel(speaker)
         label.font = .systemFont(ofSize: 15); label.setContentCompressionResistancePriority(.required, for: .vertical)
         if !mine {
             label.allowsEditingTextAttributes = true
             label.attributedStringValue = markdown(text, size: 15, color: .labelColor)
         }
         turns.addArrangedSubview(row); rows.append(label); messages.append(Message(text: text, speaker: speaker, capture: capture))
-        for v in [card,who,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
+        for v in [card,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
         let inset: CGFloat = mine ? 12 : 0
         NSLayoutConstraint.activate([
             row.widthAnchor.constraint(equalTo: turns.widthAnchor),
             card.topAnchor.constraint(equalTo: row.topAnchor), card.bottomAnchor.constraint(equalTo: row.bottomAnchor),
             mine ? card.trailingAnchor.constraint(equalTo: row.trailingAnchor) : card.leadingAnchor.constraint(equalTo: row.leadingAnchor),
             card.widthAnchor.constraint(lessThanOrEqualTo: row.widthAnchor, multiplier: mine ? 0.84 : 1),
-            who.topAnchor.constraint(equalTo: card.topAnchor, constant: mine ? 8 : 0), who.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
-            label.topAnchor.constraint(equalTo: who.bottomAnchor, constant: 3), label.leadingAnchor.constraint(equalTo: who.leadingAnchor),
+            label.topAnchor.constraint(equalTo: card.topAnchor, constant: mine ? 9 : 0), label.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: inset),
             label.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -inset)
         ])
         if let capture, let snapshot = capture.text {
@@ -8027,7 +8103,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if !text.isEmpty && (lastMessage != text || !stream.isEmpty) { finishMessage(text) }
-        dismissApprovals(); turnDone = true; updateComposerActions(); save(); playNext()
+        dismissApprovals(); turnDone = true; updateComposerActions(); save(); playNext(); generateTitle()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -8054,7 +8130,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.highlight(part.label, nil); self.reading = false; self.playNext()
             })
         } else if turnDone {
-            state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
+            state(audio == nil ? .idle : .listening, audio != nil ? "Listening" : "Voice off")
         } else if phase == .speaking { state(.thinking, "Waiting for reply…") }
     }
     private func sendWorkspace(_ payload: String, in folder: URL) {
@@ -8233,7 +8309,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         alert.addButton(withTitle: "Done"); alert.beginSheetModal(for: window)
     }
     func presentApproval() {
-        guard approvalSheet == nil, let (id,kind,params) = approvals.first else { return }
+        guard approvalSheet == nil else { return }
+        guard let (id,kind,params) = approvals.first else { state(phase, voiceStatus["message"] as! String); return }
         let alert = NSAlert(); approvalSheet = alert; alert.messageText = "Allow this Codex action?"
         if kind == "mcpServer/elicitation/request" {
             alert.informativeText = "Requested by " + (params["serverName"] as? String ?? "MCP server")
@@ -8256,6 +8333,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             self.approvalSheet = nil; self.approvals.removeFirst()
             do { try self.write(["decision":id,"allow":result == .alertSecondButtonReturn]); self.presentApproval() } catch { self.workspaceFailed(error.localizedDescription) }
         }
+        state(phase, "Waiting for approval")
     }
     private func closeWorkspace() {
         let key = directory == nil ? agentStateURL.path : thread
@@ -8335,7 +8413,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             for activity in activities where activity.afterMessage == messages.count { renderTool(activity) }
         }
         refreshScope()
-        state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
+        state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : "Voice off")
     }
     private func restore() {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
@@ -8347,7 +8425,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     apply(try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(library.selected))))
                 } else {
                     pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
-                    refreshScope(); state(.idle, directory == nil ? "GPT-6.1 Sol" : "Codex workspace")
+                    refreshScope(); state(.idle, "Voice off")
                 }
             } else {
                 // Preserve the single conversation saved by earlier versions.
@@ -8358,7 +8436,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             state(.idle, restoreError!)
         }
     }
-    func windowWillClose(_ notification: Notification) { stop("Ready"); save() }
+    func windowWillClose(_ notification: Notification) {
+        stop("Ready"); save()
+        if Bundle.main.bundleIdentifier == "local.hey-boss.desktop" {
+            DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: ["active": false], deliverImmediately: true)
+        }
+    }
 }
 #endif
 
@@ -9945,10 +10028,16 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_context", "conversation_toggle"].contains(request.command) {
+                    } else if ["conversation_context", "conversation_toggle", "conversation_status", "conversation_control"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
+                                if request.command == "conversation_status" {
+                                    reply.send(["status": "ok", "conversation": overview.conversationStatus]); return
+                                }
+                                if request.command == "conversation_control" {
+                                    reply.send(["status": overview.controlConversation(request.title) ? "ok" : "unhandled", "conversation": overview.conversationStatus]); return
+                                }
                                 if request.command == "conversation_toggle" {
                                     reply.send(["status": overview.toggleFocusedConversation() ? "ok" : "unhandled"])
                                     return
