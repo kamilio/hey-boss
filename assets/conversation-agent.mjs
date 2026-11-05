@@ -1,4 +1,4 @@
-import {readFile, mkdir, open, rename} from 'node:fs/promises';
+import {readFile, mkdir, open, rename, realpath} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {dirname, isAbsolute, join} from 'node:path';
 import {createInterface} from 'node:readline';
@@ -120,7 +120,7 @@ export async function createConversation({home = homedir(), statePath, emit, fet
   };
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.argv[1])).href) {
   const emit = value => process.stdout.write(JSON.stringify(value) + '\n');
   const controller = new AbortController();
   const input = createInterface({input: process.stdin});
