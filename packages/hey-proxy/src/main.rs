@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, long_version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_PROXY_RUNTIME_ID"), ")"), about)]
 struct Args {
     /// Config file (default: ~/.hey-boss/proxy/config.yaml)
     #[arg(long, global = true)]

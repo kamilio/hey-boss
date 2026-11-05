@@ -73,6 +73,28 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
         collect(root, &path, &mut files);
     }
+    // The rollout bundle embeds unrelated workspace files. Identify the running
+    // service separately so publishing a new bundle need not drop live requests.
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut runtime = DefaultHasher::new();
+    let package_path = package.strip_prefix(root).unwrap();
+    for file in &files {
+        if file.starts_with(package_path.join("src"))
+            || file == &package_path.join("build.rs")
+            || file.file_name().is_some_and(|name| name == "Cargo.toml")
+            || file == Path::new("Cargo.lock")
+        {
+            file.hash(&mut runtime);
+            fs::read(root.join(file)).unwrap().hash(&mut runtime);
+        }
+    }
+    for name in ["TARGET", "PROFILE", "CARGO_ENCODED_RUSTFLAGS"] {
+        env::var_os(name).hash(&mut runtime);
+    }
+    println!(
+        "cargo:rustc-env=HEY_PROXY_RUNTIME_ID={:016x}",
+        runtime.finish()
+    );
     let mut out = String::from("&[\n");
     for file in files {
         let name = file.to_str().unwrap().replace('\\', "/");
