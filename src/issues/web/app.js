@@ -754,7 +754,7 @@ async function runListAction(action, context) {
       return;
     }
     if (["draft", "undraft"].includes(action)) {
-      const result = await mutate(action === "undraft" ? {action, number:issue.number} : {action:"edit", number:issue.number, draft:true, title:null, body:null, add_labels:[], remove_labels:[], if_version:issue.version}, project, host);
+      const result = await mutate(action === "undraft" ? {action, number:issue.number, if_version:issue.version} : {action:"edit", number:issue.number, draft:true, title:null, body:null, add_labels:[], remove_labels:[], if_version:issue.version}, project, host);
       if (current()) toast(action === "draft" ? "Issue moved to draft" : result.issue.state === "blocked" ? "Draft marked ready; unfinished blockers still pause pickup" : "Issue marked ready for agents");
     } else {
       // Share the detail view's ownership confirmations and protected mutations.
@@ -2687,7 +2687,7 @@ document.addEventListener("click", async event => {
   const error = $("#draft-error");
   if (error) error.hidden = true;
   try {
-    await mutate(ready ? {action:"undraft",number:issue.number} : {
+    await mutate(ready ? {action:"undraft",number:issue.number,if_version:issue.version} : {
       action:"edit",number:issue.number,draft:true,title:null,body:null,add_labels:[],remove_labels:[],if_version:issue.version
     }, project, host);
     if (!current()) return;
