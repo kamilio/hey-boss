@@ -13,6 +13,7 @@ case "$1" in
   create|update) test -f "$2/index.html" ;;
 esac
 if test -f "$root/fail"; then echo 'provider unavailable' >&2; exit 1; fi
+if test -f "$root/json-fail"; then echo '{"level":"error","message":"JSON provider failure"}'; exit 1; fi
 if test "$1" = update; then test "$3" = remote-id; test "$4" = v1; fi
 printf '{"artifact_id":"remote-id","artifact_url":"https://example.com/report","version":"v1"}'
 "#).unwrap();
@@ -79,9 +80,10 @@ fn uncertain_creation_requires_linking_before_retry_and_never_creates_twice() {
     fs::write(&source, "first").unwrap();
     super::super::publish(&database, &source, "report").unwrap();
     let p = provider(&f);
-    fs::write(f.0.join("fail"), "").unwrap();
-    assert!(share_with(&database, "report", "fixture", &p, None, true).is_err());
-    fs::remove_file(f.0.join("fail")).unwrap();
+    fs::write(f.0.join("json-fail"), "").unwrap();
+    let error = share_with(&database, "report", "fixture", &p, None, true).unwrap_err();
+    assert!(error.message.contains("JSON provider failure"));
+    fs::remove_file(f.0.join("json-fail")).unwrap();
     assert!(share_with(&database, "report", "fixture", &p, None, true).is_err());
     share_with(
         &database,
