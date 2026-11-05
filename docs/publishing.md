@@ -73,3 +73,58 @@ still enforces its existing loopback, private LAN, or configured Tailscale origi
 
 The content-hash design follows [Cloudflare Wrangler's open-source Pages uploader](https://github.com/cloudflare/workers-sdk/blob/main/packages/wrangler/src/pages/upload.ts).
 Replication reuses hey-boss's existing [cr-sqlite engine](../packages/hey-boss-sync/src/lib.rs), not a new distributed filesystem.
+
+## External publishing providers
+
+Providers run separately installed CLIs; no hosting SDK or credentials are bundled.
+Configure them in `~/.hey-boss/publishing.yaml` (a private fleet uses its state
+folder). Commands use the existing bounded utility runner. Arguments are passed
+literally; `{source}`, `{name}`, `{id}`, and `{version}` replace whole arguments.
+Response fields are JSON pointers into the CLI's JSON output.
+
+```yaml
+claude:
+  command: claude-artifacts
+  audience: organization
+  create: [create, '{source}', --title, '{name}', --skip-build, --share, org, --output, json]
+  read: [read, '{id}', --output, json]
+  update: [update, '{id}', '{source}', --title, '{name}', --skip-build, --base-version, '{version}', --share, org, --output, json]
+  fields:
+    id: /artifact_id
+    url: /artifact_url
+    version: /version
+```
+
+Use an absolute executable path when it is not on the service's PATH. Login stays
+with the provider (`claude-artifacts auth login`). Claude currently supports
+private and organization sharing, **not anonymous public access**. A provider
+that supports public access uses `audience: public` and its own publish commands.
+
+```sh
+hey-boss pages providers
+hey-boss pages publish ./dist --name dashboard --provider claude
+hey-boss pages share dashboard --provider claude
+hey-boss pages share dashboard --provider claude --link https://claude.ai/code/artifact/ID
+hey-boss pages sync dashboard
+hey-boss pages share dashboard --provider claude --auto-sync false
+```
+
+Sharing saves the provider, remote ID, URL, remote version, and uploaded content
+hash. Subsequent `pages publish` calls automatically update linked providers,
+including retrying a failed update; an identical successful upload is skipped.
+`share --link` reads the existing target and uploads the current page to it.
+Auto-sync follows saved page publications, not arbitrary filesystem edits.
+Links and sync receipts replicate across the fleet; executable configuration
+and credentials stay local. A machine without the configured provider reports
+the pending update; run `pages sync` on a configured machine to send it.
+
+The library shows the saved link, audience, auto-sync setting, and whether the
+latest saved content was uploaded. This is an upload receipt, not continuous
+remote monitoring. Providers can use `{version}` to reject conflicting edits.
+Failed uploads preserve the last successful receipt and show an error. An
+uncertain initial create is never automatically repeated: recover its link from
+the provider and use `share --link` to avoid creating duplicates.
+
+Deleting a private page does not delete its external publication. Remove it
+through the provider CLI. Publishing that name again starts a fresh page and
+does not silently reconnect its old external targets.

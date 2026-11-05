@@ -677,6 +677,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     }
     if request.method() == &Method::Get {
         if path == "/api/pages" { return json_response(pages::api(app, request.url())?); }
+        if path == "/api/pages/providers" { return json_response(pages::providers()?); }
         if path == "/api/secrets" {
             let inventory = crate::secrets::open()
                 .and_then(|mut store| store.inventory())
@@ -1124,6 +1125,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/admin/preview",
             "/api/skills",
             "/api/pages/delete",
+            "/api/pages/share",
+            "/api/pages/sync",
         ]
         .contains(&path.as_str())
     {
@@ -1149,6 +1152,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             return Err(Error::invalid("Request exceeds 16 MiB"));
         }
         if path == "/api/pages/delete" { return json_response(pages::delete(app, &bytes)?); }
+        if path == "/api/pages/share" { return json_response(pages::share(app, &bytes)?); }
+        if path == "/api/pages/sync" { return json_response(pages::sync(app, &bytes)?); }
         if path == "/api/errors" {
             return json_response(errors::act(&bytes, app)?);
         }
