@@ -307,6 +307,39 @@ final class OverlayTests: XCTestCase {
         XCTAssertEqual(panel.frame.size, initialFrame.size)
     }
 
+    @MainActor func testAutoListeningStartupDoesNotFlashRecordingWhenSwitchingChats() async throws {
+        let app = NSApplication.shared
+        let oldWindows = Set(app.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(app.windows.first { !oldWindows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let views = descendants(try XCTUnwrap(panel.contentView))
+        let wave = try XCTUnwrap(views.first { $0.identifier?.rawValue == "recording-waveform" })
+        let connecting = try XCTUnwrap(views.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Connecting…" })
+        let glow = try XCTUnwrap(panel.contentView?.layer?.sublayers?.first { $0.name == "auto-mode-glow" } as? CAShapeLayer)
+        overlay.setAutoMode(true)
+        overlay.update(.listening)
+        let compact = panel.frame.size
+        let outline = glow.path?.boundingBox
+        for _ in 0..<3 {
+            overlay.update(.idle)
+            overlay.preparing(.listening)
+            XCTAssertTrue(wave.isHidden)
+            XCTAssertTrue(connecting.isHidden)
+            XCTAssertEqual(panel.frame.size, compact)
+            XCTAssertEqual(glow.path?.boundingBox, outline)
+            overlay.update(.listening)
+            XCTAssertEqual(panel.frame.size, compact)
+        }
+        try await Task.sleep(for: .milliseconds(800))
+        XCTAssertTrue(connecting.isHidden, "A finished startup must not flash a delayed Connecting notice")
+        XCTAssertEqual(panel.frame.size, compact)
+        overlay.update(.recording)
+        XCTAssertFalse(wave.isHidden)
+        XCTAssertGreaterThan(try XCTUnwrap(glow.path).boundingBox.width, try XCTUnwrap(outline).width)
+    }
+
     @MainActor func testWaveformIsVisibleAsSoonAsRecordingIsReady() throws {
         let app = NSApplication.shared
         let oldWindows = Set(app.windows.map(\.windowNumber))
