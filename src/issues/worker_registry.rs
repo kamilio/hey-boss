@@ -121,7 +121,7 @@ struct ProjectSettingsRow {
     worktree_enabled: bool,
     overrides: String,
 }
-pub(super) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
+pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
         "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason,worker_execution FROM project_settings WHERE project_id=?1",
         [&p.id],
@@ -712,7 +712,7 @@ fn status(db: &Connection, id: Option<&str>, p: &Project) -> Result<Value> {
     result.as_object_mut().unwrap().extend(json!({"ok":true,"workers":workers,"worker_id":selected,"config":config,"version":version,"kind":kind,"upgrading":upgrading,"fleet":fleet,"project":p,"projects":projects}).as_object().unwrap().clone());
     Ok(result)
 }
-pub(super) fn execute(
+pub(in crate::issues) fn execute(
     db: &Connection,
     p: &Project,
     op: &Operation,

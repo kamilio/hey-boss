@@ -11,10 +11,12 @@ pub mod commits;
 mod dependency_notices;
 mod fleet;
 pub(crate) use fleet::INDEXES as FLEET_INDEXES;
+pub mod config_files;
 pub(crate) mod drafts;
 mod global_settings;
 pub mod identity;
 pub(crate) mod model_recovery;
+pub mod project_config;
 pub(crate) mod project_features;
 mod project_pause;
 pub(crate) mod provenance;
@@ -378,6 +380,9 @@ pub enum Operation {
         settings: Option<ProjectInitSettings>,
     },
     ProjectSettings,
+    ProjectConfig {
+        operation: project_config::Operation,
+    },
     ConfigureProject {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_model: Option<String>,
@@ -743,6 +748,9 @@ pub struct ProjectInitSettings {
 
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::ProjectConfig { operation } = self {
+            return operation.writes();
+        }
         if let Self::DictationVocabulary { operation } = self {
             return !matches!(operation, vocabulary::Operation::Show);
         }
@@ -824,6 +832,7 @@ impl Operation {
             | Self::ConfigureGlobal { .. }
             | Self::ProjectInit { .. }
             | Self::ProjectSettings
+            | Self::ProjectConfig { .. }
             | Self::ConfigureProject { .. }
             | Self::WorkerStatus
             | Self::WorkerPreview { .. }

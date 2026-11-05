@@ -3333,3 +3333,102 @@ fn commit_review_snapshots_and_laptop_feedback_sync_without_a_checkout() {
         0
     );
 }
+
+#[test]
+fn project_configuration_offline_history_survives_conflicts_and_remote_undo() {
+    use serde_json::json;
+    let fa = Fixture(std::env::current_dir().unwrap().join(format!(
+        ".config-replica-a-{}",
+        crate::issues::worker::random_id().unwrap()
+    )));
+    let fb = Fixture(std::env::current_dir().unwrap().join(format!(
+        ".config-replica-b-{}",
+        crate::issues::worker::random_id().unwrap()
+    )));
+    for f in [&fa, &fb] {
+        std::fs::create_dir(&f.0).unwrap();
+    }
+    let a = fa.db();
+    let b = fb.db();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        install(db, node).unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+        db.execute("UPDATE fleet_meta SET node=?1,role='peer'", [node])
+            .unwrap();
+    }
+    seed(&a);
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    let call = |fixture: &Fixture, node: &str, operation: Value| {
+        let request = serde_json::from_value(json!({"version":1,"project":{"id":"p","name":"Project"},"actor":{"id":format!("human:{node}"),"kind":"human","machine":node,"host":node,"cwd":fixture.0,"source":"test"},"operation":operation})).unwrap();
+        crate::issues::Store::open(&fixture.0.join("issues.db"))
+            .unwrap()
+            .execute(&request)
+            .unwrap()
+    };
+    // Both replicas edit the same prompt while disconnected.
+    let first = call(
+        &fa,
+        "a",
+        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/checkout.md")}),
+    );
+    let second = call(
+        &fb,
+        "b",
+        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/main.md")}),
+    );
+    assert_ne!(first["revision"], second["revision"]);
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    transfer(&ea, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    let settings = json!({"action":"project_settings"});
+    assert_eq!(
+        call(&fa, "a", settings.clone())["prompt"],
+        call(&fb, "b", settings.clone())["prompt"]
+    );
+    let history = json!({"action":"project_config","operation":{"command":"history"}});
+    let left = call(&fa, "a", history.clone());
+    let right = call(&fb, "b", history.clone());
+    assert_eq!(left["revisions"], right["revisions"]);
+    assert_eq!(left["revisions"].as_array().unwrap().len(), 2);
+    // Undo a revision authored on the other machine, then deliver it twice.
+    call(
+        &fb,
+        "b",
+        json!({"action":"project_config","operation":{"command":"undo","revision":first["revision"]}}),
+    );
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        call(&fa, "a", settings.clone())["prompt"],
+        call(&fb, "b", settings)["prompt"]
+    );
+    assert_eq!(
+        call(&fa, "a", history)["revisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        a.query_row("SELECT count(*) FROM distributed_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM distributed_rejections", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}

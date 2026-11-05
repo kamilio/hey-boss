@@ -6,6 +6,7 @@ mod autoconnect;
 mod broker;
 mod cli_request;
 mod companion;
+mod config_cli;
 mod error_cli;
 mod exec_cli;
 mod health_cli;
@@ -216,6 +217,8 @@ enum Command {
     },
     /// Initialize a project and choose its workflow.
     Project(project_cli::Options),
+    /// Edit private project files and inspect or undo configuration changes.
+    Config(config_cli::Options),
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
@@ -519,6 +522,17 @@ fn run() -> std::io::Result<()> {
     }
     hey_boss::database::use_service();
     match &cli.command {
+        Command::Config(options) => {
+            if let Err(error) = config_cli::run(options) {
+                if options.json {
+                    println!("{}", serde_json::json!({"ok":false,"error":error}));
+                } else {
+                    eprintln!("hey-boss config: {error}");
+                }
+                std::process::exit(error.exit_code());
+            }
+            return Ok(());
+        }
         Command::Lookup(options) => {
             if let Err(error) = lookup_cli::run(options) {
                 if options.json {

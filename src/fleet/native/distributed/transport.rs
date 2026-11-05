@@ -508,6 +508,15 @@ fn connected(ctx: &Context, target: &Target, stop: &AtomicBool) -> Result<()> {
 }
 
 pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
+    let config = ctx.clone();
+    std::thread::spawn(move || {
+        while !config.stopped() {
+            if let Err(error) = crate::issues::config_files::reconcile(&config.path) {
+                eprintln!("Project configuration sync: {error}");
+            }
+            config.wait(Duration::from_secs(2));
+        }
+    });
     std::thread::spawn(move || {
         let mut workers =
             BTreeMap::<String, (Target, Arc<AtomicBool>, std::thread::JoinHandle<()>)>::new();
