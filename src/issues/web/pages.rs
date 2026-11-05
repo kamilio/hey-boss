@@ -128,6 +128,22 @@ fn file(app: &App, url: &str) -> Result<pages::Content> {
     }
     pages::content(&database, revision, &path)
 }
+fn byte_range(value: &str, size: u64) -> Option<(u64, u64)> {
+    let last = size.checked_sub(1)?;
+    let (start, end) = value.split_once('-')?;
+    if start.is_empty() {
+        let length = end.parse::<u64>().ok()?;
+        return (length > 0).then_some((size.saturating_sub(length), last));
+    }
+    let start = start.parse::<u64>().ok()?;
+    let end = if end.is_empty() {
+        last
+    } else {
+        end.parse::<u64>().ok()?.min(last)
+    };
+    (start <= end).then_some((start, end))
+}
+
 pub(super) fn respond(request: tiny_http::Request, app: &App) {
     let result = (|| {
         if !allowed(&request, app, true) {
@@ -139,33 +155,66 @@ pub(super) fn respond(request: tiny_http::Request, app: &App) {
         if !matches!(request.method(), Method::Get | Method::Head) {
             return Err(Error::invalid("Published content is read-only"));
         }
-        file(app, request.url())
+        let mut content = file(app, request.url())?;
+        let etag = format!("\"{}\"", content.etag);
+        let cached = header(&request, "if-none-match") == Some(etag.as_str());
+        let range = (request.method() == &Method::Get
+            && !cached
+            && header(&request, "if-range").is_none_or(|value| value == etag))
+        .then(|| header(&request, "range"))
+        .flatten()
+        .and_then(|value| value.strip_prefix("bytes="))
+        .filter(|value| !value.contains(','));
+        let (status, length, content_range) = if cached {
+            (304, 0, None)
+        } else if let Some(range) = range {
+            match byte_range(range, content.size) {
+                Some((start, end)) => {
+                    std::io::copy(
+                        &mut content.reader.by_ref().take(start),
+                        &mut std::io::sink(),
+                    )?;
+                    (
+                        206,
+                        end - start + 1,
+                        Some(format!("bytes {start}-{end}/{}", content.size)),
+                    )
+                }
+                None => (416, 0, Some(format!("bytes */{}", content.size))),
+            }
+        } else {
+            (200, content.size, None)
+        };
+        let mut response = Response::new(
+            StatusCode(status),
+            Vec::new(),
+            content.reader.take(length),
+            Some(length as usize),
+            None,
+        )
+        .with_chunked_threshold(usize::MAX);
+        if let Some(value) = content_range {
+            response.add_header(Header::from_bytes("Content-Range", value).unwrap());
+        }
+        for (name, value) in [
+            ("Content-Type", content.kind),
+            ("Accept-Ranges", "bytes"),
+            ("Cache-Control", "private, no-cache"),
+            ("ETag", etag.as_str()),
+            ("Access-Control-Allow-Origin", "*"),
+            ("X-Content-Type-Options", "nosniff"),
+            ("Referrer-Policy", "no-referrer"),
+            (
+                "Content-Security-Policy",
+                "sandbox allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src http: https: 'unsafe-inline' 'unsafe-eval' blob:; style-src http: https: 'unsafe-inline'; img-src http: https: data: blob:; font-src http: https: data:; media-src http: https: data: blob:; connect-src http: https:; frame-src https:; base-uri 'self'; frame-ancestors 'self'; form-action http: https:",
+            ),
+        ] {
+            response.add_header(Header::from_bytes(name, value).unwrap());
+        }
+        Ok(response)
     })();
     match result {
-        Ok(content) => {
-            let etag = format!("\"{}\"", content.etag);
-            let cached = header(&request, "if-none-match") == Some(etag.as_str());
-            let mut response = Response::new(
-                StatusCode(if cached { 304 } else { 200 }),
-                Vec::new(),
-                content.reader,
-                Some(if cached { 0 } else { content.size as usize }),
-                None,
-            );
-            for (name, value) in [
-                ("Content-Type", content.kind),
-                ("Cache-Control", "private, no-cache"),
-                ("ETag", etag.as_str()),
-                ("Access-Control-Allow-Origin", "*"),
-                ("X-Content-Type-Options", "nosniff"),
-                ("Referrer-Policy", "no-referrer"),
-                (
-                    "Content-Security-Policy",
-                    "sandbox allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox; default-src 'none'; script-src http: https: 'unsafe-inline' 'unsafe-eval' blob:; style-src http: https: 'unsafe-inline'; img-src http: https: data: blob:; font-src http: https: data:; media-src http: https: data: blob:; connect-src http: https:; frame-src https:; base-uri 'self'; frame-ancestors 'self'; form-action http: https:",
-                ),
-            ] {
-                response.add_header(Header::from_bytes(name, value).unwrap());
-            }
+        Ok(response) => {
             let _ = request.respond(response);
         }
         Err(error) => {
