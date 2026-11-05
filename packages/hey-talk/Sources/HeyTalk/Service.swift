@@ -300,6 +300,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     @objc private func toggleCorrection() {
         try? correctionSettings.command(["toggle"])
         applyCorrection()
+        overlay?.showStatus(correctionSettings.enabled ? "AI correction on" : "AI correction off")
     }
     private func applyCorrection() {
         correctionMenuItem?.state = correctionSettings.enabled ? .on : .off
@@ -309,7 +310,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         autoSettings.enabled.toggle()
         showOverlay(true)
         applyAutoMode()
-        if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showModeNotice() }
+        if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showStatus(autoSettings.enabled ? "Auto mode on" : "Auto mode off") }
     }
     private func applyAutoMode() {
         if autoTarget != nil || autoRestart != nil { cancel() }
@@ -517,7 +518,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 try autoSettings.command(arguments)
                 if wasEnabled != autoSettings.enabled || apps != autoSettings.bundleIDs {
                     showOverlay(true); applyAutoMode()
-                    if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showModeNotice() }
+                    if !autoSettings.enabled || autoSubmitKey.ready { overlay?.showStatus(autoSettings.enabled ? "Auto mode on" : "Auto mode off") }
                 }
                 reply(["ok": true, "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready])
             } catch { reply(failure(error.localizedDescription)) }
@@ -771,13 +772,16 @@ final class TalkService: NSObject, NSApplicationDelegate {
             response["correction"] = info
             let reply = pendingReply; pendingReply = nil; reply?(response)
         }
-        func finish(_ delivery: String, _ reason: PasteBlockReason? = nil) {
+        func finish(_ delivery: String, _ reason: PasteBlockReason? = nil, action: CorrectionAction? = nil) {
             guard current(), session.finish(id, text: response["text"] as? String ?? original) else { return }
             report(delivery, reason)
             waitingPaste = nil; self.automatic = nil; hotkey?.reset()
             overlay?.finishProcessing(); scheduleRelease()
             lastPasteBlock = reason
             if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
+            else if let action, reason == .t3Unavailable || reason == .newThreadUnavailable {
+                overlay?.confirmT3Action(action, failed: true)
+            }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
             else if let error = info["error"] as? String { overlay?.error(error) }
             if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled"].contains(delivery) {
@@ -804,7 +808,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             guard current() else { return }
             if action == .listThreads {
                 guard let rows = field?.threadRows() else {
-                    save(.paste(original)) { finish("history", .t3Unavailable) }; return
+                    save(.paste(original)) { finish("history", .t3Unavailable, action: action) }; return
                 }
                 listedThreads = rows
                 let context: [String: Any] = ["current_thread": field?.composerLabel?.replacingOccurrences(of: "Message ", with: "", options: .anchored) ?? "",
@@ -832,7 +836,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         self.waitingPaste = nil
                         self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
                     }
-                    guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason); return }
+                    guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason, action: action); return }
                     self.overlay?.confirmT3Action(action)
                     lastDelivery = delivery
                     next(delivery)
