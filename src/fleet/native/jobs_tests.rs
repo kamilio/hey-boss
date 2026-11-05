@@ -1188,6 +1188,22 @@ fn stopping_all_machines_before_dispatch_cancels_every_waiting_execution() {
         run_id: root,
     });
     assert_eq!(stopped["run"]["state"], "cancelled");
+    let page =
+        crate::event_log::read(&f.ctx.db().unwrap(), &Default::default(), None, 100).unwrap();
+    assert_eq!(
+        page.events
+            .iter()
+            .filter(|r| r.event.kind == "job.queued")
+            .count(),
+        3
+    );
+    assert_eq!(
+        page.events
+            .iter()
+            .filter(|r| r.event.kind == "job.finished" && r.event.data["state"] == "cancelled")
+            .count(),
+        3
+    );
     let history = f.op(Operation::History {
         id: "waiting-all".into(),
         before: None,

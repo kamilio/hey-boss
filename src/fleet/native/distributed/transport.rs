@@ -55,6 +55,7 @@ fn prepare(
         progressed |= crate::pages::migrate_content(db)? > 0;
     }
     progressed |= crate::pages::collect(db, Some(engine))? > 0;
+    progressed |= crate::event_log::collect(db, engine)? > 0;
     // The immutable journal is durable before exported advances. Keep only a
     // bounded application outbox rather than retaining a second full history.
     if db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1))", [], |r| r.get::<_, bool>(0))? {
@@ -520,7 +521,41 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
     std::thread::spawn(move || {
         let mut workers =
             BTreeMap::<String, (Target, Arc<AtomicBool>, std::thread::JoinHandle<()>)>::new();
+        let mut sampled = None::<Instant>;
         while !ctx.stopped() {
+            if sampled.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+                let sample = (|| -> Result<()> {
+                    let db = ctx.db()?;
+                    crate::event_log::observe::sample(&db, &ctx.node, &ctx.path)?;
+                    let clock = crate::issues::allocations::Clock::read()?;
+                    for entry in std::fs::read_dir(&ctx.state)? {
+                        let entry = entry?;
+                        if !health::transport_diagnostic(&entry.file_name()) {
+                            continue;
+                        }
+                        let value = ctx.read_json(&entry.path(), Value::Null)?;
+                        if value["boot"] == clock.boot
+                            && let Some(host) = value["host"].as_str()
+                            && matches!(value["state"].as_str(), Some("connected" | "disconnected"))
+                        {
+                            crate::event_log::observe::peer(
+                                &db,
+                                &ctx.node,
+                                host,
+                                value["state"] == "connected"
+                                    && value["tick"].as_i64().is_some_and(|tick| {
+                                        tick <= clock.tick && clock.tick - tick <= 30_000
+                                    }),
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = sample {
+                    eprintln!("Event observations: {error}");
+                }
+                sampled = Some(Instant::now());
+            }
             let result = (|| -> Result<()> {
                 let mut targets = BTreeMap::new();
                 if controller {
@@ -620,6 +655,12 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                 }
                 // Capture and recovery continue with no reachable transport.
                 let db = ctx.db()?;
+                if ctx.path.with_extension("errors.db").exists()
+                    && let Err(error) = crate::error_inbox::Inbox::open(&ctx.path)
+                        .and_then(|inbox| inbox.publish_events(&db))
+                {
+                    eprintln!("Error event publication: {error}");
+                }
                 let mut journal = engine(&ctx)?;
                 prepared(&ctx, &db, &mut journal, controller)?;
                 Ok(())

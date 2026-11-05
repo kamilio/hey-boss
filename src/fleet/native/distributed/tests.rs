@@ -4,6 +4,8 @@ use super::*;
 mod job_summary;
 #[path = "publishing_tests.rs"]
 mod publishing;
+#[path = "event_log_tests.rs"]
+mod event_log;
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {

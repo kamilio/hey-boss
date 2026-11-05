@@ -1259,6 +1259,7 @@ impl Store {
                     "Incompatible issue database; use the matching hey-boss version",
                 ));
             }
+            crate::event_log::install(&db)?;
             return Ok(Self {
                 db,
                 attachment_root: path.with_extension("attachments"),
@@ -1479,6 +1480,7 @@ impl Store {
         super::chief::migrate(&db)?;
         jobs::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_config_history' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::project_config::SCHEMA)?; }
+        crate::event_log::install(&db)?;
         crate::pages::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::ACTIVITY_INDEX)?;

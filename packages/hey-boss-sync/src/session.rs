@@ -61,16 +61,17 @@ struct Turn {
 
 fn hello(engine: &Engine) -> Hello {
     Hello {
-        // Compressed frames and page resources require upgraded readers.
-        protocol: 5,
+        // Operational events share the journal; older application projectors
+        // must be rejected before receiving a record they cannot interpret.
+        protocol: 6,
         replica: engine.id().into(),
         presence: Vec::new(),
     }
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
-    if peer.protocol != 5 {
+    if peer.protocol != 6 {
         return Err(invalid(&format!(
-            "Incompatible sync protocol: local 5, peer {}. Storage reclamation requires upgraded peers; run hey-boss upgrade on all machines",
+            "Incompatible sync protocol: local 6, peer {}. Operational events require upgraded peers; run hey-boss upgrade on all machines",
             peer.protocol,
         )));
     }
@@ -221,7 +222,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut engine = Engine::open(&root.path().join("sync.db")).unwrap();
         engine.put("existing immutable history").unwrap();
-        for protocol in [1, 2, 3, 4] {
+        for protocol in [1, 2, 3, 4, 5] {
             let mut frame = Vec::new();
             wire::send(
                 &mut frame,
@@ -238,7 +239,7 @@ mod tests {
             });
             let error = result.err().unwrap().to_string();
             assert!(error.contains("upgrade"));
-            assert!(error.contains(&format!("local 5, peer {protocol}")));
+            assert!(error.contains(&format!("local 6, peer {protocol}")));
             assert!(output.is_empty());
             assert_eq!(engine.head().unwrap(), 1);
             assert_eq!(engine.received(&"a".repeat(32)).unwrap(), 0);

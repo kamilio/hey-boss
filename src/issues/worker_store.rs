@@ -456,6 +456,7 @@ impl Store {
         tx.execute("INSERT INTO agents VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen",params![actor.id,serde_json::to_string(&actor)?,now()])?;
         job.actor = actor;
         tx.execute("UPDATE worker_runs SET actor_id=?2,session_id=?3,state='awaiting_model',reservation_expires=?5+900000,job=?4,updated_at=?5 WHERE id=?1",params![job.id,job.actor.id,session,serde_json::to_string(job)?,now()])?;
+        crate::event_log::producers::worker(&tx, job, "agent.started", session, now(), json!({}))?;
         tx.commit()?;
         Ok(())
     }
@@ -534,6 +535,33 @@ impl Store {
             Err(error) if error.code == "database_busy" => {
                 crate::worker_tui::diagnostics::report(format_args!(
                     "Worker progress database busy; skipped an activity update"
+                ));
+                Ok(())
+            }
+            result => result,
+        }
+    }
+    pub(crate) fn worker_observation(
+        &mut self,
+        job: &Job,
+        kind: &str,
+        key: &str,
+        data: Value,
+    ) -> Result<()> {
+        let result = (|| -> Result<()> {
+            let tx = self
+                .db
+                .transaction_with_behavior(TransactionBehavior::Immediate)?;
+            crate::event_log::producers::worker(&tx, job, kind, key, now(), data)?;
+            tx.commit()?;
+            Ok(())
+        })();
+        match result {
+            // As with progress logging, contention in an observation must not
+            // terminate a running agent. Lifecycle facts still commit atomically.
+            Err(error) if error.code == "database_busy" => {
+                crate::worker_tui::diagnostics::report(format_args!(
+                    "Worker event database busy; skipped {kind}"
                 ));
                 Ok(())
             }
@@ -728,6 +756,24 @@ impl Store {
             "UPDATE worker_runs SET state=?2,summary=?3,finished_at=?4,updated_at=?4,retry_count=?5,retry_at=?6,retry_allowed=CASE WHEN ?2 IN ('cancelled','interrupted') THEN 1 ELSE retry_allowed END WHERE id=?1",
             params![job.id, state, summary, finished, count, retry_at],
         )?;
+        crate::event_log::producers::worker(
+            &tx,
+            job,
+            "agent.finished",
+            "finished",
+            finished,
+            json!({"state":state,"error_code":crate::event_log::producers::error_code(&summary)}),
+        )?;
+        if let Some(retry_at) = retry_at {
+            crate::event_log::producers::worker(
+                &tx,
+                job,
+                "agent.retry_scheduled",
+                "retry",
+                finished,
+                json!({"retry_at":retry_at,"retry_count":count}),
+            )?;
+        }
         tx.execute("UPDATE agent_steering SET state='rejected',error='The agent stopped before this message was delivered. Saved issue and project instructions remain in place.' WHERE run_id=?1 AND state='queued'", [&job.id])?;
         tx.execute(
             "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
@@ -752,6 +798,35 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operational_events_capture_final_outcome_and_retry_once_without_transcript() {
+        let mut f = HandoffFixture::new(false);
+        f.store.worker_attach(&mut f.job, "handoff").unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "No space left on device: private command")
+            .unwrap();
+        f.store
+            .worker_finish(&f.job, "failed", "duplicate callback")
+            .unwrap();
+        let page = crate::event_log::read(&f.store.db, &Default::default(), None, 100).unwrap();
+        assert_eq!(
+            page.events
+                .iter()
+                .map(|r| r.event.kind.as_str())
+                .collect::<Vec<_>>(),
+            ["agent.started", "agent.finished", "agent.retry_scheduled"]
+        );
+        let event = &page.events[1].event;
+        assert_eq!(event.subject, f.job.id);
+        assert_eq!(event.data["error_code"], "disk_full");
+        assert_eq!(event.data["session_id"], "handoff");
+        assert!(
+            !serde_json::to_string(&page)
+                .unwrap()
+                .contains("private command")
+        );
+    }
 
     include!("requirements_handoff_tests.rs");
     include!("companion_handoff_tests.rs");

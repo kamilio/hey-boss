@@ -191,11 +191,12 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
 /// The application writer stays held until the immutable record and checkpoint
 /// are durable. A crash between the two commits repeats the same content hash.
 pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Result<usize> {
+    let events = crate::event_log::export(db, engine)?;
     if !db.query_row(
         "SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock>(SELECT exported FROM distributed_meta WHERE id=1))",
         [], |r| r.get::<_, bool>(0),
     )? {
-        return Ok(0);
+        return Ok(events);
     }
     let tx = db.unchecked_transaction()?;
     let origin: String =
@@ -247,7 +248,7 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
         count += 1;
     }
     tx.commit()?;
-    Ok(count)
+    Ok(count + events)
 }
 
 /// Backfill one bounded page without holding the writer over a full snapshot.
@@ -436,6 +437,7 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
     }
     let tx = db.unchecked_transaction()?;
     for (position, id, payload) in &facts {
+        crate::event_log::receive(&tx, payload)?;
         if let Some(fact) = archives::revision(payload)? {
             if fact.table.starts_with("published_") {
                 crate::pages::index_record(&tx, id, &serde_json::to_value(&fact)?)?;
