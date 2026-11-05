@@ -2,6 +2,9 @@
 
 Licensed under [MIT](LICENSE).
 
+Read and follow distributed operational events with `hey-boss events`. See the
+[event log contract, producers, and CLI](docs/events.md).
+
 For direct SSH synchronization while the main laptop is offline, add `sync_address`
 to the participating remote machines in `~/.hey-boss/fleet.yaml`:
 
