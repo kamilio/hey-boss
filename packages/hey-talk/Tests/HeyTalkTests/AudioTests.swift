@@ -46,7 +46,7 @@ final class AudioTests: XCTestCase {
                 RunLoop.current.run(until: Date().addingTimeInterval(0.02))
             }
         }
-        try feed(Array(repeating: 0.0001, count: 16_000))
+        try feed(Array(repeating: 0.0001, count: 32_000))
         XCTAssertEqual(capture.sampleCount, 0, "Listening audio must not become a recording")
         XCTAssertEqual(began, 0)
         try feed(voice)
@@ -58,6 +58,9 @@ final class AudioTests: XCTestCase {
         try feed(Array(repeating: 0.0001, count: 48_000))
         eventually { ended == 1 }
         wait(for: [stopped], timeout: 2)
+        let opening = recorded.prefix { abs($0) < 0.001 }.count
+        XCTAssertGreaterThanOrEqual(opening, 12_000, "Keep at least 750 ms before the opening word, including audio the detector has not classified as speech")
+        XCTAssertLessThanOrEqual(opening, 24_000, "The rolling buffer must not retain the entire listening session")
         XCTAssertGreaterThan(recorded.count, voice.count * 2, "The complete utterance includes the buffered opening and pause")
         try feed(voice)
         XCTAssertEqual(capture.sampleCount, 0, "Audio after submission must not leak into a completed turn")
@@ -79,6 +82,7 @@ final class AudioTests: XCTestCase {
             XCTAssertEqual(decode.terminationStatus, 0)
             let json = try JSONSerialization.jsonObject(with: response) as? [String: Any]
             let transcript = try XCTUnwrap(json?["text"] as? String).lowercased()
+            XCTAssertTrue(transcript.hasPrefix("hey talk"), transcript)
             XCTAssertTrue(transcript.contains("records my voice"), transcript)
             XCTAssertTrue(transcript.contains("turns it into text"), transcript)
         }
