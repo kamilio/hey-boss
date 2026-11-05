@@ -148,7 +148,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             tx.commit()?;
         }
         // Additive protocol data needs capture on already-enrolled replicas too.
-        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_published_page_chunks_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_page_exports_INSERT')", [], |r|r.get::<_,bool>(0))? {
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_worker_allocations_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_dictation_vocabulary_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_commit_review_comments_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_scheduled_job_logs_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_published_page_chunks_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_page_exports_INSERT') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_capture_project_config_revisions_INSERT')", [], |r|r.get::<_,bool>(0))? {
             let tx=db.unchecked_transaction()?;
             capture::install(&tx)?;
             tx.commit()?;

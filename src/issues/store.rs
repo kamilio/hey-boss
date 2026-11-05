@@ -28,7 +28,7 @@ pub(crate) mod coordination;
 #[path = "origin_reader.rs"]
 mod origin_reader;
 #[path = "worker_registry.rs"]
-mod registry;
+pub(super) mod registry;
 #[path = "search/execute.rs"]
 mod search_execute;
 #[path = "steering.rs"]
@@ -1056,7 +1056,7 @@ fn project_candidate(
 }
 
 pub struct Store {
-    db: Connection,
+    pub(super) db: Connection,
     attachment_root: std::path::PathBuf,
 }
 
@@ -1478,6 +1478,7 @@ impl Store {
         }
         super::chief::migrate(&db)?;
         jobs::migrate(&db)?;
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_config_history' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::project_config::SCHEMA)?; }
         crate::pages::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
             db.execute_batch(super::chief::ACTIVITY_INDEX)?;
@@ -2093,7 +2094,23 @@ impl Store {
             tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=json_set(excluded.metadata,'$.model',coalesce(json_extract(excluded.metadata,'$.model'),json_extract(agents.metadata,'$.model'))),last_seen=excluded.last_seen",
                 params![actor.id, serde_json::to_string(actor)?, now])?;
         }
+        let config_before = if matches!(
+            r.operation,
+            Operation::ConfigureProject { .. }
+                | Operation::ProjectInit { settings: Some(_) }
+                | Operation::ProjectConfig { .. }
+        ) && write
+        {
+            Some(super::project_config::snapshot(
+                &registry::project_settings(&tx, &project)?,
+            ))
+        } else {
+            None
+        };
         let mut result = match &r.operation {
+            Operation::ProjectConfig { operation } => {
+                super::project_config::execute(&tx, &project, operation, actor)?
+            }
             Operation::SearchIndex { .. } | Operation::Search { .. } => {
                 unreachable!("Search runs outside source transactions")
             }
@@ -2621,6 +2638,21 @@ impl Store {
             }
             operation => mutate(&tx, &project, actor.unwrap(), operation, now)?,
         };
+        if let Some(before) = config_before {
+            let after =
+                super::project_config::snapshot(&registry::project_settings(&tx, &project)?);
+            result["revision"] = super::project_config::record(
+                &tx,
+                &project,
+                actor.unwrap(),
+                &r.operation,
+                &before,
+                &after,
+                now,
+            )?
+            .into();
+            result["changed"] = json!(before != after);
+        }
         let response_project = if matches!(r.operation, Operation::Transfer { .. }) {
             serde_json::from_value::<Project>(result["project"].clone())?
         } else {
@@ -2650,7 +2682,8 @@ impl Store {
                 | Operation::Transfer { .. }
                 | Operation::Edit { draft: Some(_), .. }
                 | Operation::Undraft { .. }
-        ) || matches!(&r.operation, Operation::Assign { target, .. } if target == "unassigned")
+        ) || (write && matches!(r.operation, Operation::ProjectConfig { .. }))
+            || matches!(&r.operation, Operation::Assign { target, .. } if target == "unassigned")
         {
             let reconcile = if matches!(
                 r.operation,
@@ -2664,6 +2697,7 @@ impl Store {
                 Operation::Reopen { .. }
                     | Operation::Rework { .. }
                     | Operation::ConfigureProject { .. }
+                    | Operation::ProjectConfig { .. }
             ) && result["changed"] != false
             {
                 super::blockers::reconcile_rework

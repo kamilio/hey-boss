@@ -11,7 +11,15 @@ const FILE: &str = ".hey-boss";
 const LIMIT: u64 = 16 * 1024;
 
 fn contents(root: &Path) -> Result<Option<Vec<u8>>> {
-    let path = root.join(FILE);
+    let marker = root.join(FILE);
+    let mut path = if fs::symlink_metadata(&marker).is_ok_and(|m| m.is_dir()) {
+        marker.join("project.json")
+    } else {
+        marker
+    };
+    if !path.exists() && root.join(".hey-boss.identity-backup").is_file() {
+        path = root.join(".hey-boss.identity-backup");
+    }
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
@@ -27,11 +35,6 @@ fn contents(root: &Path) -> Result<Option<Vec<u8>>> {
         }
     };
     let metadata = file.metadata()?;
-    // Older installations keep their state in ~/.hey-boss. Directories are
-    // not checkout markers, including when walking up from a nested folder.
-    if metadata.is_dir() {
-        return Ok(None);
-    }
     if !metadata.is_file() {
         return Err(Error::invalid(format!(
             "{} must be a regular file",
@@ -116,8 +119,13 @@ impl CheckoutBinding {
                 ".hey-boss changed during setup; run project init again",
             ));
         }
-        let path = self.root.join(FILE);
-        if !self.is_custom(project) {
+        let directory = self.root.join(FILE).is_dir();
+        let path = if directory {
+            self.root.join(FILE).join("project.json")
+        } else {
+            self.root.join(FILE)
+        };
+        if !directory && !self.is_custom(project) {
             if self.previous.is_some() {
                 fs::remove_file(path)?;
             }

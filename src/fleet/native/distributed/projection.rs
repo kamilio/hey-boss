@@ -57,6 +57,7 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         // requirements edit just because it has a later logical clock.
         "issues" if matches!(column, "archive_key" | "archived_comments") => "@storage",
         "scheduled_jobs"
+        | "project_config_revisions"
         | "scheduled_job_revisions"
         | "scheduled_job_runs"
         | "worker_runs"
