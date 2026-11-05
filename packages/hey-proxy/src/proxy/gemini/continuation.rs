@@ -29,6 +29,10 @@ pub(in crate::proxy) struct Continuation {
 }
 
 impl Continuation {
+    pub fn request(&self) -> &Value {
+        &self.base
+    }
+
     pub fn new(base: Value, budget: Option<u64>) -> Self {
         Self {
             base,

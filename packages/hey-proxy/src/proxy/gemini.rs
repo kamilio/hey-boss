@@ -12,6 +12,8 @@ use continuation::Continuation;
 
 #[cfg(test)]
 mod continuation_tests;
+#[cfg(test)]
+mod bootstrap_tests;
 
 pub(super) struct GeminiState {
     pub codec: ReasoningCodec,
@@ -92,8 +94,17 @@ pub(super) async fn send_native(
     url: &str,
     body: &Value,
 ) -> std::result::Result<reqwest::Response, Box<Response>> {
+    send_native_with_recovery(proxy, config, url, body, &mut Recovery::for_request(proxy)).await
+}
+
+async fn send_native_with_recovery(
+    proxy: &Arc<Proxy>,
+    config: &ProviderConfig,
+    url: &str,
+    body: &Value,
+    recovery: &mut Recovery,
+) -> std::result::Result<reqwest::Response, Box<Response>> {
     proxy.record_accounting_route("gemini", "default");
-    let mut recovery = Recovery::for_request(proxy);
     let mut adc_refreshed = false;
     loop {
         let credentials = match credential_headers(proxy, config).await {
@@ -252,7 +263,16 @@ pub(super) async fn forward(
         Ok(v) => v,
         Err(e) => return error(StatusCode::BAD_REQUEST, &e.to_string()),
     };
-    let mut upstream = match send_native(&proxy, &config, &url, &converted.body).await {
+    let mut recovery = Recovery::for_request(&proxy);
+    let mut upstream = match send_native_with_recovery(
+        &proxy,
+        &config,
+        &url,
+        &converted.body,
+        &mut recovery,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(response) => return *response,
     };
@@ -286,6 +306,7 @@ pub(super) async fn forward(
         let mut parser=NativeSse::default();let mut converter=ResponseStream::new(converted,id);
         let mut usage=logs::UsageReader::new(true);
         let mut received = 0usize;
+        let mut started = false;
         let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -301,11 +322,8 @@ pub(super) async fn forward(
                     }
                 }
             };
-            let (bytes,eof)=match chunk {
-                Ok(Some(bytes))=>(bytes,false),Ok(None)=>(Bytes::new(),true),Err(_)=>{
-                    proxy.service.logs.complete(proxy.log_id,"failed","transport",Some("gemini_stream_error"),0);
-                    yield Ok::<Bytes,std::io::Error>(sse_bytes(&converter.fail("server_error", "Gemini stream interrupted; retry the request")));break;
-                }
+            let (bytes,eof,interrupted)=match chunk {
+                Ok(Some(bytes))=>(bytes,false,false),Ok(None)=>(Bytes::new(),true,false),Err(_)=>(Bytes::new(),false,true),
             };
             let frame_events=(||->Result<Vec<Value>> {
                 received = received.saturating_add(bytes.len());
@@ -317,8 +335,55 @@ pub(super) async fn forward(
                 }
                 Ok(events)
             })();
+            // Comments and partial SSE frames do not commit a model response.
+            // Share the opening HTTP retry budget; never replay emitted output.
+            if !started && (interrupted || eof && frame_events.as_ref().is_ok_and(Vec::is_empty)) {
+                let retried = {
+                    let retry = async {
+                        if !recovery.retry(&proxy.config, upstream.headers()).await { return None; }
+                        Some(send_native_with_recovery(&proxy, &config, &url, continuation.request(), &mut recovery).await)
+                    };
+                    tokio::pin!(retry);
+                    loop {
+                        tokio::select! {
+                            response = &mut retry => break response,
+                            _ = heartbeat.tick() => yield Ok::<Bytes,std::io::Error>(Bytes::from_static(b": keepalive\n\n")),
+                        }
+                    }
+                };
+                match retried {
+                    Some(Ok(response)) => {
+                        if !response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("text/event-stream")) {
+                            let event = converter.fail("server_error", "Gemini streaming endpoint did not return SSE");
+                            if !proxy.fallback_attempt { usage.observe_value(&event, &proxy.service.logs, proxy.log_id); }
+                            yield Ok(sse_bytes(&event));
+                            break;
+                        }
+                        upstream = response;
+                        parser = NativeSse::default();
+                        received = 0;
+                        continue;
+                    }
+                    Some(Err(response)) => {
+                        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024).await.ok();
+                        let body = bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+                        let mut event = converter.fail("server_error", "Gemini stream recovery failed; retry the request");
+                        if let Some(error) = body.and_then(|body| body.get("error").cloned()) {
+                            event["response"]["error"] = error;
+                        }
+                        if !proxy.fallback_attempt { usage.observe_value(&event, &proxy.service.logs, proxy.log_id); }
+                        yield Ok(sse_bytes(&event));
+                        break;
+                    }
+                    None => {},
+                }
+            }
+            if interrupted {
+                proxy.service.logs.complete(proxy.log_id,"failed","transport",Some("gemini_stream_error"),0);
+                yield Ok(sse_bytes(&converter.fail("server_error", "Gemini stream interrupted; retry the request")));break;
+            }
             match frame_events {
-                Ok(events)=>for event in events {let bytes=sse_bytes(&event);if !proxy.fallback_attempt { usage.observe_value(&event,&proxy.service.logs,proxy.log_id); }yield Ok(bytes);},
+                Ok(events)=>for event in events {started=true;let bytes=sse_bytes(&event);if !proxy.fallback_attempt { usage.observe_value(&event,&proxy.service.logs,proxy.log_id); }yield Ok(bytes);},
                 Err(cause)=>{
                     // Conversion errors contain structural diagnostics, never
                     // response bodies. Omit model-provided tool names as well.
