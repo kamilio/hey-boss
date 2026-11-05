@@ -3,6 +3,63 @@ use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[tokio::test]
+async fn active_gemini_stream_survives_ten_minutes_without_upstream_output() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let (upstream_url, upstream) = serve(Router::new().fallback(move || {
+        let gate = gate.clone();
+        count.fetch_add(1, Ordering::SeqCst);
+        async move {
+            let body = Body::from_stream(async_stream::stream! {
+                yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"start\"}]}}]}\n\n"));
+                gate.notified().await;
+                yield Ok(Bytes::from_static(b"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"end\"}]},\"finishReason\":\"STOP\"}]}\n\n"));
+            });
+            ([(header::CONTENT_TYPE, "text/event-stream")], body)
+        }
+    })).await;
+    let (url, proxy) = serve(
+        super::super::router(Config {
+            gemini: Some(provider(&upstream_url, "bearer")),
+            ..Config::test_fixture()
+        })
+        .unwrap(),
+    )
+    .await;
+    let mut response = reqwest::Client::new()
+        .post(format!("{url}/v1/responses"))
+        .json(&json!({"model":"gemini/test","input":"fixture","stream":true}))
+        .send()
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    while !String::from_utf8_lossy(&bytes).contains("start") {
+        bytes.extend_from_slice(&response.chunk().await.unwrap().unwrap());
+    }
+    let task = tokio::spawn(async move { response.bytes().await.unwrap() });
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(601)).await;
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !task.is_finished(),
+        "Proxy terminated an active Gemini generation"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::time::resume();
+    release.notify_one();
+    bytes.extend_from_slice(&task.await.unwrap());
+    let events = NativeSse::default().feed(&bytes, true).unwrap();
+    assert_eq!(events.last().unwrap()["type"], "response.completed");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    proxy.abort();
+    upstream.abort();
+}
+
+#[tokio::test]
 async fn stream_bootstrap_recovers_without_exposing_failed_attempts() {
     for path in ["/v1/responses", "/v1/custom/chat/completions"] {
         for failure in ["disconnect", "empty", "fragment", "http_then_disconnect"] {
