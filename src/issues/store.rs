@@ -1572,7 +1572,7 @@ impl Store {
         }
         if matches!(
             r.operation,
-            Operation::Reopen { .. } | Operation::SetBlockers { .. }
+            Operation::Reopen { .. } | Operation::SetBlockers { .. } | Operation::Undraft { .. }
         ) {
             self.execute_once(r, Instant::now() + CONTENTION_BUDGET, true)
         } else {
@@ -1659,6 +1659,7 @@ impl Store {
                 draft: Some(true),
                 ..
             } | Operation::Assign { .. }
+                | Operation::Undraft { .. }
                 | Operation::Rework { .. }
                 | Operation::Move { .. }
                 | Operation::Batch {
@@ -3248,7 +3249,13 @@ fn mutate(
                 data = json!({"before":{"title":before["title"],"body":before["body"],"labels":before["labels"],"state":before["state"],"draft":before["draft"]},"after":{"title":issue.title,"body":issue.body,"labels":issue.labels,"state":issue.state,"draft":issue.draft}});
             }
         }
-        Operation::Undraft { .. } => {
+        Operation::Undraft { if_version, .. } => {
+            if if_version.is_some_and(|version| version != issue.version) {
+                return Err(Error::conflict(format!(
+                    "Issue changed; current version is {}. Refresh and retry.",
+                    issue.version
+                )));
+            }
             if issue.draft {
                 issue.draft = false;
                 action = "undrafted";
