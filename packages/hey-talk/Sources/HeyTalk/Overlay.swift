@@ -650,6 +650,7 @@ final class Overlay {
         case .settleThread: message = failed ? "Couldn’t settle" : "Settled"
         case .rename: message = failed ? "Couldn’t rename" : "Renamed"
         case .newThread: message = failed ? "Couldn’t open thread" : "New thread"
+        case .nextThread: message = failed ? "Couldn’t go to next chat" : "Next chat"
         case .switchThread(let position): message = failed ? "Couldn’t switch chats" : "Chat \(position)"
         case .listThreads where failed: message = "Couldn’t read chats"
         case .paste, .clearInput, .listThreads: return

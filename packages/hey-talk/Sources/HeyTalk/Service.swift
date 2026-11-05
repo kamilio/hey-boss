@@ -6,6 +6,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private let server = CommandServer()
     private let capture = AudioCapture()
     private let inference = Inference()
+    private let commands = RecentCommands()
+    private var previousCommands: [[String]] = []
     private let correction = Correction()
     private let contextQueue = DispatchQueue(label: "hey-talk.app-context", qos: .userInitiated)
     private let correctionSettings = CorrectionSettings()
@@ -662,6 +664,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } else { begin() }
     }
     private func recordingBegan() {
+        previousCommands = commands.beginRecording()
         let id = session.generation
         updateRecordingOverlay()
         if self.correctionSettings.enabled, let target = self.target {
@@ -820,6 +823,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         ["position": index + 1, "title": row.title, "description": row.label, "current": row.current] as [String: Any]
                     }]
                 guard let data = try? JSONSerialization.data(withJSONObject: context, options: [.sortedKeys]) else { return }
+                commands.executed(action)
                 next(String(decoding: data, as: UTF8.self)); return
             }
             let originalField = field
@@ -831,6 +835,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                             guard let target, let team = self.slackTeam else { throw TalkError("Focus Slack") }
                             try await SlackTools.navigate(command, app: target, team: team, isCurrent: current)
                             guard current() else { return }
+                            self.commands.executed(action)
                             self.overlay?.confirmAction(action)
                             lastDelivery = "navigated"
                             next("navigated")
@@ -859,6 +864,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
                     }
                     guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason, action: action); return }
+                    self.commands.executed(action)
                     self.overlay?.confirmAction(action)
                     lastDelivery = delivery
                     next(delivery)
@@ -876,6 +882,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                return app
                            },
                            package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : slackTeam != nil ? .slack : nil, canClear: paste && field != nil,
+                           recent: transcriptionSource == "microphone" ? previousCommands : [],
                            perform: paste ? perform : nil) { result in
             guard current() else { return }
             switch result {

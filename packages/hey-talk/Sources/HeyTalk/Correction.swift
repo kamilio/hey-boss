@@ -21,13 +21,14 @@ struct CorrectionSettings {
 enum CorrectionAction: Equatable {
     case slack(SlackAction)
     case paste(String), rename(String), clearInput, newThread(project: String?, text: String)
-    case listThreads, switchThread(Int), settleThread, pinThread(Bool)
+    case listThreads, nextThread, switchThread(Int), settleThread, pinThread(Bool)
 
     var text: String {
         switch self {
         case .slack(let action): return action.description
         case .paste(let text), .rename(let text): return text
         case .clearInput: return "Clear input"
+        case .nextThread: return "Go to the next T3 chat"
         case .listThreads: return "List T3 threads"
         case .switchThread(let position): return "Go to T3 chat \(position)"
         case .settleThread: return "Settle T3 thread"
@@ -51,7 +52,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [], history: [[String: Any]] = []) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -79,6 +80,7 @@ final class Correction {
             request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
         }
         var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
+        values["recent_commands"] = recent
         if let appContext { values["app_context"] = appContext }
         if let app { values["app"] = app }
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
@@ -130,14 +132,14 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, package: ToolPackage? = nil, canClear: Bool = false,
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [],
                  perform: ((CorrectionAction, @escaping (String) -> Void) -> Void)? = nil,
                  completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         func turn(_ history: [[String: Any]], last: CorrectionAction?, count: Int) {
             task = Task { @MainActor in
                 do {
                     let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, app: app?(),
-                                                   package: package, canClear: canClear, history: history)
+                                                   package: package, canClear: canClear, recent: recent, history: history)
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                     guard (200..<300).contains(response.statusCode) else {
@@ -156,6 +158,7 @@ final class Correction {
                           let id = call["call_id"] as? String, !id.isEmpty,
                           !history.contains(where: { $0["call_id"] as? String == id }) else { throw TalkError("Invalid tool call ID.") }
                     perform(action) { output in
+                        if action == .nextThread { completion(.success(action)); return }
                         if case .slack = action { completion(.success(action)); return }
                         if case .paste = action { completion(.success(action)); return }
                         turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],
@@ -164,7 +167,7 @@ final class Correction {
                 } catch { completion(.failure(error)) }
             }
         }
-        if package == .t3, let action = T3Tools.ordinalSwitch(text) {
+        if package == .t3, let action = T3Tools.directSwitch(text, recent: recent) {
             if let perform { perform(action) { _ in completion(.success(action)) } }
             else { completion(.success(action)) }
         } else { turn([], last: nil, count: 0) }

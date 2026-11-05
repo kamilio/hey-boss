@@ -25,7 +25,10 @@ final class T3ToolsTests: XCTestCase {
         let selected = await field.switchThread(position: destination + 1, listed: rows, isCurrent: { true })
         let moved = try XCTUnwrap(selected)
         XCTAssertEqual(moved.composerLabel, "Message " + rows[destination].title)
-        let returned = await moved.switchThread(position: original + 1, listed: nil, isCurrent: { true })
+        let next = await moved.nextThread(isCurrent: { true })
+        XCTAssertNotNil(next, "T3’s native next-chat shortcut must focus a different chat")
+        XCTAssertNotEqual(next?.t3ThreadID, moved.t3ThreadID)
+        let returned = await (next ?? moved).switchThread(position: original + 1, listed: nil, isCurrent: { true })
         let restored = try XCTUnwrap(returned)
         XCTAssertEqual(restored.document, field.document)
 

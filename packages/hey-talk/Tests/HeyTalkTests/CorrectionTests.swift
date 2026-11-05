@@ -26,7 +26,7 @@ final class CorrectionTests: XCTestCase {
             XCTAssertEqual(values["app"] as? [String: String], app)
             let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
             XCTAssertEqual(tools.compactMap { $0["name"] as? String }, allowed
-                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
+                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
         }
     }
 
@@ -125,6 +125,29 @@ final class CorrectionTests: XCTestCase {
         wait(for: [done], timeout: 3)
         XCTAssertEqual(actions, [.listThreads, .switchThread(8), .pinThread(true)])
         XCTAssertEqual(rounds, 4)
+    }
+
+    func testRepeatedNextAcrossDictationAndHistoryExpiry() throws {
+        let suite = "recent-commands-" + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let history = RecentCommands(defaults: defaults)
+        XCTAssertEqual(history.beginRecording(), [])
+        XCTAssertEqual(T3Tools.directSwitch("Go to the next chat.", recent: []), .nextThread)
+        history.executed(.nextThread)
+        _ = history.beginRecording()
+        history.executed(.paste("private text"))
+        let recent = history.beginRecording()
+        XCTAssertEqual(recent, [["t3_next_thread"], []])
+        XCTAssertEqual(T3Tools.directSwitch("Go to the next.", recent: recent), .nextThread)
+        XCTAssertNil(T3Tools.directSwitch("Go to the next.", recent: []))
+        XCTAssertNil(T3Tools.directSwitch("Add a shortcut to go to the next chat.", recent: recent))
+        let request = try Correction.request(text: "Next one.", vocabulary: [], recent: recent)
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let input = try XCTUnwrap(body["input"] as? String)
+        XCTAssertEqual((try JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])?["recent_commands"] as? [[String]], recent)
+        for _ in 0..<4 { _ = history.beginRecording() }
+        XCTAssertEqual(RecentCommands(defaults: defaults).beginRecording(), [])
     }
 
     private func client() -> Correction {
@@ -261,7 +284,7 @@ final class CorrectionTests: XCTestCase {
             let request = try Correction.request(text: "speech", vocabulary: [], package: allowed ? .t3 : nil)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
-                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
+                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
         }
     }
 
