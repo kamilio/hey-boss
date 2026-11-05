@@ -17,7 +17,8 @@ final class PasteTests: XCTestCase {
     func testRecoveryNoticeNamesOriginalAppAndCorrectAction() {
         XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack"), "Return to Slack. Press ⌘V.")
         XCTAssertEqual(PasteBlockReason.targetClosed.message(targetName: "Notes"), "Reopen Notes. Press ⌘V.")
-        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack", pasted: true), "Pasted in Slack. Press Enter there.")
+        XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "Slack", pasted: true), "Pasted in Slack. Focus changed before submit.")
+        XCTAssertEqual(PasteBlockReason.eventUnavailable.message(targetName: "cmux", pasted: true), "Pasted in cmux. Couldn’t send Enter.")
         XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: nil), "Return to the original app. Press ⌘V.")
         XCTAssertEqual(PasteBlockReason.focusChanged.message(targetName: "  "), "Return to the original app. Press ⌘V.")
     }
