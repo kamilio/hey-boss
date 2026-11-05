@@ -12,7 +12,7 @@ final class T3NewThreadTests: XCTestCase {
         let correction = Correction()
         let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
             correction.correct("So start a new thread. And then I want to check whether publishing pages is working.",
-                               vocabulary: [], threadActions: true) { continuation.resume(with: $0) }
+                               vocabulary: [], package: .t3) { continuation.resume(with: $0) }
         }
         guard case .newThread(nil, let text) = action, text.localizedCaseInsensitiveContains("publishing") else { return XCTFail("Did not route the dictated task") }
         let done = expectation(description: "pasted in draft")
@@ -45,7 +45,7 @@ final class T3NewThreadTests: XCTestCase {
         let speech = project.map { "New thread " + $0 } ?? "New thread"
         let correction = Correction()
         let action: CorrectionAction = try await withCheckedThrowingContinuation { continuation in
-            correction.correct(speech, vocabulary: [], appContext: "New thread in another project.", threadActions: true) { continuation.resume(with: $0) }
+            correction.correct(speech, vocabulary: [], appContext: "New thread in another project.", package: .t3) { continuation.resume(with: $0) }
         }
         let board = NSPasteboard.general.changeCount
         let done = expectation(description: "opened")

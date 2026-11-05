@@ -19,11 +19,13 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
+    case slack(SlackAction)
     case paste(String), rename(String), clearInput, newThread(project: String?, text: String)
     case listThreads, switchThread(Int), settleThread, pinThread(Bool)
 
     var text: String {
         switch self {
+        case .slack(let action): return action.description
         case .paste(let text), .rename(let text): return text
         case .clearInput: return "Clear input"
         case .listThreads: return "List T3 threads"
@@ -49,7 +51,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, threadActions: Bool = false, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, history: [[String: Any]] = []) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -66,7 +68,7 @@ final class Correction {
         }
         var tools = [try tool("paste", "text")]
         if canClear { tools.append(try tool("clear_input")) }
-        if threadActions { tools += try T3Tools.definitions(prompt: prompt) }
+        if let package { tools += try package.definitions(prompt: prompt) }
         var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -90,7 +92,7 @@ final class Correction {
         return request
     }
 
-    private static func action(_ bytes: URLSession.AsyncBytes, threadActions: Bool, canClear: Bool) async throws -> (CorrectionAction?, [[String: Any]]) {
+    private static func action(_ bytes: URLSession.AsyncBytes, package: ToolPackage?, canClear: Bool) async throws -> (CorrectionAction?, [[String: Any]]) {
         var items: [[String: Any]] = []
         var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
@@ -113,8 +115,9 @@ final class Correction {
                     guard let text = (values["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
                     else { throw TalkError("Correction returned no text.") }
                     action = .paste(text)
-                case let name? where threadActions && name.hasPrefix("t3_"):
-                    action = try T3Tools.action(name, values: values)
+                case let name?:
+                    guard let package else { throw TalkError("Unavailable correction tool.") }
+                    action = try package.action(name, values: values)
                 default: throw TalkError("Unavailable correction tool.")
                 }
             case "response.completed":
@@ -127,20 +130,20 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, threadActions: Bool = false, canClear: Bool = false,
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, package: ToolPackage? = nil, canClear: Bool = false,
                  perform: ((CorrectionAction, @escaping (String) -> Void) -> Void)? = nil,
                  completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         func turn(_ history: [[String: Any]], last: CorrectionAction?, count: Int) {
             task = Task { @MainActor in
                 do {
                     let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, app: app?(),
-                                                   threadActions: threadActions, canClear: canClear, history: history)
+                                                   package: package, canClear: canClear, history: history)
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                     guard (200..<300).contains(response.statusCode) else {
                         throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                     }
-                    let (action, items) = try await Self.action(bytes, threadActions: threadActions, canClear: canClear)
+                    let (action, items) = try await Self.action(bytes, package: package, canClear: canClear)
                     try Task.checkCancellation()
                     guard let action else {
                         guard let last else { throw TalkError("Correction returned no tool call.") }
@@ -153,6 +156,7 @@ final class Correction {
                           let id = call["call_id"] as? String, !id.isEmpty,
                           !history.contains(where: { $0["call_id"] as? String == id }) else { throw TalkError("Invalid tool call ID.") }
                     perform(action) { output in
+                        if case .slack = action { completion(.success(action)); return }
                         if case .paste = action { completion(.success(action)); return }
                         turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],
                              last: action, count: count + 1)

@@ -4,8 +4,7 @@ import TalkCore
 enum T3Tools {
     static func definitions(prompt: (String) throws -> String) throws -> [[String: Any]] {
         func tool(_ name: String, _ properties: [String: [String: Any]] = [:]) throws -> [String: Any] {
-            ["type": "function", "name": name, "description": try prompt(name), "strict": true,
-             "parameters": ["type": "object", "properties": properties, "required": properties.keys.sorted(), "additionalProperties": false]]
+            try ToolPackage.tool(name, properties, prompt: prompt)
         }
         return try [
             tool("t3_rename_thread", ["title": ["type": "string"]]),

@@ -19,7 +19,7 @@ final class CorrectionTests: XCTestCase {
     func testT3ToolsAndAppIdentityAreScopedToTheDictationTarget() throws {
         let app = ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"]
         for allowed in [false, true] {
-            let request = try Correction.request(text: "Go to Publish Artifact", vocabulary: [], app: app, threadActions: allowed)
+            let request = try Correction.request(text: "Go to Publish Artifact", vocabulary: [], app: app, package: allowed ? .t3 : nil)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             let input = try XCTUnwrap(body["input"] as? String)
             let values = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(input.utf8)) as? [String: Any])
@@ -57,7 +57,7 @@ final class CorrectionTests: XCTestCase {
                 stub.respond(status: 200, body: "data: {\"type\":\"response.output_item.done\",\"item\":" + item + "}\n\ndata: {\"type\":\"response.completed\"}\n\n")
             }
             let done = expectation(description: "no navigation")
-            correction.correct("Go to missing chat", vocabulary: [], threadActions: allowed, perform: { action, next in
+            correction.correct("Go to missing chat", vocabulary: [], package: allowed ? .t3 : nil, perform: { action, next in
                 actions.append(action); next(#"{"threads":[]}"#)
             }) { result in
                 if case .success = result { XCTFail("Should preserve the original when no thread is selected") }
@@ -93,7 +93,7 @@ final class CorrectionTests: XCTestCase {
             stub.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n")
         }
         let done = expectation(description: "navigated and pinned")
-        correction.correct("Go to Publish Artifact and pin it.", vocabulary: [], app: { ["name": "T3 Code", "thread": title] }, threadActions: true, perform: { action, next in
+        correction.correct("Go to Publish Artifact and pin it.", vocabulary: [], app: { ["name": "T3 Code", "thread": title] }, package: .t3, perform: { action, next in
             actions.append(action)
             switch action {
             case .listThreads: next(#"{"threads":[{"position":8,"title":"Publish Artifacts Publicly"}]}"#)
@@ -234,12 +234,12 @@ final class CorrectionTests: XCTestCase {
             let correction = client()
             CorrectionProtocol.handle = { $0.respond(status: 200, body: body) }
             let done = expectation(description: "rename")
-            correction.correct("rename this thread to Release notes", vocabulary: [], threadActions: allowed) { result in
+            correction.correct("rename this thread to Release notes", vocabulary: [], package: allowed ? .t3 : nil) { result in
                 XCTAssertEqual(try? result.get(), succeeds ? .rename("Release notes") : nil)
                 done.fulfill()
             }
             wait(for: [done], timeout: 2)
-            let request = try Correction.request(text: "speech", vocabulary: [], threadActions: allowed)
+            let request = try Correction.request(text: "speech", vocabulary: [], package: allowed ? .t3 : nil)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
                            allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
@@ -259,7 +259,7 @@ final class CorrectionTests: XCTestCase {
             let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
             CorrectionProtocol.handle = { $0.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n") }
             let done = expectation(description: "new thread")
-            correction.correct("So start a new thread. And then check publishing.", vocabulary: [], threadActions: allowed) { result in
+            correction.correct("So start a new thread. And then check publishing.", vocabulary: [], package: allowed ? .t3 : nil) { result in
                 XCTAssertEqual(try? result.get(), expected); done.fulfill()
             }
             wait(for: [done], timeout: 2)
