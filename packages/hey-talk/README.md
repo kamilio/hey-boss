@@ -22,13 +22,16 @@ Turn it off in the waveform menu or the pill’s right-click menu to return manu
 
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
-**Message** field to start recording, then press plain Enter to transcribe,
-paste, and submit. It starts listening again after submitting if an allowed
+**Message** field to listen. Speaking starts a recording; pausing for about
+2½ seconds transcribes, pastes, and submits. Auto uses the same local speech
+detector as voice conversations, including buffered opening audio. Silent
+listening is not saved. Plain Enter sends a recording immediately and passes
+through normally while listening. It starts listening again after submitting if an allowed
 input still has focus. If no speech is detected, a brief notice appears and
 listening resumes. The next plain Enter in that input passes through to the app
 without stopping recording. Shift+Enter still inserts a newline. In T3, moving to another
 thread leaves the destination pinned. Leaving the original field for two seconds
-finishes the T3 recording. In other allowed apps, Enter still chooses the
+finishes the T3 recording. In other allowed apps, finishing chooses the
 destination and leaving allowed inputs for two seconds discards the recording.
 Escape or turning Auto off discards immediately. After Escape, leave and refocus
 the field to resume. Hyper+R and clicking the pill still start and stop dictation;
@@ -36,7 +39,7 @@ Hyper+E changes Auto Submit without interrupting recording.
 A small three-second drawer says “Auto mode on” or “Auto mode off” when toggled.
 
 Auto starts off and remembers your choice. T3 is the initial allowed app;
-its search and settings fields do not start recording. Other allowed apps use
+its search and settings fields do not start listening. Other allowed apps use
 editable text fields, excluding password fields. Accessibility permission is
 required. Auto waits for the destination field before pasting or submitting.
 The existing app and website Enter exceptions also apply in Auto.
@@ -408,8 +411,8 @@ The vocabulary test leaves the running app, microphone, clipboard, preferences,
 and history untouched. Set `HEY_TALK_TEST_APP` to an installed app path to test it.
 
 Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
-check recording starts; Escape or focus a search field and check it stops.
-Refocus, dictate, and press Enter: exactly one message should submit and the
+check it listens without recording; Escape or focus a search field and check it stops.
+Refocus, dictate, and pause: exactly one message should submit and the
 microphone should reopen. Move between inputs while speaking and verify the
 recording stays pinned to its starting T3 field; return there to receive it. Also check Hyper+E toggles
 Auto Submit without interrupting recording, Hyper+R respects that setting, and switching away after paste but before Enter never submits in the new field.

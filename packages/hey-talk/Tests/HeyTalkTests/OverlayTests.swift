@@ -51,8 +51,9 @@ final class OverlayTests: XCTestCase {
         XCTAssertTrue(submit.isHidden)
         XCTAssertNotNil(ai.contents)
         XCTAssertNotNil(submit.contents)
-        for phase in [Phase.idle, .recording, .processing] {
+        for phase in [Phase.idle, .listening, .recording, .processing] {
             overlay.update(phase)
+            if phase == .listening { XCTAssertTrue(surface.accessibilityLabel()?.contains("Listening") == true) }
             let size = panel.frame.size
             overlay.setCorrection(true)
             XCTAssertTrue(ai.isHidden)

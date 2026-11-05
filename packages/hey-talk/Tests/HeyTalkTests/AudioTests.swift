@@ -4,6 +4,86 @@ import TalkCore
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
+    func testAutomaticCaptureUsesConversationDetectorAndKeepsOnlyTheSpokenTurn() throws {
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/auto-speech-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("speech.aiff")
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-v", "Samantha", "-o", file.path, "Hey Talk records my voice and turns it into text."]
+        try say.run(); say.waitUntilExit()
+        XCTAssertEqual(say.terminationStatus, 0)
+        let voice = try AudioCapture.readFile(file.path)
+        let noise = try firstBuffer(value: 0.0001)
+        let rig = try CaptureRig(buffer: noise), capture = rig.capture()
+        defer { capture.cancel() }
+        var began = 0, ended = 0, recorded: [Float] = []
+        let stopped = expectation(description: "Silence stops capture automatically")
+        capture.onSpeechBegan = { began += 1 }
+        capture.onSpeechEnded = {
+            ended += 1
+            capture.stop { result in
+                do { recorded = try result.get() } catch { XCTFail(error.localizedDescription) }
+                stopped.fulfill()
+            }
+        }
+        defer { capture.onSpeechEnded = nil }
+        capture.onFailure = { XCTFail($0) }
+        let started = expectation(description: "Listening microphone ready")
+        capture.start(uid: nil, detectSpeech: true) { result in
+            if case .failure(let error) = result { XCTFail(error.localizedDescription) }
+            started.fulfill()
+        }
+        wait(for: [started], timeout: 3)
+        let stream = try XCTUnwrap(rig.streams.first)
+        // Feed in real-time chunks so the nonblocking audio pipe stays bounded.
+        func feed(_ values: [Float]) throws {
+            for offset in stride(from: 0, to: values.count, by: 320) {
+                let chunk = Array(values[offset..<min(offset + 320, values.count)])
+                stream.receive(try sampleBuffer(chunk))
+                RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            }
+        }
+        try feed(Array(repeating: 0.0001, count: 16_000))
+        XCTAssertEqual(capture.sampleCount, 0, "Listening audio must not become a recording")
+        XCTAssertEqual(began, 0)
+        try feed(voice)
+        XCTAssertEqual(began, 1)
+        try feed(Array(repeating: 0.0001, count: 16_000))
+        XCTAssertEqual(ended, 0, "A thinking pause stays in the same turn")
+        try feed(voice)
+        XCTAssertEqual(began, 1)
+        try feed(Array(repeating: 0.0001, count: 48_000))
+        eventually { ended == 1 }
+        wait(for: [stopped], timeout: 2)
+        XCTAssertGreaterThan(recorded.count, voice.count * 2, "The complete utterance includes the buffered opening and pause")
+        try feed(voice)
+        XCTAssertEqual(capture.sampleCount, 0, "Audio after submission must not leak into a completed turn")
+        XCTAssertEqual(began, 1)
+        if let app = ProcessInfo.processInfo.environment["HEY_TALK_TEST_APP"] {
+            let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count))!
+            buffer.frameLength = buffer.frameCapacity
+            recorded.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: $0.count) }
+            let audio = directory.appendingPathComponent("detected.wav")
+            try AVAudioFile(forWriting: audio, settings: format.settings).write(from: buffer)
+            let decode = Process(), output = Pipe()
+            decode.executableURL = URL(fileURLWithPath: app).appendingPathComponent("Contents/MacOS/hey-talk")
+            decode.arguments = ["transcribe-file", audio.path, "--json"]
+            decode.standardOutput = output
+            try decode.run()
+            let response = output.fileHandleForReading.readDataToEndOfFile()
+            decode.waitUntilExit()
+            XCTAssertEqual(decode.terminationStatus, 0)
+            let json = try JSONSerialization.jsonObject(with: response) as? [String: Any]
+            let transcript = try XCTUnwrap(json?["text"] as? String).lowercased()
+            XCTAssertTrue(transcript.contains("records my voice"), transcript)
+            XCTAssertTrue(transcript.contains("turns it into text"), transcript)
+        }
+    }
+
     func testSilentDefaultRetriesOnceThenUsesFallbackUntilTheDefaultChanges() throws {
         let sound = try firstBuffer(), silence = try firstBuffer(value: 0)
         let rig = try CaptureRig(buffer: sound)
@@ -392,17 +472,20 @@ final class AudioTests: XCTestCase {
     }
 
     private func firstBuffer(value: Float = 0.25) throws -> CMSampleBuffer {
+        try sampleBuffer(Array(repeating: value, count: 160))
+    }
+    private func sampleBuffer(_ values: [Float]) throws -> CMSampleBuffer {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: true)!
-        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 160)!
-        pcm.frameLength = 160
-        for index in 0..<160 { pcm.floatChannelData![0][index] = value }
+        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(values.count))!
+        pcm.frameLength = AVAudioFrameCount(values.count)
+        for index in values.indices { pcm.floatChannelData![0][index] = values[index] }
         var description: CMAudioFormatDescription?
         XCTAssertEqual(CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: format.streamDescription,
             layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &description), noErr)
         var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 16_000), presentationTimeStamp: .zero, decodeTimeStamp: .invalid)
         var buffer: CMSampleBuffer?
         XCTAssertEqual(CMSampleBufferCreate(allocator: kCFAllocatorDefault, dataBuffer: nil, dataReady: false,
-            makeDataReadyCallback: nil, refcon: nil, formatDescription: description, sampleCount: 160,
+            makeDataReadyCallback: nil, refcon: nil, formatDescription: description, sampleCount: values.count,
             sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 0, sampleSizeArray: nil, sampleBufferOut: &buffer), noErr)
         let result = try XCTUnwrap(buffer)
         XCTAssertEqual(CMSampleBufferSetDataBufferFromAudioBufferList(result, blockBufferAllocator: kCFAllocatorDefault,
