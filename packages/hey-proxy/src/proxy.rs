@@ -127,10 +127,6 @@ impl Default for Options {
     }
 }
 
-fn unbounded_model_wait(config: &Config) -> bool {
-    config.mode == Mode::Client || config.fallbacks.values().any(|targets| !targets.is_empty())
-}
-
 pub(crate) fn build_client(config: &Config) -> Result<reqwest::Client> {
     // Workspace feature unification must not change forwarded bytes, headers,
     // or fallback classification by enabling transparent decompression.
@@ -145,11 +141,8 @@ pub(crate) fn build_client(config: &Config) -> Result<reqwest::Client> {
         Some(url) => builder.proxy(reqwest::Proxy::all(url)?),
         None => builder,
     };
-    let builder = if unbounded_model_wait(config) {
-        builder
-    } else {
-        builder.read_timeout(Duration::from_secs(300))
-    };
+    // Reasoning can be silent for minutes after streaming starts. Connection
+    // and recovery deadlines are separate; do not cut off an active generation.
     // Binding to the unspecified address of one family makes the resolver drop the other.
     let builder = match config.ip_version {
         IpVersion::Auto => builder,
@@ -455,7 +448,6 @@ impl Service {
             }
             let client = if config.ip_version == previous.ip_version
                 && config.proxy_url == previous.proxy_url
-                && unbounded_model_wait(&config) == unbounded_model_wait(&previous)
             {
                 client
             } else {
