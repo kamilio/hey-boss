@@ -249,6 +249,35 @@ final class CorrectionTests: XCTestCase {
         XCTAssertEqual(deliveries, 1)
     }
 
+    func testRetryResumesTimedOutTurnWithoutRepeatingClear() {
+        let correction = client()
+        var requests = 0, actions: [CorrectionAction] = []
+        CorrectionProtocol.handle = { stub in
+            requests += 1
+            switch requests {
+            case 1: stub.respond(status: 200, body: #"data: {"type":"response.output_item.done","item":{"type":"function_call","name":"clear_input","call_id":"clear","arguments":"{}"}}"# + "\n\ndata: {\"type\":\"response.completed\"}\n\n")
+            case 2: stub.respond(status: 504, body: "")
+            case 3: stub.respond(status: 200, body: "data: {\"type\":\"response.completed\"}\n\n")
+            default: XCTFail("Unexpected request")
+            }
+        }
+        var retry: (() -> Void)?
+        let timeout = expectation(description: "timed out"), done = expectation(description: "retried")
+        correction.correct("clear the field", vocabulary: [], canClear: true, perform: { action, next in
+            actions.append(action); next("cleared")
+        }) { result in
+            switch result {
+            case .failure(let error): retry = (error as? CorrectionTimeout)?.retry; timeout.fulfill()
+            case .success(let action): XCTAssertEqual(action, .clearInput); done.fulfill()
+            }
+        }
+        wait(for: [timeout], timeout: 2)
+        XCTAssertEqual(requests, 2)
+        XCTAssertNotNil(retry); retry?()
+        wait(for: [done], timeout: 2)
+        XCTAssertEqual(actions, [.clearInput])
+    }
+
     func testNetworkSuccessReturnsCorrectedTextOnMainThread() {
         let correction = client()
         CorrectionProtocol.handle = {
@@ -324,7 +353,7 @@ final class CorrectionTests: XCTestCase {
 
     func testHTTPFailureAndTimeoutDoNotReturnReplacementText() {
         let correction = client()
-        for status in [429, 500, 0] {
+        for status in [408, 429, 500, 504, 0] {
             CorrectionProtocol.handle = { stub in
                 if status == 0 { stub.client?.urlProtocol(stub, didFailWithError: URLError(.timedOut)) }
                 else { stub.respond(status: status, body: "{}") }
@@ -332,6 +361,9 @@ final class CorrectionTests: XCTestCase {
             let done = expectation(description: "failed \(status)")
             correction.correct("original transcript", vocabulary: []) { result in
                 if case .success = result { XCTFail("Failures must not replace the original") }
+                if case .failure(let error) = result {
+                    XCTAssertEqual(error is CorrectionTimeout, [0, 408, 504].contains(status))
+                }
                 done.fulfill()
             }
             wait(for: [done], timeout: 2)

@@ -40,6 +40,11 @@ public struct RecordingSession {
         guard id == generation, phase == .recording else { throw TalkError("Recording ended") }
         phase = .processing
     }
+    public mutating func retryProcessing(_ id: UInt64) -> UInt64? {
+        guard generation == id, phase == .idle else { return nil }
+        generation &+= 1; phase = .processing
+        return generation
+    }
     @discardableResult public mutating func finish(_ id: UInt64, text: String) -> Bool {
         guard id == generation, phase == .processing else { return false }
         if !text.isEmpty { lastText = text }
