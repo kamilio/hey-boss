@@ -5,6 +5,7 @@ const nodes = new Map();
 const shell = fs.readFileSync('src/issues/web/app-shell.html', 'utf8');
 const mainNavigation = shell.slice(shell.indexOf('<nav class="app-navigation"'), shell.indexOf('<dialog'));
 const projectLinks = [...mainNavigation.matchAll(/<a id="([^"]+)" href="([^"]+)"/g)].map(([, id]) => id);
+assert.ok(projectLinks.includes("nav-prompts"), "Prompts is a project navigation section");
 for (const [, id, href] of shell.matchAll(/<a id="(nav-[^"]+)" href="([^"]+)"/g)) {
   nodes.set('#' + id, {id, href, hidden:false, getAttribute(name) { return this[name]; }});
 }

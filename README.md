@@ -348,8 +348,7 @@ service. CLI commands, web requests, workers and replication connect to it
 automatically; no database server setup is needed. Reads remain available while
 another transaction writes, and the service starts automatically when absent.
 Workers run agents on the machine where their projects are checked out.
-**Project settings** in the web app edits shared instructions and conditional worktree/PR prompts,
-with a live assembled preview. Implementation instructions contain only the shared
+**Prompts** opens the project’s Markdown files. The workflow switches in **Project settings** link to the corresponding prompt files. Implementation instructions contain only the shared
 prompt and selected workspace and delivery branches; no extra cleanup or PR handoff
 paragraphs are appended. Each branch inherits a code default or uses a project override. Worker settings select a dedicated worktree only when the project allows it; otherwise workers use the existing checkout. Tags can be assigned directly in issue sidebars.
 See [automatic workers](docs/issues.md#automatic-codex-workers).
@@ -569,8 +568,7 @@ Maintainers: run `swift release_hey_boss.swift 0.1.0 kamilio/hey-boss`. Upload t
 ## Global profile
 
 The web profile badge opens a dropdown with **Settings**. Set your display name
-there once for all projects; project settings contain only project instructions
-and PR behavior. The stable assignee remains `human:boss`. The CLI equivalents are
+there once for all projects; project settings control workflow and execution for the selected project. The stable assignee remains `human:boss`. The CLI equivalents are
 `hey-boss settings show` and `hey-boss settings set --boss-name 'Alex'`; add
 `--host HOST` to address a remote issue store. Settings are stored in SQLite,
 with version checks and request IDs for safe retries.

@@ -777,6 +777,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 include_bytes!("web/secrets.js"),
             )),
             "/secrets.css" => Some(("text/css; charset=utf-8", include_bytes!("web/secrets.css"))),
+            "/prompts" => Some(("text/html; charset=utf-8", include_bytes!("web/prompts.html"))),
+            "/prompts.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/prompts.js"))),
             "/skills" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/skills.html"),
@@ -962,6 +964,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/jobs"
                     | "/artifacts"
                     | "/errors"
+                    | "/prompts"
                     | "/skills"
                     | "/secrets"
                     | "/pages"
@@ -969,6 +972,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             ) {
                 let issues = matches!(path.as_str(), "/" | "/issues");
                 let shell = include_str!("web/app-shell.html")
+                    .replace("<!--prompts-current-->", if path == "/prompts" { " aria-current=\"page\"" } else { "" })
                     .replace("<!--pages-current-->", if path == "/pages" { " aria-current=\"page\"" } else { "" })
                     .replace(
                         "<!--errors-current-->",

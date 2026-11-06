@@ -31,3 +31,12 @@ dialog.fx-move {width:min(420px,94vw);padding:24px;color:var(--text);background:
 .fx-move h3 {margin:0 0 20px}.fx-move label {font-weight:600;font-size:13px}
 .fx-move input {display:block;width:100%;margin:7px 0;padding:10px;border:1px solid var(--line);border-radius:7px;color:var(--text);background:var(--input);font:inherit}
 .fx-move p {font-size:12px;color:var(--muted)}.fx-move form>div {display:flex;justify-content:flex-end;gap:8px;margin-top:20px}
+#prompts-main {padding-top:30px}
+#prompts-main .page-heading {margin-bottom:20px}
+#prompt-browser > .file-explorer {background:var(--solid);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+#prompt-browser .fx-body {height:clamp(420px,calc(100dvh - 262px),900px)}
+@media(max-width:640px) {
+ #prompts-main {padding:16px 12px}
+ #prompts-main .page-heading {margin-bottom:14px}
+ #prompt-browser .fx-body {height:max(450px,calc(100dvh - 228px));grid-template-rows:minmax(145px,28%) minmax(0,1fr)}
+}

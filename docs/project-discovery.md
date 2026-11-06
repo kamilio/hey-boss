@@ -17,8 +17,7 @@ new projects. Disabled creation exits nonzero with a project-specific message
 pointing to regular tasks. Existing content remains available.
 
 All workflow and resource switches live in Builder → Project settings →
-Configuration. Prompt editors stay in their
-own tabs.
+Configuration. The workflow switches link to their Markdown files in Prompts.
 
 To separate two checkouts of the same repository, initialize the second with
 `hey-boss project init --project poe2-legacy` and choose its own workflow, such as

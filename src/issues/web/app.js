@@ -1059,7 +1059,7 @@ async function renderRoute() {
   updateAppNavigation();
   projectOptions();
   $("#inbox-view").hidden = model.route.view !== "inbox";
-  $("#prompt-files").hidden = $("#project-settings-trigger").hidden = model.route.view === "inbox";
+  $("#project-settings-trigger").hidden = model.route.view === "inbox";
   $(".project-control").hidden = false;
   if (model.route.view === "inbox") {
     closeProjectMenu();

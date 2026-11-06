@@ -9,8 +9,8 @@ window.HeyBossFiles = (() => {
       document.head.append(script);
     });
   }
-  function open(source) {
-    const dialog = document.createElement('dialog');
+  function open(source, container) {
+    const dialog = document.createElement(container ? 'section' : 'dialog');
     dialog.className = 'file-explorer'; dialog.setAttribute('aria-label', source.title);
     dialog.innerHTML = `<div class="fx-header"><div><small></small><h2></h2></div><button type="button" class="button small" data-close>Close</button></div>
       <div class="fx-body"><aside class="fx-nav"><input type="search" placeholder="Find a file…" aria-label="Find a file">
@@ -39,14 +39,16 @@ window.HeyBossFiles = (() => {
     const error = e => { status.textContent = e.message; status.classList.add('fx-error'); };
     const notice = message => { status.classList.remove('fx-error'); status.textContent = message; };
     function close() { if (!busy && discard()) dialog.close(); }
-    $('[data-close]').onclick = close;
+    if (container) $('.fx-header').remove();
+    else $('[data-close]').onclick = close;
     dialog.oncancel = e => { e.preventDefault(); close(); };
     const unload = e => { if (dirty()) { e.preventDefault(); e.returnValue = ''; } };
     window.addEventListener('beforeunload', unload);
-    dialog.onclose = () => { ++sequence; clearTimeout(settle); editor?.destroy(); window.removeEventListener('beforeunload', unload); dialog.remove(); };
+    const destroy = () => { ++sequence; clearTimeout(settle); editor?.destroy(); window.removeEventListener('beforeunload', unload); dialog.remove(); };
+    dialog.onclose = destroy;
     function controls() {
       for (const b of actions.children) b.disabled = busy || (b.dataset.save !== undefined ? !changed : changed);
-      $('[data-close]').disabled = busy;
+      if (!container) $('[data-close]').disabled = busy;
     }
     function drawList() {
       const focused = list.contains(document.activeElement) ? document.activeElement.title : null;
@@ -96,6 +98,7 @@ window.HeyBossFiles = (() => {
       $('h3').textContent = file?.path || 'Select a file'; $('.fx-document header p').textContent = file?.detail || '';
       notice(file ? 'Opening…' : '');
       if (!file) return;
+      source.onSelect?.(file);
       try {
         if (file.editable) {
           const [text] = await Promise.all([source.read(file),loadEditor()]);
@@ -118,7 +121,7 @@ window.HeyBossFiles = (() => {
     function buildActions() {
       actions.replaceChildren(); const file=selected;
       if (source.native && ready) actions.append(button('Open in Mac editor',()=>run(async()=>{
-        await source.native(file); dialog.close();
+        await source.native(file); if (container) notice('Opened in Mac editor'); else dialog.close();
       })));
       if (source.reset && file.custom) actions.append(button('Restore default…',()=>{
         if(confirm('Restore the built-in version of '+file.path+'?')) run(async()=>{
@@ -158,7 +161,10 @@ window.HeyBossFiles = (() => {
         if(i>=0){e.preventDefault();rows[Math.max(0,Math.min(rows.length-1,i+(e.key==='ArrowDown'?1:-1)))].focus();}
       }
     };
-    document.body.append(dialog); dialog.showModal(); $('input').focus(); select(source.files.find(f=>f.path===source.initial) || source.files[0]);
+    if (container) container.replaceChildren(dialog);
+    else { document.body.append(dialog); dialog.showModal(); $('input').focus(); }
+    select(source.files.find(f=>f.path===source.initial) || source.files[0]);
+    return () => { if (busy || !discard()) return false; destroy(); return true; };
   }
   return {open};
 })();
