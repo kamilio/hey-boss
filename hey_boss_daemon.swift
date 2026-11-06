@@ -7492,11 +7492,15 @@ final class ConversationCaption: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         ignoresMouseEvents = true; isOpaque = false; backgroundColor = .clear
         sharingType = .none
-        let glass = NSGlassEffectView(); glass.style = .regular; glass.cornerRadius = 24
         let face = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        face.wantsLayer = true
+        face.layer?.cornerRadius = 24; face.layer?.cornerCurve = .continuous
+        face.layer?.backgroundColor = NSColor(srgbRed: 0.11, green: 0.12, blue: 0.16, alpha: 1).cgColor
+        face.layer?.borderWidth = 1
+        face.layer?.borderColor = NSColor(srgbRed: 0.36, green: 0.38, blue: 0.51, alpha: 1).cgColor
         line.font = font; line.alignment = .center; line.maximumNumberOfLines = 1
         line.frame = NSRect(x: 18, y: 14, width: frame.width - 36, height: 26)
-        face.addSubview(line); glass.contentView = face; contentView = glass
+        face.addSubview(line); contentView = face
     }
     func display(_ text: String, word: NSRange) {
         guard word.length > 0, NSMaxRange(word) <= text.utf16.count else { return }
@@ -7512,11 +7516,11 @@ final class ConversationCaption: NSPanel {
         }
         let style = NSMutableParagraphStyle(); style.alignment = .center
         let styled = NSMutableAttributedString(string: (text as NSString).substring(with: page).trimmingCharacters(in: .newlines),
-            attributes: [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+            attributes: [.font: font, .foregroundColor: NSColor(white: 0.94, alpha: 1), .paragraphStyle: style])
         let local = NSIntersectionRange(word, page)
         let relative = NSRange(location: local.location - page.location, length: local.length)
         if NSMaxRange(relative) <= styled.length {
-            styled.addAttributes([.backgroundColor: NSColor.systemIndigo.withAlphaComponent(0.26), .underlineStyle: NSUnderlineStyle.single.rawValue], range: relative)
+            styled.addAttributes([.backgroundColor: NSColor(srgbRed: 0.30, green: 0.28, blue: 0.53, alpha: 1), .foregroundColor: NSColor.white, .underlineStyle: NSUnderlineStyle.single.rawValue], range: relative)
         }
         line.attributedStringValue = styled
         if !isVisible, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
