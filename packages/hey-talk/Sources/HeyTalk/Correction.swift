@@ -40,6 +40,11 @@ enum CorrectionAction: Equatable {
     }
 }
 
+struct CorrectionTimeout: LocalizedError {
+    let retry: () -> Void
+    var errorDescription: String? { "AI correction timed out." }
+}
+
 // The existing loopback proxy owns OpenAI credentials. Audio never leaves the Mac.
 final class Correction {
     private let session: URLSession
@@ -142,6 +147,7 @@ final class Correction {
                                                    package: package, canClear: canClear, recent: recent, history: history)
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
+                    if [408, 504].contains(response.statusCode) { throw URLError(.timedOut) }
                     guard (200..<300).contains(response.statusCode) else {
                         throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                     }
@@ -164,6 +170,8 @@ final class Correction {
                         turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],
                              last: action, count: count + 1)
                     }
+                } catch let error as URLError where error.code == .timedOut {
+                    completion(.failure(CorrectionTimeout { turn(history, last: last, count: count) }))
                 } catch { completion(.failure(error)) }
             }
         }

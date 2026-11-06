@@ -16,7 +16,7 @@ final class OverlayNoticeTests: XCTestCase {
     @MainActor func testPermissionActionOpensSettingsAndDismissDoesNot() {
         _ = NSApplication.shared
         var opened = 0, dismissed = 0
-        let notice = OverlayNotice(message: "Accessibility is missing", openAccessibility: { opened += 1 }, dismiss: { dismissed += 1 })
+        let notice = OverlayNotice(message: "Accessibility is missing", action: ("Enable Accessibility", { opened += 1 }), dismiss: { dismissed += 1 })
         let buttons = notice.subviews.compactMap { $0 as? NSButton }
         let action = buttons.first { $0.title == "Enable Accessibility" }
         XCTAssertNotNil(action)
@@ -33,7 +33,7 @@ final class OverlayNoticeTests: XCTestCase {
     @MainActor func testUnrelatedErrorsDoNotOfferPermissionChanges() {
         _ = NSApplication.shared
         var dismissed = false
-        let notice = OverlayNotice(message: "The original app closed", openAccessibility: nil, dismiss: { dismissed = true })
+        let notice = OverlayNotice(message: "The original app closed", dismiss: { dismissed = true })
         let buttons = notice.subviews.compactMap { $0 as? NSButton }
         XCTAssertFalse(buttons.contains { $0.title == "Enable Accessibility" })
         buttons.first { $0.accessibilityLabel() == "Dismiss notice" }?.performClick(nil)

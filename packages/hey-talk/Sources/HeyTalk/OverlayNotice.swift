@@ -48,11 +48,11 @@ private final class NoticeActionButton: NSButton {
 /// Buttons stay in AppKit's action chain even though the recording panel never
 /// becomes key. Opening Settings requires an explicit click; errors never focus it.
 final class OverlayNotice: NSView {
-    private let openAccessibility: (() -> Void)?
+    private let performAction: (() -> Void)?
     private let dismiss: () -> Void
 
-    init(message: String, openAccessibility: (() -> Void)?, dismiss: @escaping () -> Void, compact: Bool = false) {
-        self.openAccessibility = openAccessibility
+    init(message: String, action: (title: String, perform: () -> Void)? = nil, dismiss: @escaping () -> Void, compact: Bool = false) {
+        performAction = action?.perform
         self.dismiss = dismiss
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = .systemFont(ofSize: compact ? 12 : 13, weight: compact ? .medium : .regular)
@@ -62,7 +62,7 @@ final class OverlayNotice: NSView {
         let textWidth = compact ? label.frame.width : width - 58
         label.preferredMaxLayoutWidth = textWidth
         let textHeight = ceil(label.intrinsicContentSize.height)
-        let actionsHeight: CGFloat = openAccessibility == nil ? 0 : 40
+        let actionsHeight: CGFloat = action == nil ? 0 : 40
         let height: CGFloat = compact ? 36 : textHeight + 28 + actionsHeight
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
         setAccessibilityElement(true)
@@ -89,18 +89,18 @@ final class OverlayNotice: NSView {
         let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
         close.frame = NSRect(x: width - 34, y: (capCenter - 12).rounded(), width: 24, height: 24)
         addSubview(close)
-        if openAccessibility != nil {
-            let settings = NoticeActionButton(title: "Enable Accessibility", target: self, action: #selector(openSettings))
-            settings.isBordered = false
-            settings.font = .systemFont(ofSize: 13, weight: .semibold)
-            settings.frame = NSRect(x: 16, y: 12, width: width - 32, height: 32)
-            addSubview(settings)
+        if let action {
+            let button = NoticeActionButton(title: action.title, target: self, action: #selector(activateAction))
+            button.isBordered = false
+            button.font = .systemFont(ofSize: 13, weight: .semibold)
+            button.frame = NSRect(x: 16, y: 12, width: width - 32, height: 32)
+            addSubview(button)
         }
     }
     required init?(coder: NSCoder) { nil }
     override func mouseDown(with event: NSEvent) {}
     override func mouseUp(with event: NSEvent) {}
-    @objc private func openSettings() { dismiss(); openAccessibility?() }
+    @objc private func activateAction() { dismiss(); performAction?() }
     @objc private func closeNotice() { dismiss() }
 
     static func concise(_ detail: String) -> String {

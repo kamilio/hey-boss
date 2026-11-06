@@ -722,9 +722,6 @@ final class Overlay {
         updateAccessibilityLabel()
         layout(animated: true)
     }
-    func error(_ message: String, accessibilityAction: Bool = false) {
-        presentNotice(message, accessibilityAction: accessibilityAction)
-    }
     func showStatus(_ message: String) {
         guard enabled, pasteWait == nil, notice == nil else { return }
         clearStatus()
@@ -732,7 +729,7 @@ final class Overlay {
             self?.clearStatus()
             self?.layout(animated: true)
         }
-        let content = OverlayNotice(message: message, openAccessibility: nil, dismiss: dismiss, compact: true)
+        let content = OverlayNotice(message: message, dismiss: dismiss, compact: true)
         status = content; pillContent.addSubview(content)
         layout(animated: true)
         let timer = DispatchWorkItem(block: dismiss)
@@ -786,12 +783,15 @@ final class Overlay {
         noticeDismiss = dismiss
         DispatchQueue.main.asyncAfter(deadline: .now() + (failed ? 5 : 3), execute: dismiss)
     }
-    private func presentNotice(_ message: String, accessibilityAction: Bool) {
+    func error(_ message: String, accessibilityAction: Bool = false, retry: (() -> Void)? = nil) {
         guard enabled, pasteWait == nil else { return }
         clearNotice()
         clearStatus()
-        let action: (() -> Void)? = accessibilityAction ? { [weak self] in self?.onOpenAccessibility?() } : nil
-        let content = OverlayNotice(message: message, openAccessibility: action, dismiss: { [weak self] in self?.dismissNotice() })
+        let action: (String, () -> Void)?
+        if let retry { action = ("Retry", retry) }
+        else if accessibilityAction { action = ("Enable Accessibility", { [weak self] in self?.onOpenAccessibility?() }) }
+        else { action = nil }
+        let content = OverlayNotice(message: message, action: action, dismiss: { [weak self] in self?.dismissNotice() })
         notice = content
         pillContent.addSubview(content)
         noticeRecordButton.isHidden = false
@@ -804,7 +804,7 @@ final class Overlay {
             content.animator().alphaValue = 1
         }
         // Keep the repair link available until clicked, dismissed, or recording resumes.
-        if !accessibilityAction {
+        if action == nil {
             let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
             noticeDismiss = dismiss
             DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)

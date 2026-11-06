@@ -325,6 +325,13 @@ final class OverlayTests: XCTestCase {
         XCTAssertEqual(notices(try XCTUnwrap(panel.contentView)).count, 1)
         let plain = try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first)
         let shortHeight = plain.frame.height
+        var retried = false
+        overlay.error("AI correction timed out.", retry: { retried = true })
+        let retryNotice = try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first)
+        let retry = try XCTUnwrap(retryNotice.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Retry" })
+        retry.performClick(nil)
+        XCTAssertTrue(retried)
+        XCTAssertNil(retryNotice.superview)
         overlay.error("The microphone is unavailable. Reconnect it and try recording again.")
         XCTAssertGreaterThan(try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first).frame.height, shortHeight)
         overlay.error("Allow automatic paste. Text copied.", accessibilityAction: true)

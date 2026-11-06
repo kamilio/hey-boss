@@ -2,6 +2,21 @@ import XCTest
 @testable import TalkCore
 
 final class CoreTests: XCTestCase {
+    func testRetryOnlyResumesTheDictationThatDisplayedTheNotice() throws {
+        var session = RecordingSession()
+        let first = try session.begin()
+        try session.processing(first)
+        XCTAssertTrue(session.finish(first, text: "raw"))
+        let retry = try XCTUnwrap(session.retryProcessing(first))
+        XCTAssertEqual(session.phase, .processing)
+        XCTAssertNil(session.retryProcessing(first))
+        XCTAssertTrue(session.finish(retry, text: "corrected"))
+        _ = try session.begin()
+        session.cancel()
+        XCTAssertNil(session.retryProcessing(retry))
+        XCTAssertEqual(session.phase, .idle)
+    }
+
     func testAutomaticSessionWaitsForSpeechAndRejectsStaleOnsets() throws {
         var session = RecordingSession()
         let id = try session.begin(listening: true)
