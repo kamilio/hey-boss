@@ -76,8 +76,8 @@ Hyper+R and Auto Dictation cannot override an exception.
 When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing
-Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, requesting priority service with reasoning disabled and storage off.
-The proxy's configured routing, model rewrites, and authentication remain authoritative.
+Hey Proxy at `127.0.0.1:8080` with reasoning disabled and storage off. By default, correction requests `gpt-6-luna` with priority service.
+To use Bedrock, choose an OpenAI profile ID from `/bedrock/v1/models` and run `defaults write local.hey-talk correctionBedrockProfile -string 'PROFILE_ID'`. Correction then uses `/bedrock/v1/responses` on the default tier. Delete that preference to restore ordinary proxy routing.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
 If correction fails during dictation, Hey Talk copies the raw transcript so you can press ⌘V. File transcription and `--no-paste` leave the clipboard alone. Escape discards pending correction too.

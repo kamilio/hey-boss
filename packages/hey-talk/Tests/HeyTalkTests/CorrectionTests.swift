@@ -405,6 +405,20 @@ final class CorrectionTests: XCTestCase {
         XCTAssertFalse(settings.enabled)
     }
 
+    func testConfiguredBedrockProfileUsesExplicitRouteWithoutPriority() throws {
+        let suite = "hey-talk-correction-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("global.openai.example", forKey: "correctionBedrockProfile")
+        let settings = CorrectionSettings(defaults: defaults)
+        let request = try Correction.request(text: "hello", vocabulary: [], settings: settings)
+        XCTAssertEqual(request.url?.path, "/bedrock/v1/responses")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "global.openai.example")
+        XCTAssertEqual(settings.json["model"] as? String, body["model"] as? String)
+        XCTAssertNil(body["service_tier"])
+    }
+
     func testRequestUsesLunaWithoutReasoningAndKeepsVocabularySeparateFromTranscript() throws {
         let request = try Correction.request(text: "hello kamil", vocabulary: ["Kamil", "T3 Code"])
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8080/v1/responses")
