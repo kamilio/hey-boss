@@ -4839,6 +4839,7 @@ func auditConversation(_ root: String) {
     }
     let captured = "## Grocery list\nThe fruit on this page is pineapple."
     ui.openWithContext(source: "Test Editor", text: captured)
+    precondition(!ui.window.isVisible && ui.voiceStatus["active"] as? Bool == true && ui.contextChip.title == "Test Editor", "Hyper-M must attach context and start in the pill without opening the transcript")
     precondition(ui.phase == .starting)
     ui.toggle() // The fixture supplies the microphone below.
     let audio = ReviewAudio()
@@ -5005,6 +5006,8 @@ func auditConversation(_ root: String) {
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows[ui.rows.count - 2].stringValue.localizedCaseInsensitiveContains("which fruit"), "Keep the opening words of an interruption")
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)
+    precondition(!ui.window.isVisible, "A spoken reply must keep the transcript hidden")
+    ui.show(); ui.window.contentView?.layoutSubtreeIfNeeded()
     precondition(ui.meter.accessibilityLabel() == "Stop voice" && ui.turns.bounds.width > 320)
     precondition(ui.status.stringValue == "Speaking" && ui.status.bounds.width >= ui.status.attributedStringValue.size().width)
     // Playback can begin before the fixture finishes writing its trailing silence.
@@ -5035,7 +5038,8 @@ func auditConversation(_ root: String) {
     let oldAudio = ReviewAudio(); resumed.connect(oldAudio)
     resumed.openWithContext(source: "Another Window", text: "Different contents.")
     precondition(oldAudio.stopped && resumed.phase == .starting && resumed.contextChip.title == "Another Window")
-    precondition(resumed.rows.isEmpty && resumed.historyList.numberOfRows == 1)
+    precondition(!resumed.window.isVisible && resumed.rows.isEmpty && resumed.historyList.numberOfRows == 1)
+    resumed.show()
     let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: resumed.window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
     resumed.window.sendEvent(escape)
     precondition(resumed.phase == .idle && resumed.audio == nil && resumed.window.isVisible)
@@ -5123,6 +5127,8 @@ func auditWorkspaceChat(_ root: String) {
     try! value.write(to: folder.appendingPathComponent("example.txt"), atomically: true, encoding: .utf8)
     ui.openWithContext(source: "Test Editor", text: "Destination file: answer.txt")
     precondition(ui.phase == .starting && ui.contextChip.title == "Test Editor" && !ui.contextChip.isHidden && ui.rows.isEmpty)
+    precondition(!ui.window.isVisible && ui.directory == folder)
+    ui.show()
     ui.meter.performClick(nil) // Keyboard fallback retains the attachment if the microphone is stopped.
     ui.input.stringValue = "Copy example.txt to the destination file named in the captured context. Reply with its contents."
     ui.sendTyped(); wait()

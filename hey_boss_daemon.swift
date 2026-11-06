@@ -7754,8 +7754,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         toggle()
     }
     func openWithContext(source: String?, text: String?) {
-        show()
         guard selectDirectory(directory, capture: source.map { Capture(source: $0, text: text) }) else { return }
+        window.orderOut(nil)
         toggle()
     }
     @objc private func inspectCapture(_ sender: NSButton) {
