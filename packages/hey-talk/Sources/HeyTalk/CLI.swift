@@ -30,7 +30,8 @@ enum CLI {
     hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
     hey-talk enter-exceptions sites [add|remove HOST]  Websites that never receive Enter
-    hey-talk vocabulary [add|remove WORD…]     Shared recognition hints; quote phrases
+    hey-talk vocabulary [add|remove WORD…]     Shared dictation vocabulary; quote phrases
+    hey-talk vocabulary rename OLD NEW         Correct a saved spelling
     hey-talk overlay show|hide                  Control the floating recording pill
     hey-talk permissions microphone|accessibility
     hey-talk warm                              Load Orukeet ahead of recording

@@ -11,7 +11,10 @@ struct SharedVocabulary {
     }
 
     func command(_ arguments: [String]) throws -> [String: Any] {
-        try Vocabulary.validate(arguments)
+        if arguments.first == "rename" {
+            guard arguments.count == 3 else { throw TalkError("Use vocabulary rename OLD NEW. Quote phrases.") }
+            for value in arguments.dropFirst() { _ = try Vocabulary.term(value) }
+        } else { try Vocabulary.validate(arguments) }
         // The CLI and background refresh can run in separate processes. Keep a
         // delayed refresh from overwriting a more recent CLI result in the cache.
         let directory = cache.file.deletingLastPathComponent()
