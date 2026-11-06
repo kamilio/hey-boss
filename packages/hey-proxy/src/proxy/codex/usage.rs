@@ -5,6 +5,7 @@ use tokio::time::Instant;
 #[derive(Default)]
 pub(in crate::proxy) struct Cache {
     identity: Option<[u8; 32]>,
+    monthly: Option<(String, Instant, Option<f64>)>,
     retry_at: Option<Instant>,
     updated_at: Option<u64>,
     data: Option<Value>,
@@ -249,11 +250,7 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
         let limit = number(&ind["limit"]);
         let rem_pct_raw =
             number(&ind["remaining_percent"]).or_else(|| number(&ind["remainingPercent"]));
-        let used = number(&ind["used"]).or_else(|| {
-            limit
-                .zip(rem_pct_raw)
-                .map(|(l, rp)| l * (100.0 - rp.clamp(0.0, 100.0)) / 100.0)
-        });
+        let used = number(&ind["used"]);
         let used_percent = used
             .zip(limit)
             .and_then(|(u, l)| (l > 0.0).then(|| (u / l * 100.0).max(0.0)))
@@ -271,13 +268,15 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
         } else {
             None
         };
-        let spend = if limit.is_some() || used.is_some() || balance.is_some() {
+        let credit_unit =
+            ind["unit"].is_null() || matches!(ind["unit"].as_str(), Some("credit" | "credits"));
+        let spend = if credit_unit && (limit.is_some() || used.is_some() || balance.is_some()) {
             let remaining = used.zip(limit).map(|(u, l)| (l - u).max(0.0)).or(balance);
             let over_limit = used.zip(limit).map(|(u, l)| (u - l).max(0.0));
             Some(hey_proxy::usage::SpendLimit {
                 currency: "Credits".into(),
                 period: "monthly".into(),
-                used: used.or_else(|| balance.map(|_| 0.0)),
+                used,
                 limit,
                 remaining,
                 over_limit,
@@ -306,6 +305,52 @@ pub(crate) fn normalize(value: &Value) -> Result<Value> {
         "availability_unknown": (rate_limit["allowed"] == false && rate_limit["limit_reached"] != true)
             || value["additional_rate_limits"].as_array().is_some_and(|limits|limits.len()>64),
     }))
+}
+
+async fn usage_json(mut response: reqwest::Response) -> Result<Value> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| anyhow::anyhow!("Cannot read Codex usage response"))?
+    {
+        ensure!(
+            bytes.len() + chunk.len() <= 1024 * 1024,
+            "Codex usage response is too large"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!("Codex usage response is invalid"))
+}
+
+pub(super) fn on_demand_total(report: &Value, today: &str) -> Option<f64> {
+    if report["units"] != "credits" {
+        return None;
+    }
+    let (month, last) = today.rsplit_once('-')?;
+    let last: usize = last.parse().ok()?;
+    let rows = report["data"].as_array()?;
+    if !(1..=31).contains(&last) || rows.len() != last {
+        return None;
+    }
+    let mut seen = std::collections::HashSet::new();
+    let mut total = 0.0;
+    for row in rows {
+        let date = row["date"].as_str()?;
+        let (m, d) = date.rsplit_once('-')?;
+        let day = d.parse::<usize>().ok()?;
+        if m != month || !(1..=last).contains(&day) || !seen.insert(day) {
+            return None;
+        }
+        let amounts = row["premium_usage_values"]["credit_usage_credits"].as_object()?;
+        if amounts.is_empty() {
+            return None;
+        }
+        for value in amounts.values() {
+            total += number(value)?;
+        }
+    }
+    total.is_finite().then_some(total)
 }
 
 fn retry_delay(headers: &HeaderMap) -> Duration {
@@ -452,7 +497,7 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             if let Some(account_id) = creds.account_id.as_deref() {
                 request = request.header("ChatGPT-Account-Id", account_id);
             }
-            let mut response = request
+            let response = request
                 .send()
                 .await
                 .map_err(|_| anyhow::anyhow!("Cannot reach Codex usage endpoint"))?;
@@ -482,21 +527,50 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
                 "Codex usage unavailable (HTTP {})",
                 status.as_u16()
             );
-            let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| anyhow::anyhow!("Cannot read Codex usage response"))?
-            {
-                ensure!(
-                    bytes.len() + chunk.len() <= 1024 * 1024,
-                    "Codex usage response is too large"
-                );
-                bytes.extend_from_slice(&chunk);
+            let value = usage_json(response).await?;
+            let mut data = normalize(&value)?;
+            if value["spend_control"]["individual_limit"].is_object() {
+                let today = hey_proxy::usage::format_unix_iso8601(crate::codex_auth::now());
+                let today = &today[..10];
+                let month = &today[..7];
+                if cache
+                    .monthly
+                    .as_ref()
+                    .is_none_or(|(m, retry, _)| m != month || *retry <= Instant::now())
+                {
+                    let mut delay = Duration::from_secs(900);
+                    let total = async {
+                        let mut request = proxy
+                            .client
+                            .get(format!(
+                                "{usage_url}/daily-workspace-user-token-usage-breakdown"
+                            ))
+                            .query(&[
+                                ("start_date", format!("{month}-01")),
+                                ("end_date", today.to_owned()),
+                                ("group_by", "day".to_owned()),
+                            ])
+                            .timeout(Duration::from_secs(4))
+                            .bearer_auth(&creds.access_token);
+                        if let Some(id) = creds.account_id.as_deref() {
+                            request = request.header("ChatGPT-Account-Id", id);
+                        }
+                        let response = request.send().await.ok()?;
+                        if !response.status().is_success() {
+                            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                                delay = delay.max(retry_delay(response.headers()));
+                            }
+                            return None;
+                        }
+                        on_demand_total(&usage_json(response).await.ok()?, today)
+                    }
+                    .await;
+                    cache.monthly = Some((month.to_owned(), Instant::now() + delay, total));
+                }
+                data["monthly_on_demand_credits"] =
+                    json!(cache.monthly.as_ref().and_then(|(_, _, total)| *total));
             }
-            let value: Value = serde_json::from_slice(&bytes)
-                .map_err(|_| anyhow::anyhow!("Codex usage response is invalid"))?;
-            return normalize(&value);
+            return Ok(data);
         }
         anyhow::bail!(
             "Codex usage authorization rejected; sign in again with hey-proxy codex-login"

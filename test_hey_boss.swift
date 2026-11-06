@@ -3868,6 +3868,23 @@ func auditSubscriptionQuota() {
     let expired = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.replacingOccurrences(of: "2099-10-15T16:42:07Z", with: "1970-01-01T00:33:24Z").utf8))
     precondition(!expired.isFresh(now: 2005), "Crossing reset invalidates the previous reading")
     let ui = SubscriptionQuotaController()
+    for (provider, currency, used, paid, expected) in [
+        ("claude", "USD", "0", "null", 0.0.formatted(.currency(code: "USD"))),
+        ("codex", "Credits", "5943.714", "null", 5943.71.formatted() + " credits"),
+        ("codex", "Credits", "5943.714", "4033.15", 4033.15.formatted() + " credits"),
+        ("codex", "Credits", "null", "null", "Not reported")
+    ] {
+        let fixture = json.replacingOccurrences(of: "codex", with: provider)
+            .replacingOccurrences(of: #""windows":"#, with: #""monthly_on_demand_credits":\#(paid),"extra_usage":{"spend":{"period":"monthly","currency":"\#(currency)","used":\#(used)}},"windows":"#)
+        let account = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(fixture.utf8))
+        ui.rows = [SubscriptionQuotaRow(account: account.account, reading: account)]
+        ui.render()
+        let labels = ui.body.subviews.first!.subviews.compactMap { ($0 as? NSTextField)?.stringValue }
+        let estimate = "≈" + 161.33.formatted(.currency(code: "USD"))
+        precondition(labels.contains(estimate) == (paid != "null"), "Only price the on-demand credits")
+        precondition(labels.contains(expected), "Missing provider amount: " + expected)
+    }
+    ui.rows = []
     var calls: [[String]] = []
     var replies: [(Result<Data, Error>) -> Void] = []
     ui.runner = { args, reply in calls.append(args); replies.append(reply) }

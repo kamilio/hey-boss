@@ -507,6 +507,9 @@ fn render(usage: &AccountUsage) -> String {
         if data.windows.is_empty() {
             out.push_str("Subscription quota windows: not reported\n");
         }
+        if let Some(credits) = data.monthly_on_demand_credits {
+            let _ = writeln!(out, "Month-to-date on-demand usage: {credits:.2} credits");
+        }
         match &data.extra_usage {
             Some(extra) => {
                 let _ = writeln!(
@@ -527,8 +530,13 @@ fn render(usage: &AccountUsage) -> String {
                 if let Some(spend) = &extra.spend {
                     let _ = writeln!(
                         out,
-                        "Provider-reported {} extra spend: {}",
+                        "Provider-reported {} {}: {}",
                         plain(&spend.period),
+                        if spend.currency == "Credits" {
+                            "credit usage against individual limit"
+                        } else {
+                            "extra spend"
+                        },
                         amount(spend.used, &spend.currency)
                     );
                     let _ = writeln!(

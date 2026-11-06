@@ -4632,7 +4632,23 @@ struct SubscriptionQuotaWindow: Codable {
     }
 }
 struct SubscriptionQuotaReading: Codable {
+    struct ExtraUsage: Codable {
+        struct Spend: Codable {
+            let used: Double?
+            let currency: String
+            let period: String
+
+            var amount: String? {
+                guard period == "monthly", let used, used.isFinite, used >= 0 else { return nil }
+                if currency == "Credits" { return used.formatted(.number.precision(.fractionLength(0...2))) + " credits" }
+                return used.formatted(.currency(code: currency))
+            }
+        }
+        let spend: Spend?
+    }
     struct Usage: Codable {
+        let monthly_on_demand_credits: Double?
+        let extra_usage: ExtraUsage?
         let windows: [SubscriptionQuotaWindow]
         let availability_unknown: Bool?
     }
@@ -4833,7 +4849,9 @@ final class SubscriptionQuotaController: NSObject {
             let reading = row.reading
             let fresh = reading?.isFresh() == true
             let windows = reading?.data?.windows ?? []
-            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60))
+            let paid = reading?.data?.monthly_on_demand_credits
+            let showSpend = reading?.data != nil && reading?.state != "disabled"
+            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60 + (showSpend ? 24 : 0) + (paid != nil ? 22 : 0)))
             body.addSubview(card)
             let accountTitle = row.account.title + (row.account.id == "default" ? "" : " · " + row.account.id)
             let name = label(accountTitle, size: 13, weight: .semibold)
@@ -4844,6 +4862,24 @@ final class SubscriptionQuotaController: NSObject {
             if failed { status.toolTip = row.message }
             status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
             var rowY: CGFloat = 38
+            if showSpend {
+                let title = paid != nil ? "On demand this month" : row.account.provider == "codex" ? "Monthly credit usage" : "Monthly extra usage"
+                let name = label(title, size: 11, weight: .medium)
+                name.frame = NSRect(x: 12, y: rowY, width: 145, height: 16); card.addSubview(name)
+                let value = paid.map { $0.formatted(.number.precision(.fractionLength(0...2))) + " credits" } ?? reading?.data?.extra_usage?.spend?.amount
+                let amount = label(value ?? "Not reported", size: 11, weight: .semibold, color: fresh && value != nil ? .labelColor : .secondaryLabelColor)
+                amount.alignment = .right; amount.frame = NSRect(x: 160, y: rowY, width: cardWidth - 172, height: 16); card.addSubview(amount)
+                rowY += 24
+                if let paid {
+                    let basis = label("Value at 4 US¢/credit", size: 11, color: .secondaryLabelColor)
+                    let estimate = label("≈" + (paid * 0.04).formatted(.currency(code: "USD")), size: 11, color: .secondaryLabelColor)
+                    let explanation = "Reference: GPT-6.1 Sol standard API pricing. Actual workspace charges depend on your agreement."
+                    basis.toolTip = explanation; estimate.toolTip = explanation
+                    basis.frame = NSRect(x: 12, y: rowY, width: 145, height: 16); card.addSubview(basis)
+                    estimate.alignment = .right; estimate.frame = NSRect(x: 160, y: rowY, width: cardWidth - 172, height: 16); card.addSubview(estimate)
+                    rowY += 22
+                }
+            }
             for limit in windows {
                 let name = label(limit.label, size: 11, weight: .medium)
                 name.frame = NSRect(x: 12, y: rowY, width: cardWidth - 106, height: 16); card.addSubview(name)

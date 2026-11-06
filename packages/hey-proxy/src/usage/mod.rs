@@ -100,6 +100,9 @@ pub struct UsageData {
     #[serde(default)]
     pub availability_unknown: bool,
     pub windows: Vec<Window>,
+    /// Calendar month to date, from the workspace user’s daily on-demand credit report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monthly_on_demand_credits: Option<f64>,
     pub extra_usage: Option<ExtraUsage>,
 }
 
