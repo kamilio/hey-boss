@@ -123,26 +123,12 @@ impl Connection {
     }
 }
 
-fn apply(c: &mut Connection, thread: &str, action: &str, input: &Value) -> io::Result<Value> {
+fn apply(c: &mut Connection, thread: &str, action: &str, _input: &Value) -> io::Result<Value> {
     let runtime = c.rpc("thread/read", json!({"threadId":thread}))?;
     if runtime["thread"]["id"].as_str() != Some(thread) {
         return Err(fail("Codex returned a different thread"));
     }
     let mut goal = c.rpc("thread/goal/get", json!({"threadId":thread}))?["goal"].clone();
-    let mut turn = Value::Null;
-    if runtime["thread"]["status"]["type"] == "active" {
-        let turns = c.rpc(
-            "thread/turns/list",
-            json!({"threadId":thread,"limit":10,"itemsView":"summary","sortDirection":"desc"}),
-        )?;
-        if let Some(data) = turns["data"].as_array() {
-            turn = data
-                .iter()
-                .find(|t| t["status"] == "inProgress")
-                .map(|t| t["id"].clone())
-                .unwrap_or(Value::Null);
-        }
-    }
     match action {
         "inspect" => {}
         "enable-goal" | "disable-goal" => {
@@ -159,30 +145,9 @@ fn apply(c: &mut Connection, thread: &str, action: &str, input: &Value) -> io::R
                 return Err(fail("Goal change was not acknowledged"));
             }
         }
-        "steer" => {
-            let text = input["text"]
-                .as_str()
-                .filter(|s| !s.trim().is_empty() && s.len() <= 32_000)
-                .ok_or_else(|| fail("Instruction must contain 1–32000 bytes"))?;
-            let expected = input["expectedTurnId"]
-                .as_str()
-                .ok_or_else(|| fail("Refresh controls before sending"))?;
-            if turn.as_str() != Some(expected) || runtime["thread"]["canAcceptDirectInput"] != true
-            {
-                return Err(fail(
-                    "The active turn changed or cannot accept steering. Refresh controls; your draft is preserved.",
-                ));
-            }
-            let ack = c.rpc("turn/steer", json!({"threadId":thread,"expectedTurnId":expected,"input":[{"type":"text","text":text}]}))?;
-            if ack["turnId"].as_str() != Some(expected) {
-                return Err(fail("Unexpected steering acknowledgement"));
-            }
-        }
         _ => return Err(fail("Unknown agent-control action")),
     }
-    Ok(
-        json!({"ok":true,"threadId":thread,"goal":goal,"turnId":turn,"canSteer":!turn.is_null() && runtime["thread"]["canAcceptDirectInput"] == true}),
-    )
+    Ok(json!({"ok":true,"threadId":thread,"goal":goal}))
 }
 fn goal_params(thread: &str, action: &str) -> Value {
     // Deliberately omit objective and budget: preserve Codex's saved goal and usage.
@@ -303,9 +268,7 @@ mod tests {
                                         "thread/loaded/list"=>json!({"data":if mode=="absent" {vec![]}else{vec!["session"]},"nextCursor":null}),
                                         "thread/read"=>json!({"thread":{"id":if mode=="wrong" {"other"}else{"session"},"status":{"type":"active"},"canAcceptDirectInput":true}}),
                                         "thread/goal/get"=>json!({"goal":if mode=="no-goal" {Value::Null}else{goal.clone()}}),
-                                        "thread/turns/list"=>json!({"data":[{"id":"turn","status":"inProgress"}]}),
                                         "thread/goal/set"=> {assert_eq!(p.as_object().unwrap().len(),2);if mode=="disconnect" {break}goal["status"]=p["status"].clone();json!({"goal":goal})},
-                                        "turn/steer"=> {assert_eq!(p["expectedTurnId"],"turn");assert_eq!(p["threadId"],"session");if mode=="conflict" {ws.send(Message::Text(json!({"id":id,"error":{"message":"turn changed"}}).to_string().into())).unwrap();continue}json!({"turnId":"turn"})},
                                         _=>panic!("Unexpected method {m}"),
                                     };
                                     if mode=="timeout" && m!="initialize" {while !stop.load(Ordering::Relaxed) {thread::sleep(Duration::from_millis(10));}break}
@@ -392,42 +355,6 @@ mod tests {
             assert!(run_config("session", "enable-goal", &json!({}), &mock.config()).is_err());
             assert!(!mock.methods().contains(&"thread/goal/set".into()));
         }
-    }
-    #[test]
-    fn steering_requires_exact_active_turn_and_acknowledgement() {
-        let mock = Mock::new("normal");
-        assert!(
-            run_config(
-                "session",
-                "steer",
-                &json!({"text":"Focus","expectedTurnId":"stale"}),
-                &mock.config()
-            )
-            .is_err()
-        );
-        assert!(!mock.methods().contains(&"turn/steer".into()));
-        assert_eq!(
-            run_config(
-                "session",
-                "steer",
-                &json!({"text":"Focus","expectedTurnId":"turn"}),
-                &mock.config()
-            )
-            .unwrap()["ok"],
-            true
-        );
-        let conflict = Mock::new("conflict");
-        assert!(
-            run_config(
-                "session",
-                "steer",
-                &json!({"text":"Focus","expectedTurnId":"turn"}),
-                &conflict.config()
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("turn changed")
-        );
     }
     #[test]
     fn disconnect_and_timeout_are_bounded_without_retries() {

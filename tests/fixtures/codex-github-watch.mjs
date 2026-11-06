@@ -27,11 +27,12 @@ for await (const line of createInterface({input:process.stdin})) {
   if (message.method === 'thread/start') result = {thread:{id:session}};
   if (message.method === 'thread/resume') throw Error('A new GitHub event must start a fresh session');
   if (message.method === 'turn/start') {
-    assert(!turn, 'The active turn should be steered, not replaced');
+    assert(!turn, 'Each watcher claim starts its own thread');
     phase = existsSync('github-launches.txt') ? Number(readFileSync('github-launches.txt','utf8')) + 1 : 1;
     writeFileSync('github-launches.txt', String(phase));
     assert(params.input[0].text.startsWith('Claim and implement `hey-boss issue view 1`.'));
     assert(!params.input[0].text.includes('hey-boss issue pr list 1'));
+    assert(params.input[0].text.endsWith("The GitHub status changed."));
     const initial = status();
     assert(initial.event);
     assert.equal(initial.monitoring,true);
@@ -43,21 +44,10 @@ for await (const line of createInterface({input:process.stdin})) {
     turn = randomUUID();
     result = {turn:{id:turn}};
   }
-  if (message.method === 'turn/steer') {
-    assert.equal(phase,1);
-    assert.equal(params.expectedTurnId,turn);
-    assert(!params.input[0].text.includes('Boss added an instruction'), 'Automatic evidence must not impersonate a human instruction');
-    const update = status();
-    assert.equal(Object.values(update.prs)[0].evidence.complete,true);
-    if (process.env.HEY_BOSS_TEST_REJECT_STEERING === '1') {
-      record({type:'steer_rejected',phase,status:update});
-      send({id:message.id,error:{code:-32601,message:'Steering is unsupported in this fixture'}});
-      setTimeout(finish, 100);
-      continue;
-    }
-    record({type:'steer',phase,status:update});
-    result = {turnId:turn};
-  }
+  assert.notEqual(message.method, 'turn/steer', 'Watcher events must wait for a new claim');
   send({id:message.id,result});
-  if (message.method === 'turn/steer' || (message.method === 'turn/start' && phase > 1)) finish();
+  if (message.method === 'turn/start') {
+    if (phase > 1) finish();
+    else { const timer = setInterval(() => { if (existsSync('release-first')) {clearInterval(timer); finish();} }, 50); }
+  }
 }

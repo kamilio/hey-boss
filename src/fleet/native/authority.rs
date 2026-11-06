@@ -338,7 +338,7 @@ impl Relay {
                     if !matches!(
                         request["request"]["kind"].as_str(),
                         Some(
-                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "worker_signal" | "chief_run" | "issue_archive" | "utils_resolve" | "utils_start" | "utils_poll"
+                            "resource" | "status" | "overview" | "issue_numbers" | "issue_metadata" | "configuration" | "broadcast" | "worker_signal" | "chief_run" | "issue_archive" | "utils_resolve" | "utils_start" | "utils_poll"
                         )
                     ) {
                         return Err(Error::invalid("Unsupported authority request").into());

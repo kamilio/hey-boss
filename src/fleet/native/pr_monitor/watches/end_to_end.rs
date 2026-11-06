@@ -56,32 +56,26 @@ fn wait(label: &str, root: &std::path::Path, mut ready: impl FnMut() -> bool) {
 
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
-fn github_http_poll_claim_steer_rearm_and_fresh_session() {
-    lifecycle(false, Followups::RequiredFailures(1));
-}
-
-#[test]
-#[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
-fn github_http_poll_rejected_steering_starts_fresh_session_with_pending_findings() {
-    lifecycle(true, Followups::RequiredFailures(1));
+fn github_http_poll_claim_again_in_fresh_session() {
+    lifecycle(Followups::RequiredFailures(1));
 }
 
 #[test]
 #[ignore = "long-running isolated worker soak; requires cargo build --bin hey-boss"]
 fn github_watcher_process_soak_retains_exactly_once_wakeups() {
-    lifecycle(true, Followups::RequiredFailures(600));
+    lifecycle(Followups::RequiredFailures(600));
 }
 
 #[test]
 #[ignore = "requires cargo build --bin hey-boss; launches only isolated synthetic worker processes"]
 fn github_http_late_review_edits_start_fresh_sessions_without_repeating_completed_ci() {
-    lifecycle(false, Followups::ReviewEdits(3));
+    lifecycle(Followups::ReviewEdits(3));
 }
 
 #[test]
 #[ignore = "three-hour isolated polling cadence soak; requires cargo build --bin hey-boss"]
 fn github_watcher_real_cadence_soak_handles_failures_completions_and_review_edits() {
-    lifecycle(false, Followups::TimedMixed(180));
+    lifecycle(Followups::TimedMixed(180));
 }
 
 #[derive(Clone, Copy)]
@@ -91,7 +85,7 @@ enum Followups {
     TimedMixed(usize),
 }
 
-fn lifecycle(reject_steering: bool, followups: Followups) {
+fn lifecycle(followups: Followups) {
     let (following_updates, review_edits, real_cadence) = match followups {
         Followups::RequiredFailures(count) => (count, false, false),
         Followups::ReviewEdits(count) => (count, true, false),
@@ -160,10 +154,6 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
         .env("HEY_BOSS_FLEET_STATE", &ctx.state)
         .env("HEY_BOSS_INBOX_SOCKET", root.join("absent-inbox.sock"))
         .env("HEY_BOSS_TEST_CLI", &binary)
-        .env(
-            "HEY_BOSS_TEST_REJECT_STEERING",
-            if reject_steering { "1" } else { "0" },
-        )
         .env(
             "HEY_BOSS_CODEX",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -310,41 +300,20 @@ fn lifecycle(reject_steering: bool, followups: Followups) {
     assert_eq!(scalar("SELECT count(*) FROM worker_runs"), 1);
     phase.store(2, Ordering::Release);
     poll_now();
-    let after_completion = if reject_steering { 2 } else { 1 };
-    wait("steering and return to watcher", &root, || {
-        scalar("SELECT count(*) FROM worker_runs WHERE state='completed'") == after_completion
-            && scalar("SELECT count(*) FROM issues WHERE assignee='watcher:github'") == 1
-    });
-    let steered = records()
-        .into_iter()
-        .find(|r| {
-            r["type"]
-                == if reject_steering {
-                    "steer_rejected"
-                } else {
-                    "steer"
-                }
-        })
-        .unwrap();
-    assert_eq!(steered["session"], first["session"]);
-    assert_ne!(steered["status"]["event"], first["status"]["event"]);
-    if reject_steering {
-        let delivered = records()
-            .into_iter()
-            .filter(|r| r["type"] == "claim")
-            .nth(1)
-            .unwrap();
-        assert_ne!(delivered["session"], first["session"]);
-        assert_eq!(delivered["status"]["event"], steered["status"]["event"]);
-        assert_eq!(
-            delivered["status"]["prs"]["https://github.com/o/r/pull/1"]["evidence"]["complete"],
-            true
-        );
-        assert_eq!(
-            scalar("SELECT count(*) FROM agent_steering WHERE state='rejected'"),
-            1
-        );
-    }
+    fs::write(root.join("release-first"), "").unwrap();
+    let after_completion = 2;
+    wait(
+        "second thread claimed the new event and returned to watching",
+        &root,
+        || {
+            scalar("SELECT count(*) FROM worker_runs WHERE state=\x27completed\x27")
+                == after_completion
+                && scalar("SELECT count(*) FROM issues WHERE assignee=\x27watcher:github\x27") == 1
+        },
+    );
+    let claims = records();
+    assert_ne!(claims[1]["session"], first["session"]);
+    assert_ne!(claims[1]["status"]["event"], first["status"]["event"]);
     let started = Instant::now();
     for index in 0..following_updates {
         phase.store(index + 3, Ordering::Release);

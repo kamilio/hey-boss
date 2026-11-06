@@ -67,7 +67,7 @@ pub(super) fn run(
     };
     store.worker_process(&job.id, owned.agent.pid())?;
     store.worker_event(&job.id, &format!("Launching {}", provider.name()), None)?;
-    let (mut applied, goal, objective) = prompt(job);
+    let (applied, goal, objective) = prompt(job);
     let text = if provider == Provider::Pi {
         format!(
             "{}\n\n{}",
@@ -136,7 +136,7 @@ pub(super) fn run(
                 last_poll = Instant::now();
                 let state = owned.agent.inspect()?;
                 if state.turn.as_deref() == Some(&turn) && !state.awaiting_prompt_ack {
-                    if let Some(instruction) = store.worker_steering(&job.id)? {
+                    if let Some(instruction) = store.pending_broadcast(&job.id)? {
                         deliver(
                             &mut owned.agent,
                             store,
@@ -145,33 +145,6 @@ pub(super) fn run(
                             &instruction,
                             &mut transcript,
                         )?;
-                    }
-                    let config = store.worker_prompt_config(job)?;
-                    let next = prompt_with_config(job, &config).0;
-                    if next != applied {
-                        let text = prompt_update(&next, job, &config);
-                        match owned.agent.steer(&turn, &text) {
-                            Ok(_) => {
-                                record(
-                                    &mut transcript,
-                                    &Event::Message {
-                                        role: "user".into(),
-                                        text,
-                                    },
-                                )?;
-                                applied = next;
-                                job.config = config;
-                                store.worker_prompt(job, &applied)?;
-                            }
-                            Err(error) if !owned.agent.state().outcome_uncertain => {
-                                store.worker_event(
-                                    &job.id,
-                                    &format!("Instruction update awaiting next turn: {error}"),
-                                    None,
-                                )?;
-                            }
-                            Err(error) => return Err(error.into()),
-                        }
                     }
                 }
             }
@@ -317,19 +290,18 @@ pub(super) fn run(
                         turn = next.clone();
                         continue;
                     }
-                    // Scope changes and steering win over a completion report.
-                    if let Some(instruction) = store.worker_steering(&job.id)? {
-                        let config = store.worker_prompt_config(job)?;
-                        let text = steering_text(&instruction, job, &config);
+                    // Pending messages win over a completion report.
+                    if let Some(instruction) = store.pending_broadcast(&job.id)? {
+                        let text = instruction["text"].as_str().unwrap().to_owned();
                         let request = instruction["request_id"].as_str().unwrap();
-                        if store.worker_steering_result(request, "sending", None)? {
+                        if store.broadcast_result(request, "sending", None)? {
                             match owned.agent.prompt(&text, None) {
                                 Ok(next) => {
                                     turn = next;
-                                    store.worker_steering_result(request, "delivered", None)?;
+                                    store.broadcast_result(request, "delivered", None)?;
                                 }
                                 Err(error) => {
-                                    store.worker_steering_result(
+                                    store.broadcast_result(
                                         request,
                                         "uncertain",
                                         Some(&error.to_string()),
@@ -344,29 +316,9 @@ pub(super) fn run(
                                     text,
                                 },
                             )?;
-                            if let Some(body) = instruction["issue_body"].as_str() {
-                                job.issue["body"] = json!(body);
-                            }
-                            store.worker_prompt(job, &applied)?;
+
                             continue;
                         }
-                    }
-                    let config = store.worker_prompt_config(job)?;
-                    let next = prompt_with_config(job, &config).0;
-                    if next != applied {
-                        let text = prompt_update(&next, job, &config);
-                        turn = owned.agent.prompt(&text, None)?;
-                        record(
-                            &mut transcript,
-                            &Event::Message {
-                                role: "user".into(),
-                                text,
-                            },
-                        )?;
-                        applied = next;
-                        job.config = config;
-                        store.worker_prompt(job, &applied)?;
-                        continue;
                     }
                     let report = structured_output
                         .clone()
@@ -392,7 +344,7 @@ pub(super) fn run(
                             ),
                         ));
                     }
-                    let text = template(config.prompt_overrides.get("goal_continue"), job);
+                    let text = template(job.config.prompt_overrides.get("goal_continue"), job);
                     turn = owned.agent.prompt(&text, None)?;
                     record(
                         &mut transcript,
@@ -463,17 +415,15 @@ fn deliver(
     transcript: &mut Option<crate::agent_transcript::Transcript>,
 ) -> Result<()> {
     let request = instruction["request_id"].as_str().unwrap();
-    if !store.worker_steering_result(request, "sending", None)? {
+    if !store.broadcast_result(request, "sending", None)? {
         return Ok(());
     }
-    let config = store.worker_prompt_config(job)?;
-    let text = steering_text(instruction, job, &config);
+
+    let text = instruction["text"].as_str().unwrap().to_owned();
     match agent.steer(turn, &text) {
         Ok(delivery) => {
-            store.worker_steering_result(request, "delivered", None)?;
-            if let Some(body) = instruction["issue_body"].as_str() {
-                job.issue["body"] = json!(body);
-            }
+            store.broadcast_result(request, "delivered", None)?;
+
             record(
                 transcript,
                 &Event::Message {
@@ -481,7 +431,7 @@ fn deliver(
                     text,
                 },
             )?;
-            store.worker_event(&job.id, &format!("Steering accepted: {delivery:?}"), None)?;
+            store.worker_event(&job.id, &format!("Message accepted: {delivery:?}"), None)?;
         }
         Err(error) => {
             let state = agent.state();
@@ -492,7 +442,7 @@ fn deliver(
             } else {
                 "rejected"
             };
-            store.worker_steering_result(request, result, Some(&error.to_string()))?;
+            store.broadcast_result(request, result, Some(&error.to_string()))?;
             if state.outcome_uncertain {
                 return Err(error.into());
             }

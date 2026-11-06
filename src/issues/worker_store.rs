@@ -774,7 +774,7 @@ impl Store {
                 json!({"retry_at":retry_at,"retry_count":count}),
             )?;
         }
-        tx.execute("UPDATE agent_steering SET state='rejected',error='The agent stopped before this message was delivered. Saved issue and project instructions remain in place.' WHERE run_id=?1 AND state='queued'", [&job.id])?;
+        tx.execute("UPDATE agent_steering SET state='rejected',error='The agent stopped before this message was delivered.' WHERE run_id=?1 AND state='queued'", [&job.id])?;
         tx.execute(
             "UPDATE projects SET activity_at=max(activity_at,?2) WHERE id=?1",
             params![job.project.id, now()],
@@ -1746,60 +1746,28 @@ mod tests {
     }
 
     #[test]
-    fn steering_is_scoped_durable_and_idempotent() {
+    fn broadcast_is_durable_and_idempotent() {
         let mut f = HandoffFixture::new(false);
-        let input =
-            json!({"scope":"session","text":"Check the narrow layout","request_id":"first"});
-        assert_eq!(
-            f.store.worker_steer(&f.job.id, &input).unwrap()["state"],
-            "queued"
-        );
-        f.store.worker_steer(&f.job.id, &input).unwrap();
-        let queued = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert_eq!(queued["text"], "Check the narrow layout");
-        assert!(
-            f.store
-                .worker_steer(
-                    &f.job.id,
-                    &json!({"text":"Different","scope":"session","request_id":"first"})
-                )
-                .is_err()
-        );
+        let input = json!({"runs":[f.job.id,"missing"],"text":"Check the narrow layout","request_id":"first"});
+        assert_eq!(f.store.queue_broadcast(&input).unwrap()["queued"], 1);
+        assert_eq!(f.store.queue_broadcast(&input).unwrap()["queued"], 1);
+        let msg = f.store.pending_broadcast(&f.job.id).unwrap().unwrap();
+        assert_eq!(msg["text"], input["text"]);
         f.store
-            .worker_steering_result("first", "delivered", None)
+            .broadcast_result(msg["request_id"].as_str().unwrap(), "delivered", None)
             .unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        assert_eq!(
-            f.store.worker_steer(&f.job.id, &input).unwrap()["state"],
-            "delivered"
-        );
-        f.store.worker_steer(&f.job.id, &json!({"scope":"issue","text":"Preserve keyboard navigation","request_id":"issue"})).unwrap();
+        assert!(f.store.pending_broadcast(&f.job.id).unwrap().is_none());
+        assert!(!f.issue().body.contains("Check the narrow layout"));
         assert!(
-            get_issue(&f.store.db, &f.job.project.id, 1, false)
-                .unwrap()
-                .body
-                .contains("Preserve keyboard navigation")
-        );
-        f.store
-            .worker_steer(
-                &f.job.id,
-                &json!({"scope":"project","text":"Verify dark mode","request_id":"project"}),
-            )
-            .unwrap();
-        assert!(
-            registry::project_settings(&f.store.db, &f.job.project).unwrap()["prompt"]
+            !registry::project_settings(&f.store.db, &f.job.project).unwrap()["prompt"]
                 .as_str()
                 .unwrap()
-                .contains("Verify dark mode")
-        );
-        assert_eq!(
-            f.store.worker_steering(&f.job.id).unwrap().unwrap()["request_id"],
-            "issue"
+                .contains("Check the narrow layout")
         );
     }
 
     #[test]
-    fn steering_rejects_stopped_hidden_changed_owner_and_invalid_input() {
+    fn broadcast_rejects_stopped_hidden_changed_owner_and_invalid_input() {
         for mode in ["finished", "stopping", "owner", "hidden", "closed"] {
             let mut f = HandoffFixture::new(false);
             match mode {
@@ -1838,25 +1806,22 @@ mod tests {
                 }
                 _ => unreachable!(),
             }
-            assert!(
+            assert_eq!(
                 f.store
-                    .worker_steer(
-                        &f.job.id,
-                        &json!({"scope":"issue","text":"New requirement","request_id":mode})
+                    .queue_broadcast(
+                        &json!({"runs":[f.job.id],"text":"New requirement","request_id":mode})
                     )
-                    .is_err(),
+                    .unwrap()["queued"],
+                0,
                 "{mode}"
             );
         }
         let mut f = HandoffFixture::new(false);
-        for input in [
-            json!({"scope":"unknown","text":"Focus","request_id":"invalid"}),
-            json!({"scope":"session","text":"  ","request_id":"blank"}),
-            json!({"scope":"session","text":"Focus"}),
-            json!({"scope":"session","text":"Focus","request_id":"github:reserved"}),
-        ] {
-            assert!(f.store.worker_steer(&f.job.id, &input).is_err());
-        }
+        assert!(
+            f.store
+                .queue_broadcast(&json!({"runs":[f.job.id],"text":" ","request_id":"blank"}))
+                .is_err()
+        );
     }
 
     #[test]
@@ -2131,6 +2096,8 @@ mod tests {
             "Subscribing must retain the live claim until the worker finishes"
         );
         watch_event(&mut f, "first");
+        // Start from the unowned, woken issue as a newly launched worker would.
+        f.store.db.execute("UPDATE issues SET assignee=NULL", []).unwrap();
         f.apply(Operation::Claim {
             number: 1,
             force: false,
@@ -2139,207 +2106,17 @@ mod tests {
     }
 
     #[test]
-    fn github_watcher_steers_once_and_rearms_after_success() {
-        let mut f = watching_fixture();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        watch_event(&mut f, "second");
-        assert_eq!(f.issue().assignee.as_deref(), Some(f.job.actor.id.as_str()));
-        let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert_eq!(instruction["text"], "");
-        assert!(
-            instruction["request_id"]
-                .as_str()
-                .unwrap()
-                .starts_with("github:")
-        );
-        f.store
-            .worker_steering_result(
-                instruction["request_id"].as_str().unwrap(),
-                "delivered",
-                None,
-            )
-            .unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
-        assert_eq!(f.state(), "completed");
-        assert_eq!(f.issue().state, "open");
-        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
-    }
-
-    #[test]
-    fn github_watcher_acknowledged_steering_does_not_wait_for_a_writer() {
-        let f = watching_fixture();
-        f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
-        let path: String = f
-            .store
-            .db
-            .query_row(
-                "SELECT file FROM pragma_database_list WHERE name='main'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let mut writer = Connection::open(path).unwrap();
-        let _lock = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-    }
-
-    #[test]
-    fn github_delivery_receipts_do_not_retain_repeated_large_payloads() {
-        let mut f = watching_fixture();
-        f.store.worker_steer(&f.job.id, &json!({"scope":"session","text":"Keep the human instruction","request_id":"human-message"})).unwrap();
-        f.store
-            .worker_steering_result("human-message", "delivered", None)
-            .unwrap();
-        let started = std::time::Instant::now();
-        for index in 0..64 {
-            let key = format!("event-{index}-{}", "evidence".repeat(4096));
-            watch_event(&mut f, &key);
-            let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-            assert_eq!(
-                instruction["text"], "",
-                "Evidence stays in the watcher record"
-            );
-            f.store
-                .worker_steering_result(
-                    instruction["request_id"].as_str().unwrap(),
-                    "delivered",
-                    None,
-                )
-                .unwrap();
-            assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        }
-        let bytes: i64 = f.store.db.query_row("SELECT sum(length(text)) FROM agent_steering WHERE substr(request_id,1,7)='github:'", [], |r| r.get(0)).unwrap();
-        eprintln!(
-            "64 large watcher deliveries: {:?}, retained payload bytes: {bytes}",
-            started.elapsed()
-        );
-        assert_eq!(
-            bytes, 0,
-            "Delivery identities suffice after the transport acknowledges a snapshot"
-        );
-        let human: String = f
-            .store
-            .db
-            .query_row(
-                "SELECT text FROM agent_steering WHERE request_id='human-message'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(human, "Keep the human instruction");
-        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
-        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
-    }
-
-    #[test]
-    fn github_watcher_coalesces_queued_snapshots_but_preserves_human_and_inflight_messages() {
+    fn watcher_leaves_new_findings_for_a_fresh_claim() {
         let mut f = watching_fixture();
         watch_event(&mut f, "second");
-        let first = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        f.store
-            .worker_steering_result(first["request_id"].as_str().unwrap(), "sending", None)
-            .unwrap();
         watch_event(&mut f, "third");
-        let obsolete = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        f.store.worker_steer(&f.job.id, &json!({"scope":"session","text":"Keep this human instruction","request_id":"human-message"})).unwrap();
-        watch_event(&mut f, "fourth");
-        let human = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert_eq!(human["request_id"], "human-message");
-        assert!(
-            !f.store
-                .worker_steering_result(obsolete["request_id"].as_str().unwrap(), "sending", None)
-                .unwrap()
-        );
+        f.apply(Operation::Claim {number:1,force:false});
+        assert!(f.store.pending_broadcast(&f.job.id).unwrap().is_none());
         f.store
-            .worker_steering_result("human-message", "delivered", None)
+            .worker_finish(&f.job, "completed", "Handled the first event")
             .unwrap();
-        let latest = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-        assert_eq!(latest["text"], "");
-        assert_ne!(latest["request_id"], obsolete["request_id"]);
-        assert_ne!(latest["request_id"], first["request_id"]);
-        assert_eq!(
-            f.store
-                .db
-                .query_row(
-                    "SELECT state FROM agent_steering WHERE request_id=?1",
-                    [first["request_id"].as_str().unwrap()],
-                    |r| r.get::<_, String>(0)
-                )
-                .unwrap(),
-            "sending"
-        );
-        assert_eq!(
-            f.store
-                .db
-                .query_row(
-                    "SELECT count(*) FROM agent_steering WHERE run_id=?1 AND state='queued'",
-                    [&f.job.id],
-                    |r| r.get::<_, i64>(0)
-                )
-                .unwrap(),
-            1
-        );
-        f.store
-            .worker_steering_result(latest["request_id"].as_str().unwrap(), "delivered", None)
-            .unwrap();
-        // A transport can return an older in-flight message to the queue after
-        // the latest snapshot has already arrived. Do not resend stale data.
-        f.store
-            .worker_steering_result(first["request_id"].as_str().unwrap(), "queued", None)
-            .unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        f.store.worker_finish(&f.job, "completed", "Fixed").unwrap();
-        assert_eq!(f.issue().assignee.as_deref(), Some("watcher:github"));
-    }
-
-    #[test]
-    fn github_watcher_busy_steering_is_retried_without_failing_the_agent() {
-        let mut f = watching_fixture();
-        watch_event(&mut f, "late");
-        f.store.db.busy_timeout(Duration::from_millis(20)).unwrap();
-        let path: String = f
-            .store
-            .db
-            .query_row(
-                "SELECT file FROM pragma_database_list WHERE name='main'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        let mut writer = Connection::open(path).unwrap();
-        let lock = writer
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
-        lock.rollback().unwrap();
-        assert!(f.store.worker_steering(&f.job.id).unwrap().is_some());
-    }
-
-    #[test]
-    fn github_watcher_keeps_a_late_or_rejected_update_for_the_next_agent() {
-        for reject in [false, true] {
-            let mut f = watching_fixture();
-            watch_event(&mut f, "late");
-            if reject {
-                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-                f.store
-                    .worker_steering_result(
-                        instruction["request_id"].as_str().unwrap(),
-                        "rejected",
-                        Some("unsupported"),
-                    )
-                    .unwrap();
-            }
-            f.store
-                .worker_finish(&f.job, "completed", "Fixed first failure")
-                .unwrap();
-            assert_eq!(f.state(), "completed");
-            assert!(f.issue().assignee.is_none());
-            assert!(assignments::is_watching(&f.store.db, &f.job.project.id, 1).unwrap());
-        }
+        assert!(f.issue().assignee.is_none());
+        assert!(assignments::is_watching(&f.store.db, &f.job.project.id, 1).unwrap());
     }
 
     #[test]
@@ -2421,16 +2198,6 @@ mod tests {
             if !late_before_handoff {
                 watch_event(&mut f, "late");
             }
-            if !late_before_handoff {
-                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-                f.store
-                    .worker_steering_result(
-                        instruction["request_id"].as_str().unwrap(),
-                        "delivered",
-                        None,
-                    )
-                    .unwrap();
-            }
             f.store
                 .worker_finish(&f.job, "blocked", "Could not finish new feedback")
                 .unwrap();
@@ -2458,16 +2225,6 @@ mod tests {
                     .execute("UPDATE worker_runs SET id='resumed-run'", [])
                     .unwrap();
                 f.job.id = "resumed-run".into();
-                // Receiving the same event in a resumed session does not reuse
-                // the previous attempt's deliberate handoff.
-                let instruction = f.store.worker_steering(&f.job.id).unwrap().unwrap();
-                f.store
-                    .worker_steering_result(
-                        instruction["request_id"].as_str().unwrap(),
-                        "delivered",
-                        None,
-                    )
-                    .unwrap();
             } else {
                 f.store
                     .db
@@ -2688,7 +2445,7 @@ mod tests {
                     number: 1,
                     force: false,
                 });
-                assert!(f.store.worker_steering(&f.job.id).unwrap().is_none());
+                assert!(f.store.pending_broadcast(&f.job.id).unwrap().is_none());
                 f.apply(Operation::Ready {
                     acknowledge_requirements: false,
                     number: 1,

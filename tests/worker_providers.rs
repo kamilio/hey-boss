@@ -124,7 +124,7 @@ fn claude_and_pi_workers_claim_steer_save_history_and_complete() {
         let f = Fixture::new(provider, false);
         let run = f.wait("SELECT id FROM worker_runs WHERE claimed_at IS NOT NULL");
         let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
-        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES('steer',?1,'session','STEER','queued',0)",[&run]).unwrap();
+        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,state,created_at) VALUES('steer',?1,'broadcast','STEER','queued',0)",[&run]).unwrap();
         if provider == "claude" {
             thread::sleep(Duration::from_millis(1500));
             fs::write(f.root.join("finish"), "").unwrap();

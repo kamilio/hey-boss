@@ -381,24 +381,6 @@ impl Store {
             Ok(workers)
         })
     }
-
-    /// Refresh text dependencies only. Workspace/delivery choices are fixed for
-    /// an active task: changing them halfway through would invalidate its work.
-    pub(crate) fn worker_prompt_config(&self, job: &Job) -> Result<ProjectConfig> {
-        let mut config = job.config.clone();
-        if job.worker_id.is_empty() {
-            return Ok(config);
-        }
-        let (settings, _, _) = read_settings(&self.db, &job.worker_id)?;
-        let defaults = project_settings(&self.db, &job.project)?;
-        config.prompt = settings
-            .prompt
-            .unwrap_or_else(|| defaults["prompt"].as_str().unwrap().into());
-        config.prompt_overrides = settings.prompt_overrides.unwrap_or(serde_json::from_value(
-            defaults["prompt_overrides"].clone(),
-        )?);
-        Ok(config)
-    }
 }
 // Callers constrain projects separately so their queries can use project indexes.
 const ELIGIBLE: &str = "i.state IN ('open','ready') AND i.deleted_at IS NULL AND i.assignee IS NULL AND p.hidden_at IS NULL";

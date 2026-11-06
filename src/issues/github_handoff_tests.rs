@@ -828,7 +828,6 @@ fn reviewed_handoff_managed_attempt_acknowledges_only_its_snapshot() {
         f.store
             .record_github_observation("https://github.com/o/r/pull/1", &observe(&evidence()), 100)
             .unwrap();
-        queue_steering(&f.store.db, &job.id).unwrap();
         f.call(json!({"action":"ready","number":1,"force":false}))
             .unwrap();
         reviewed_handoff(&mut f, evidence()).unwrap();

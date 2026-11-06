@@ -116,5 +116,5 @@ fn actual_unix_server_ownership_and_goal_inspection() {
     assert_eq!(result["ok"], true, "{result}");
     assert_eq!(result["threadId"], thread);
     assert!(result["goal"].is_null());
-    assert_eq!(result["canSteer"], false);
+    assert!(result.get("canSteer").is_none());
 }

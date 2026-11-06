@@ -172,23 +172,8 @@ impl Drop for Fixture {
 struct Worker(Child);
 
 #[test]
-fn saved_prompt_edits_steer_the_owned_turn_without_restarting_the_agent() {
+fn saved_prompt_edits_leave_the_running_agent_alone() {
     live_prompt_scenario("direct");
-}
-
-#[test]
-fn saved_prompt_edits_survive_a_turn_completion_race() {
-    live_prompt_scenario("race");
-}
-
-#[test]
-fn saved_prompt_edits_retry_rejected_steering_without_losing_the_claim() {
-    live_prompt_scenario("reject");
-}
-
-#[test]
-fn saved_prompt_edits_respect_worker_overrides_and_active_branches() {
-    live_prompt_scenario("override");
 }
 
 #[test]
@@ -211,18 +196,14 @@ fn rejected_agent_messages_are_reported_without_retrying() {
 fn live_prompt_scenario(mode: &str) {
     use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new(&format!("live-prompt-{mode}"));
-    f.setup(if mode == "override" {
-        &["--prompt", "Worker instructions for {{number}}"]
-    } else {
-        &[]
-    });
+    f.setup(&[]);
     fs::write(f.root.join("prompt-mode.txt"), mode).unwrap();
     let script = f.root.join("codex.sh");
     fs::write(&script, r#"#!/usr/bin/env node
 const fs = require('node:fs');
 const {spawnSync} = require('node:child_process');
 const send = value => process.stdout.write(JSON.stringify(value)+'\n');
-const mode=fs.readFileSync('prompt-mode.txt','utf8');let turns=0,steers=0;
+const mode=fs.readFileSync('prompt-mode.txt','utf8');let turns=0;
 require('node:readline').createInterface({input:process.stdin}).on('line', line => {
  const v=JSON.parse(line);fs.appendFileSync('protocol.jsonl',line+'\n');
  if(v.method==='initialize')send({id:v.id,result:{}});
@@ -235,13 +216,12 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
   send({method:'item/started',params:{threadId:'live-prompt-session',item:{type:'agentMessage'}}});
  }
  if(v.method==='turn/steer'){
-  steers++;
-  if(mode==='race'||mode==='message-race'){
+  if(mode==='message-race'){
    send({method:'item/completed',params:{threadId:'live-prompt-session',item:{type:'agentMessage',text:'{"status":"completed","summary":"Old instructions done"}'}}});
    send({method:'turn/completed',params:{threadId:'live-prompt-session',turn:{id:'owned-turn',status:'completed'}}});
    send({id:v.id,error:{message:'Turn has already completed'}});
   }else if(mode==='message-uncertain')send({id:v.id,result:{turnId:'wrong-turn'}});
-  else if(mode==='message-rejected'||(mode==='reject'&&steers===1))send({id:v.id,error:{message:'Temporary steering failure'}});
+  else if(mode==='message-rejected')send({id:v.id,error:{message:'Temporary steering failure'}});
   else send({id:v.id,result:{turnId:v.params.expectedTurnId}});
  }
 });
@@ -265,7 +245,7 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
     let run = active["runs"][0]["id"].as_str().unwrap();
     let db = rusqlite::Connection::open(&f.db).unwrap();
     if mode.starts_with("message") {
-        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES('message',?1,'session','Check keyboard navigation',1)", [run]).unwrap();
+        db.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,created_at) VALUES('message',?1,'broadcast','Check keyboard navigation',1)", [run]).unwrap();
         let expected = match mode {
             "message-uncertain" => "uncertain",
             "message-rejected" => "rejected",
@@ -304,11 +284,9 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
             .unwrap();
         assert_eq!(message["params"]["threadId"], "live-prompt-session");
         assert_eq!(message["params"]["expectedTurnId"], "owned-turn");
-        assert!(
-            message["params"]["input"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Check keyboard navigation")
+        assert_eq!(
+            message["params"]["input"][0]["text"],
+            "Check keyboard navigation"
         );
         assert_eq!(
             transcript
@@ -331,100 +309,32 @@ require('node:readline').createInterface({input:process.stdin}).on('line', line 
         worker.stop();
         return;
     }
-    db.execute_batch("INSERT INTO projects(id,name,next_number,created_at,activity_at) VALUES('named:Unrelated','Unrelated',1,0,0);
-        INSERT INTO project_settings(project_id,prompt,version) VALUES('named:Unrelated','Never send this to another project',1);").unwrap();
-    db.execute("INSERT INTO project_settings(project_id,prompt,version,prompt_overrides,prs_enabled,worktree_enabled) SELECT id,?1,1,'{\"worktree\":\"Inactive branch change\"}',1,1 FROM projects WHERE name='Worker fixture'", [if mode == "override" { "Project prompt is overridden" } else { "Claim and implement `{{issue_command}}`." }]).unwrap();
-    thread::sleep(Duration::from_millis(2300));
-    assert!(
-        !f.transcript().iter().any(|v| v["method"] == "turn/steer"),
-        "Unrelated projects, inactive branches and overridden prompts must not steer"
-    );
-    if mode == "override" {
-        db.execute("UPDATE project_settings SET prompt_overrides='{\"main\":\"Updated instructions for {{number}}: preserve the current task.\"}',version=2 WHERE project_id<>'named:Unrelated'", []).unwrap();
-    } else {
-        db.execute("UPDATE project_settings SET prompt='Updated instructions for {{number}}: preserve the current task.',version=2 WHERE project_id<>'named:Unrelated'", []).unwrap();
-    }
-    // A steering RPC allows 45 seconds for acknowledgement in production.
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let saved: String = db
-            .query_row(
-                "SELECT expanded_prompt FROM worker_runs WHERE id=?1",
-                [run],
-                |r| r.get(0),
-            )
-            .unwrap();
-        if saved.contains("Updated instructions for 1") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Saved prompt never reached the running agent"
-        );
-        thread::sleep(Duration::from_millis(50));
-    }
-    let t = f.transcript();
-    let steering = t.iter().find(|v| v["method"] == "turn/steer").unwrap();
-    assert_eq!(steering["params"]["threadId"], "live-prompt-session");
-    assert_eq!(steering["params"]["expectedTurnId"], "owned-turn");
-    let text = steering["params"]["input"][0]["text"].as_str().unwrap();
-    assert!(text.contains("Updated instructions for 1"), "{text}");
-    assert!(text.contains("current task"));
-    assert!(!text.contains("Never send this"));
-    assert!(!text.contains("Inactive branch change"));
-    assert!(text.contains("project's existing checkout"));
-    assert!(!text.contains("PR handoff"));
-    if mode == "override" {
-        assert!(text.contains("Worker instructions for 1"));
-        assert!(!text.contains("Project prompt is overridden"));
-    }
-    thread::sleep(Duration::from_millis(2200));
-    let t = f.transcript();
-    assert_eq!(
-        t.iter().filter(|v| v["method"] == "turn/steer").count(),
-        if mode == "reject" { 2 } else { 1 },
-        "Unchanged prompts must not be sent repeatedly"
-    );
-    assert_eq!(
-        t.iter().filter(|v| v["method"] == "turn/start").count(),
-        if mode == "race" { 2 } else { 1 }
-    );
-    if mode == "race" {
-        let followup = t.iter().rfind(|v| v["method"] == "turn/start").unwrap();
-        assert_eq!(followup["params"]["threadId"], "live-prompt-session");
-        assert!(
-            followup["params"]["input"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("Updated instructions for 1")
-        );
-        assert_eq!(f.cli(&["view", "1"])["issue"]["state"], "open");
-    }
-    assert_eq!(
-        t.iter().filter(|v| v["method"] == "thread/start").count(),
-        1
-    );
-    let saved: String = db
+    let launch: String = db
         .query_row(
             "SELECT expanded_prompt FROM worker_runs WHERE id=?1",
             [run],
             |r| r.get(0),
         )
         .unwrap();
-    assert!(saved.contains("Updated instructions for 1"));
-    let config: String = db
-        .query_row(
-            "SELECT json_extract(job,'$.config') FROM worker_runs WHERE id=?1",
-            [run],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let config: Value = serde_json::from_str(&config).unwrap();
-    assert_eq!(config["prs_enabled"], false);
-    assert_eq!(config["worktree_enabled"], false);
+    db.execute("INSERT INTO project_settings(project_id,prompt,version) SELECT id,'Updated instructions',1 FROM projects WHERE name='Worker fixture' ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,version=version+1", []).unwrap();
+    thread::sleep(Duration::from_millis(2400));
+    let transcript = f.transcript();
+    assert!(!transcript.iter().any(|v| v["method"] == "turn/steer"));
     assert_eq!(
-        f.cli(&["view", "1"])["issue"]["assignee"],
-        "codex:live-prompt-session"
+        transcript
+            .iter()
+            .filter(|v| v["method"] == "turn/start")
+            .count(),
+        1
+    );
+    assert_eq!(
+        launch,
+        db.query_row(
+            "SELECT expanded_prompt FROM worker_runs WHERE id=?1",
+            [run],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap()
     );
     worker.stop();
 }
@@ -1268,6 +1178,7 @@ fn github_events_and_retries_of_delivered_work_start_fresh() {
         let text = turn["params"]["input"][0]["text"].as_str().unwrap();
         assert!(text.starts_with("Claim and implement `hey-boss issue view 1`."));
         assert!(!text.contains("hey-boss issue pr list 1"));
+        assert!(text.ends_with("The GitHub status changed."));
     }
 }
 

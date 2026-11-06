@@ -1426,9 +1426,15 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
             lines.push(line);
         }
     }
-    let instructions = template_with(&lines.join("\n"), job, &values)
+    let mut instructions = template_with(&lines.join("\n"), job, &values)
         .trim()
         .to_owned();
+    if job.issue["github_status"]["monitoring"] == true
+        && job.issue["github_status"]["event"].is_string()
+    {
+        instructions.push_str("\n\n");
+        instructions.push_str(include_str!("prompts/github_status_changed.md").trim_end());
+    }
     let objective = instructions.chars().take(4000).collect();
     (instructions, goal, objective)
 }
@@ -1582,63 +1588,40 @@ fn run_thread(
     let mut claim_window_started = false;
     let mut activity_text = String::new();
     let mut last_log = Instant::now() - Duration::from_secs(2);
-    let mut applied_prompt = text;
-    let mut last_prompt_check = Instant::now();
+
+    let mut last_message_check = Instant::now();
     loop {
         check_job(store, job, stop)?;
         c.poll_approvals(store, job, stop)?;
-        if last_prompt_check.elapsed() >= Duration::from_secs(2) {
-            last_prompt_check = Instant::now();
-            let config = store.worker_prompt_config(job)?;
-            if let Some(instruction) = store.worker_steering(&job.id)?
-                && store.worker_steering_result(
+        if last_message_check.elapsed() >= Duration::from_secs(2) {
+            last_message_check = Instant::now();
+
+            if let Some(instruction) = store.pending_broadcast(&job.id)?
+                && store.broadcast_result(
                     instruction["request_id"].as_str().unwrap(),
                     "sending",
                     None,
                 )?
             {
                 let request = instruction["request_id"].as_str().unwrap();
-                let text = steering_text(&instruction, job, &config);
+                let text = &instruction["text"];
                 // Persist before sending. A worker crash must never replay an
                 // instruction whose delivery cannot be established.
                 match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":text}]}), store, job, stop) {
                     Ok(ack) if ack["turnId"] == turn => {
-                        store.worker_steering_result(request, "delivered", None)?;
-                        if let Some(body) = instruction["issue_body"].as_str() {
-                            job.issue["body"] = json!(body);
-                            store.worker_prompt(job, &applied_prompt)?;
-                        }
-                        store.worker_event(&job.id, &format!("Steering delivered: {}", instruction["text"].as_str().unwrap()), None)?;
+                        store.broadcast_result(request, "delivered", None)?;
+
+                        store.worker_event(&job.id, &format!("Message delivered: {}", instruction["text"].as_str().unwrap()), None)?;
                     }
                     Err(error) if error.message.starts_with("Codex turn/steer:") => {
                         let ended = c.pending.iter().any(|event| event["method"] == "turn/completed" && event["params"]["turn"]["id"] == turn && event["params"]["turn"]["status"] == "completed");
-                        store.worker_steering_result(request, if ended {"queued"} else {"rejected"}, Some(&error.message))?;
-                        store.worker_event(&job.id, &format!("Steering {}: {}", if ended {"awaiting the next turn"} else {"rejected"}, error.message), None)?;
+                        store.broadcast_result(request, if ended {"queued"} else {"rejected"}, Some(&error.message))?;
+                        store.worker_event(&job.id, &format!("Message {}: {}", if ended {"awaiting the next turn"} else {"rejected"}, error.message), None)?;
                     }
                     result => {
                         let error = result.err().map(|e| e.message).unwrap_or_else(|| "Unexpected steering acknowledgement".into());
-                        store.worker_steering_result(request, "uncertain", Some(&error))?;
-                        store.worker_event(&job.id, &format!("Steering delivery unconfirmed; not resent: {error}"), None)?;
-                    }
-                }
-            }
-            let next_prompt = prompt_with_config(job, &config).0;
-            if next_prompt != applied_prompt {
-                let steering = prompt_update(&next_prompt, job, &config);
-                match c.rpc("turn/steer", json!({"threadId":session,"expectedTurnId":turn,"input":[{"type":"text","text":steering}]}), store, job, stop) {
-                    Ok(ack) if ack["turnId"] == turn => {
-                        applied_prompt = next_prompt;
-                        job.config = config;
-                        store.worker_prompt(job, &applied_prompt)?;
-                        store.worker_event(&job.id, "Updated instructions delivered to the running agent", None)?;
-                    }
-                    // A turn may have ended while the settings were being read.
-                    // Keep the update pending; completion below starts a follow-up
-                    // in the same thread before accepting a completion report.
-                    result => {
-                        check_job(store, job, stop)?;
-                        let detail = result.err().map(|e| e.to_string()).unwrap_or_else(|| "Unexpected steering acknowledgement".into());
-                        store.worker_event(&job.id, &format!("Instruction update pending; retrying: {detail}"), None)?;
+                        store.broadcast_result(request, "uncertain", Some(&error))?;
+                        store.worker_event(&job.id, &format!("Message delivery unconfirmed; not resent: {error}"), None)?;
                     }
                 }
             }
@@ -1757,9 +1740,9 @@ fn run_thread(
                         ),
                     ));
                 }
-                let config = store.worker_prompt_config(job)?;
-                if let Some(instruction) = store.worker_steering(&job.id)?
-                    && store.worker_steering_result(
+
+                if let Some(instruction) = store.pending_broadcast(&job.id)?
+                    && store.broadcast_result(
                         instruction["request_id"].as_str().unwrap(),
                         "sending",
                         None,
@@ -1768,7 +1751,7 @@ fn run_thread(
                     let request = instruction["request_id"].as_str().unwrap();
                     let result = c.rpc(
                         "turn/start",
-                        turn_params(&session, &steering_text(&instruction, job, &config)),
+                        turn_params(&session, instruction["text"].as_str().unwrap()),
                         store,
                         job,
                         stop,
@@ -1776,15 +1759,12 @@ fn run_thread(
                     match result {
                         Ok(result) if result["turn"]["id"].is_string() => {
                             turn = result["turn"]["id"].as_str().unwrap().into();
-                            store.worker_steering_result(request, "delivered", None)?;
-                            if let Some(body) = instruction["issue_body"].as_str() {
-                                job.issue["body"] = json!(body);
-                                store.worker_prompt(job, &applied_prompt)?;
-                            }
+                            store.broadcast_result(request, "delivered", None)?;
+
                             store.worker_event(
                                 &job.id,
                                 &format!(
-                                    "Steering delivered in the same session: {}",
+                                    "Message delivered in the same session: {}",
                                     instruction["text"].as_str().unwrap()
                                 ),
                                 None,
@@ -1797,38 +1777,11 @@ fn run_thread(
                                 .err()
                                 .map(|e| e.message)
                                 .unwrap_or_else(|| "Missing steering turn acknowledgement".into());
-                            store.worker_steering_result(request, "uncertain", Some(&error))?;
+                            store.broadcast_result(request, "uncertain", Some(&error))?;
                             return Err(Error::new("worker_error", error));
                         }
                     }
                 }
-                let next_prompt = prompt_with_config(job, &config).0;
-                if next_prompt != applied_prompt {
-                    let result = c.rpc(
-                        "turn/start",
-                        turn_params(&session, &prompt_update(&next_prompt, job, &config)),
-                        store,
-                        job,
-                        stop,
-                    )?;
-                    turn = result["turn"]["id"]
-                        .as_str()
-                        .ok_or_else(|| {
-                            Error::new("worker_error", "Missing instruction update turn")
-                        })?
-                        .into();
-                    applied_prompt = next_prompt;
-                    job.config = config;
-                    store.worker_prompt(job, &applied_prompt)?;
-                    store.worker_event(
-                        &job.id,
-                        "Updated instructions delivered in the same agent session",
-                        None,
-                    )?;
-                    final_text.clear();
-                    continue;
-                }
-                job.config = config;
                 let report = serde_json::from_str::<Value>(final_text.trim())
                     .ok()
                     .filter(|v| {
@@ -1922,36 +1875,6 @@ fn run_thread(
             _ => {}
         }
     }
-}
-
-fn steering_text(instruction: &Value, job: &Job, config: &ProjectConfig) -> String {
-    if instruction["request_id"]
-        .as_str()
-        .is_some_and(|id| id.starts_with("github:"))
-    {
-        return prompt_with_config(job, config).0;
-    }
-    let key = if instruction["scope"] == "dependency" {
-        "dependency_update"
-    } else {
-        "steering"
-    };
-    template_with(
-        config.prompt_overrides.get(key),
-        job,
-        &[
-            ("scope", instruction["scope"].as_str().unwrap_or("")),
-            ("instruction", instruction["text"].as_str().unwrap_or("")),
-        ],
-    )
-}
-
-fn prompt_update(instructions: &str, job: &Job, config: &ProjectConfig) -> String {
-    template_with(
-        config.prompt_overrides.get("prompt_update"),
-        job,
-        &[("instructions", instructions)],
-    )
 }
 
 pub fn print_status(v: &Value, redraw: bool) {
@@ -2260,26 +2183,6 @@ impl Startup {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn watcher_steering_uses_the_normal_task_prompt_without_evidence() {
-        let mut job: Job = serde_json::from_value(json!({
-            "id":"run", "worker_id":"worker", "project":project(), "issue":issue(),
-            "comments":[], "owner_pid":0, "owner_start":"", "machine":"test",
-            "config":ProjectConfig::default(), "actor":{ "id":"test", "kind":"agent", "cwd":"/tmp", "machine":"test", "host":"test", "source":"test" }
-        }))
-        .unwrap();
-        let input =
-            json!({"request_id":"github:run:new","scope":"session","text":"large GitHub evidence"});
-        let text = steering_text(&input, &job, &job.config);
-        assert_eq!(text, prompt_with_config(&job, &job.config).0);
-        assert!(!text.contains("large GitHub evidence"));
-        job.config.prompt_overrides.github = Some("Check {{number}} in {{project}}".into());
-        assert_eq!(
-            steering_text(&input, &job, &job.config),
-            prompt_with_config(&job, &job.config).0
-        );
-    }
 
     #[test]
     fn startup_registration_reconciles_lost_commit_acknowledgments() {

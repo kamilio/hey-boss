@@ -265,7 +265,7 @@ enum Command {
     AgentControl {
         #[arg(long)]
         thread: String,
-        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal", "steer"])]
+        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal"])]
         action: String,
     },
     /// Invoke a versioned two-way desktop action; returns a JSON result.
@@ -338,7 +338,7 @@ enum AgentAction {
         #[arg(long)]
         route: Option<String>,
     },
-    /// Inspect a live worktree owner, approve a draft issue link, or deliver a saved comment.
+    /// Inspect a live worktree owner or approve a draft issue link.
     Coordinate(hey_boss::issues::Coordinate),
     /// Read local issue-owned worktrees, excluding verified stale owners.
     OwnedWorktrees {
@@ -365,7 +365,7 @@ enum AgentAction {
     Control {
         #[arg(long)]
         thread: String,
-        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal", "steer"])]
+        #[arg(value_parser = ["inspect", "enable-goal", "disable-goal"])]
         action: String,
     },
 }
@@ -820,13 +820,6 @@ fn run() -> std::io::Result<()> {
                         issue["association"].as_str().unwrap()
                     );
                 }
-                println!(
-                    "  Deliver a saved comment: agent coordinate PATH --issue NUMBER --comment COMMENT_ID"
-                );
-            }
-            println!("  Delivery: {}", report["delivery"].as_str().unwrap());
-            if let Some(error) = report["error"].as_str() {
-                println!("  {error}");
             }
         }
         return Ok(());

@@ -1118,7 +1118,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet",
             "/api/fleet/chief",
             "/api/fleet/takeover",
-            "/api/fleet/steer",
+            "/api/fleet/broadcast",
             "/api/fleet/configuration",
             "/api/admin/preview",
             "/api/skills",
@@ -1244,13 +1244,13 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             value["kind"] = json!("configuration");
             return json_response(crate::fleet::call(&value)?);
         }
-        if path == "/api/fleet/takeover" || path == "/api/fleet/steer" {
+        if path == "/api/fleet/takeover" || path == "/api/fleet/broadcast" {
             let mut value: Value = serde_json::from_slice(&bytes)?;
             if !value.is_object() {
                 return Err(Error::invalid("Expected an agent action object"));
             }
-            value["kind"] = json!(if path.ends_with("/steer") {
-                "steer"
+            value["kind"] = json!(if path.ends_with("/broadcast") {
+                "broadcast"
             } else {
                 "takeover"
             });
