@@ -87,7 +87,7 @@ export async function createConversation({home = homedir(), statePath, emit, fet
     }
     const compact = compactionPlugin();
     const runner = agent({cwd, homeDir: home}).model('gpt-6.1-sol')
-      .use(openaiResponsesPlugin({baseUrl: 'http://127.0.0.1:8080/v1', apiKey: keys.local ?? 'local', maxRetries: 0}))
+      .use(openaiResponsesPlugin({baseUrl: 'http://127.0.0.1:8080/v1', apiKey: keys.local ?? 'local', maxRetries: 0, reasoningEffort: 'low'}))
       .use(memoryPlugin()).use(skillsPlugin({directories: [join(cwd, '.agents/skills'), join(home, '.agents/skills'), join(home, '.config/poe-code/skills')]}))
       .use({name: 'conversation', prompt: ctx => ({...ctx, system: [ctx.system, guidance].join('\n\n')}), hooks: {
         async userPromptSubmit(ctx) { await checkpoint(ctx.messages); emit({AgentAccepted: {root: cwd}}); },
