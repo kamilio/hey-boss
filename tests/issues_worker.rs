@@ -610,7 +610,7 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
     let text = turn["params"]["input"][0]["text"].as_str().unwrap();
     assert_eq!(
         text,
-        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "1")
+        "Claim and implement `hey-boss issue view 1`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/delivery-main.md").trim().replace("{{number}}", "1")
     );
     w.stop();
 }
@@ -691,7 +691,7 @@ fn custom_prompt_slash_goal_preserves_all_lines() {
     let objective = goal["params"]["objective"].as_str().unwrap();
     assert_eq!(
         objective,
-        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "1")
+        "Fix Fixture issue\nRetrieve hey-boss issue view 1. ## Requirements\nCheck {{title}} stays literal.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/delivery-main.md").trim().replace("{{number}}", "1")
     );
     let turn = t.iter().find(|v| v["method"] == "turn/start").unwrap();
     assert!(
@@ -931,15 +931,7 @@ fn stopping_a_claimed_agent_releases_unfinished_work_for_immediate_pickup() {
         .map(|v| v["params"]["input"][0]["text"].clone())
         .collect();
     assert_eq!(prompts.len(), 2);
-    let original = prompts[0].as_str().unwrap();
-    let resumed = prompts[1].as_str().unwrap();
-    assert!(resumed.starts_with(original));
-    assert!(
-        resumed.contains(
-            "Reconcile uncertain mutations before retrying; reuse the original request ID"
-        )
-    );
-    assert!(resumed.contains("Retries still require permissions and verification"));
+    assert_eq!(prompts[0], prompts[1]);
     replacement.stop();
 }
 
@@ -1515,12 +1507,17 @@ fn infrastructure_outages_retry_with_fresh_sessions_after_recovery() {
                 .iter()
                 .any(|r| r["method"] == "thread/resume")
         );
-        assert!(f.transcript().iter().any(|r| {
-            r["method"] == "turn/start"
-                && r["params"]["input"][0]["text"]
-                    .as_str()
-                    .is_some_and(|s| s.contains("Reconcile uncertain mutations before retrying"))
-        }));
+        let starts: Vec<_> = f
+            .transcript()
+            .into_iter()
+            .filter(|r| r["method"] == "turn/start")
+            .collect();
+        assert!(starts.len() >= 3);
+        assert!(
+            starts
+                .windows(2)
+                .all(|p| p[0]["params"]["input"] == p[1]["params"]["input"])
+        );
         worker.stop();
     }
 }

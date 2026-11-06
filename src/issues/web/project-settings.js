@@ -1,6 +1,7 @@
 "use strict";
 let projectSettingsProject = null,
   projectSettingsFocus = null,
+  projectPromptSections = [],
   projectSettingsOriginal = null,
   projectSettingsSaving = false,
   projectSettingsSequence = 0;
@@ -111,6 +112,7 @@ $("#project-settings-trigger").onclick = async event => {
       projectSettingsProject,
     );
     if (sequence !== projectSettingsSequence) return;
+    projectPromptSections = value.prompt_sections || [];
     $("#project-worker-model").value = value.worker_model ?? "";
     $("#project-worker-reasoning").value = value.worker_reasoning ?? "";
     $("#project-worker-permissions").value = value.worker_permissions ?? "auto";
@@ -194,7 +196,10 @@ function configElement(tag, text, className) {
 }
 function configField(key) {
   if (key === 'prompt') return 'prompts/worker.md';
-  if (key.startsWith('prompt_overrides.')) return 'prompts/' + key.slice(17) + '.md';
+  if (key.startsWith('prompt_overrides.')) {
+    const section = key.slice('prompt_overrides.'.length);
+    return 'prompts/' + (projectPromptSections.find(s => s.key === section)?.path || section + '.md');
+  }
   return ({worker_model:'Worker model',worker_reasoning:'Reasoning',worker_permissions:'Permissions',paused:'Paused',pause_reason:'Pause reason',prs_enabled:'Pull requests',worktree_enabled:'Worktrees',drafts_enabled:'Drafts',artifacts_enabled:'Artifacts'})[key] || key;
 }
 function configValue(value) {

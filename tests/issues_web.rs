@@ -1090,17 +1090,17 @@ fn goal_preview_preserves_first_sentence_and_uses_current_project_commands() {
         (
             None,
             false,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/delivery-main.md").trim().replace("{{number}}", "<number>"),
         ),
         (
             Some("/goal"),
             true,
-            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
+            "Claim and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/delivery-main.md").trim().replace("{{number}}", "<number>"),
         ),
         (
             Some("/goal Assign and implement `{{issue_command}}`.\n{{commit_instruction}}"),
             true,
-            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/main.md").trim().replace("{{number}}", "<number>"),
+            "Assign and implement `hey-boss issue view <number>`.\n\nWork in the project's existing checkout.\n\n".to_owned() + &include_str!("../src/issues/prompts/delivery-main.md").trim().replace("{{number}}", "<number>"),
         ),
     ] {
         let value = web.ok(json!({"action":"preview_worker","config":{"projects":[web.project],"prompt":prompt},"number":null}));
@@ -1788,14 +1788,17 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
 }
 
 #[test]
-fn prompt_layout_and_context_defaults_round_trip_and_reset() {
+fn retired_prompt_overrides_do_not_change_the_workflow() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"Prompt layout fixture","body":"","labels":[]}));
     let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "prs":"Publish {{number}}."});
     web.ok(json!({"action":"configure_project","prompt":"Implement {{number}}.","prs_enabled":true,"prompt_overrides":overrides}));
     let settings = web.ok(json!({"action":"project_settings"}));
-    assert_eq!(settings["prompt_overrides"], overrides);
-    for key in ["layout", "handoff", "resume", "goal_continue"] {
+    assert_eq!(
+        settings["prompt_overrides"],
+        json!({"handoff":"Review task {{number}}.","prs":"Publish {{number}}."})
+    );
+    for key in ["handoff", "goal_continue"] {
         assert!(settings["prompt_defaults"][key].is_string(), "{key}");
         assert!(
             settings["prompt_sections"]
@@ -1813,6 +1816,8 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
         "steering",
         "dependency_update",
         "prompt_update",
+        "layout",
+        "resume",
     ] {
         assert!(settings["prompt_defaults"].get(key).is_none());
         assert!(
@@ -1827,7 +1832,7 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
         web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1}));
     assert_eq!(
         preview["prompt"],
-        "Publish 1.\n\nImplement 1.\n\nReview task 1."
+        "Implement 1.\n\nWork in the project's existing checkout.\n\nPublish 1.\n\nReview task 1."
     );
     web.ok(json!({"action":"configure_project","prompt_overrides":{"layout":null,"handoff":null}}));
     let reset =

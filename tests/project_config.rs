@@ -144,18 +144,52 @@ fn file_sync_migrates_identity_preserves_inheritance_and_round_trips() {
 }
 
 #[test]
+fn prompt_rename_preserves_local_edits_and_archives_retired_files() {
+    let mut f = Fixture::new();
+    f.sync().unwrap();
+    let dir = f.root.join(".hey-boss/prompts");
+    fs::remove_file(dir.join("delivery-main.md")).unwrap();
+    fs::write(dir.join("main.md"), "Unsynced delivery").unwrap();
+    for file in ["layout.md", "resume.md", "prs.md"] {
+        fs::write(dir.join(file), "Old custom text").unwrap();
+    }
+    f.sync().unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.join("delivery-main.md")).unwrap(),
+        "Unsynced delivery"
+    );
+    assert!(!dir.join("main.md").exists());
+    assert_eq!(
+        f.call(json!({"action":"project_settings"}))["prompt_overrides"],
+        json!({"main":"Unsynced delivery"})
+    );
+    for file in ["layout.md", "resume.md", "prs.md"] {
+        assert!(!dir.join(file).exists());
+        assert_eq!(
+            fs::read_to_string(dir.parent().unwrap().join("retired-prompts").join(file)).unwrap(),
+            "Old custom text"
+        );
+    }
+    assert_eq!(f.sync().unwrap()["changed"], false);
+}
+
+#[test]
 fn invalid_file_preserves_database_and_other_unsynced_files() {
     let mut f = Fixture::new();
     f.sync().unwrap();
     let history = f.config(json!({"command":"history"}));
     fs::write(f.root.join(".hey-boss/config.yaml"), "broken: [").unwrap();
-    let prompt = f.root.join(".hey-boss/prompts/checkout.md");
-    fs::write(&prompt, include_str!("../src/issues/prompts/checkout.md")).unwrap();
+    let prompt = f.root.join(".hey-boss/prompts/workspace-checkout.md");
+    fs::write(
+        &prompt,
+        include_str!("../src/issues/prompts/workspace-checkout.md"),
+    )
+    .unwrap();
     assert!(f.sync().is_err());
     assert_eq!(history, f.config(json!({"command":"history"})));
     assert_eq!(
         fs::read_to_string(prompt).unwrap(),
-        include_str!("../src/issues/prompts/checkout.md")
+        include_str!("../src/issues/prompts/workspace-checkout.md")
     );
 }
 
@@ -163,8 +197,8 @@ fn invalid_file_preserves_database_and_other_unsynced_files() {
 fn local_and_remote_edits_merge_and_deleted_override_returns_to_default() {
     let mut f = Fixture::new();
     f.sync().unwrap();
-    let prompt = f.root.join(".hey-boss/prompts/checkout.md");
-    let custom = include_str!("../src/issues/prompts/main.md");
+    let prompt = f.root.join(".hey-boss/prompts/workspace-checkout.md");
+    let custom = include_str!("../src/issues/prompts/delivery-main.md");
     fs::write(&prompt, custom).unwrap();
     f.call(json!({"action":"configure_project","worktree_enabled":true}));
     f.sync().unwrap();
@@ -179,7 +213,7 @@ fn local_and_remote_edits_merge_and_deleted_override_returns_to_default() {
     );
     assert_eq!(
         fs::read_to_string(prompt).unwrap(),
-        include_str!("../src/issues/prompts/checkout.md").trim_end()
+        include_str!("../src/issues/prompts/workspace-checkout.md").trim_end()
     );
 }
 
@@ -189,7 +223,7 @@ fn symlinked_prompt_cannot_read_or_overwrite_an_external_file() {
     f.sync().unwrap();
     let outside = f.root.join("outside.md");
     fs::write(&outside, "unchanged").unwrap();
-    let prompt = f.root.join(".hey-boss/prompts/checkout.md");
+    let prompt = f.root.join(".hey-boss/prompts/workspace-checkout.md");
     fs::remove_file(&prompt).unwrap();
     std::os::unix::fs::symlink(&outside, &prompt).unwrap();
     assert!(f.sync().is_err());

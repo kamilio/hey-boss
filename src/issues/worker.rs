@@ -229,8 +229,6 @@ pub(crate) struct Job {
     pub id: String,
     #[serde(default)]
     pub worker_id: String,
-    #[serde(default)]
-    pub retry: bool,
     pub project: Project,
     pub issue: Value,
     pub comments: Vec<Value>,
@@ -1223,13 +1221,7 @@ fn worktree_path(job: &Job) -> String {
         .into_owned()
 }
 fn template(text: &str, job: &Job) -> String {
-    template_with(text, job, &[])
-}
-fn template_with(text: &str, job: &Job, values: &[(&str, &str)]) -> String {
     prompts::render(text, |key| {
-        if let Some((_, value)) = values.iter().find(|(name, _)| *name == key) {
-            return Some((*value).into());
-        }
         Some(match key {
             "issue_command" => format!("hey-boss issue view {}", number_text(job)),
             "create_issue_command" => create_issue_command(None),
@@ -1319,7 +1311,6 @@ pub(crate) fn preview(
         session_ref: None,
         id: String::new(),
         worker_id: String::new(),
-        retry: false,
         project: project.clone(),
         issue,
         comments: vec![],
@@ -1345,9 +1336,7 @@ pub(crate) fn preview(
     prompt(&job)
 }
 fn prompt(job: &Job) -> (String, bool, String) {
-    prompt_with_config(job, &job.config)
-}
-fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, String) {
+    let config = &job.config;
     let (task, goal) = task_prompt(job, config);
     let artifact = artifact_task(&job.issue).is_some();
     let dependencies = job.issue["dependency_context"].as_array();
@@ -1365,70 +1354,30 @@ fn prompt_with_config(job: &Job, config: &ProjectConfig) -> (String, bool, Strin
             String::new()
         }
     };
-    let values = [
-        ("task", task),
-        (
-            "workspace",
-            section(
-                if config.worktree_enabled {
-                    "worktree"
-                } else {
-                    "checkout"
-                },
-                !artifact,
-            ),
+    let sections = [
+        task,
+        section(
+            if config.worktree_enabled {
+                "worktree"
+            } else {
+                "checkout"
+            },
+            !artifact,
         ),
-        (
-            "delivery",
-            section(if config.prs_enabled { "prs" } else { "main" }, !artifact),
-        ),
-        // Empty legacy layout slots: these details come from fetching the task.
-        ("plan_document", String::new()),
-        ("subtask", String::new()),
-        ("dependencies", String::new()),
-        ("github", String::new()),
-        (
+        section(if config.prs_enabled { "prs" } else { "main" }, !artifact),
+        section(
             "handoff",
-            section(
-                "handoff",
-                !artifact
-                    && (config.prs_enabled || has_dependency_prs)
-                    && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs),
-            ),
+            !artifact
+                && (config.prs_enabled || has_dependency_prs)
+                && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs),
         ),
-        ("resume", section("resume", job.retry)),
     ];
-    let values: Vec<_> = values
+    let mut instructions = sections
         .iter()
-        .map(|(key, value)| (*key, value.as_str()))
-        .collect();
-    // Remove only empty standalone slots and their preceding separator. Keep
-    // authored spacing and never expand variables inside substituted content.
-    let mut lines = Vec::new();
-    for line in config.prompt_overrides.get("layout").lines() {
-        let empty_slot = line
-            .trim()
-            .strip_prefix("{{")
-            .and_then(|s| s.strip_suffix("}}"))
-            .is_some_and(|key| {
-                values
-                    .iter()
-                    .any(|(name, value)| *name == key.trim() && value.is_empty())
-            });
-        if empty_slot {
-            if lines
-                .last()
-                .is_some_and(|line: &&str| line.trim().is_empty())
-            {
-                lines.pop();
-            }
-        } else {
-            lines.push(line);
-        }
-    }
-    let mut instructions = template_with(&lines.join("\n"), job, &values)
-        .trim()
-        .to_owned();
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
     if job.issue["github_status"]["monitoring"] == true
         && job.issue["github_status"]["event"].is_string()
     {
@@ -2594,7 +2543,7 @@ mod tests {
         assert!(!text.contains("Plan document:"), "{text}");
     }
     #[test]
-    fn layout_controls_sequence_and_omission_without_recursive_expansion() {
+    fn legacy_layout_cannot_reorder_sections_or_expand_inserted_variables() {
         let mut config = ProjectConfig {
             prompt: "Task {{title}}".into(),
             prs_enabled: true,
@@ -2606,10 +2555,10 @@ mod tests {
             ..Default::default()
         };
         let (text, _, objective) = preview(&config, &project(), issue());
-        assert_eq!(text, "Ship 7\n\nTask Literal {{body}}");
+        assert!(text.contains("\n\nShip 7\n\n"));
         assert_eq!(objective, text);
         config.prompt_overrides.layout = None;
-        let text = preview(&config, &project(), issue()).0;
+        assert_eq!(text, preview(&config, &project(), issue()).0);
         assert!(
             text.starts_with("Task Literal {{body}}\n\nWork in"),
             "{text}"

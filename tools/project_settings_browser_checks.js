@@ -12,7 +12,6 @@ async (page) => {
   page.on('pageerror', error => errors.push(error.message));
   page.on('console', message => { if (message.type() === 'error') errors.push(message.text()); });
   await page.goto(page.url().startsWith('http://127.0.0.1:') ? page.url().split('/').slice(0, 3).join('/') : 'http://127.0.0.1:59642');
-  await page.evaluate(() => { window.fixtureSettings.prompt_overrides.layout = '{{delivery}}\n\n{{task}}'; });
   await open();
   check(await page.getByRole('tab').count() === 2, 'Configuration and activity');
   check(await page.getByRole('tabpanel').count() === 1, 'Only one panel is exposed');
@@ -28,8 +27,8 @@ async (page) => {
   await page.locator('#project-drafts').uncheck();
   await page.locator('#project-artifacts').uncheck();
   check(await page.locator('#project-plan-template').count() === 0, 'Terminal planning configuration is removed');
-  const link = page.getByRole('link',{name:'prs.md',exact:true});
-  check((await link.getAttribute('href')).includes('project=fixture&file=prs.md'), 'Workflow switch links directly to its project prompt');
+  const link = page.getByRole('link',{name:'delivery-pr.md',exact:true});
+  check((await link.getAttribute('href')).includes('project=fixture&file=delivery-pr.md'), 'Workflow switch links directly to its project prompt');
   page.once('dialog',dialog=>dialog.dismiss());
   await link.click();
   check(await page.locator('#project-settings-dialog').isVisible(), 'Following a prompt link protects unsaved settings');
@@ -43,7 +42,6 @@ async (page) => {
   check(await page.evaluate(() => !saved[0].operation.changes.drafts_enabled && !saved[0].operation.changes.artifacts_enabled), 'Save includes all resource switches');
   check(await page.evaluate(() => saved[0].operation.changes.paused && saved[0].operation.changes.pause_reason === 'Waiting for the next release'), 'Pause and reason saved together');
   check(await page.evaluate(() => !('chief_enabled' in saved[0].operation.changes) && !('chief_prompt' in saved[0].operation.changes)), 'Saving settings never restores retired configuration');
-  check(await page.evaluate(() => fixtureSettings.prompt_overrides.layout === '{{delivery}}\n\n{{task}}' && !('prompt_overrides.layout' in saved[0].operation.changes)), 'Settings changes preserve the saved sequence');
   await open();
   check(await page.locator('#project-paused').isChecked(), 'Pause persists on reopen');
   check(await page.locator('#project-pause-reason').inputValue() === 'Waiting for the next release', 'Pause reason persists on reopen');

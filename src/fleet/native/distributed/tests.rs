@@ -3376,12 +3376,12 @@ fn project_configuration_offline_history_survives_conflicts_and_remote_undo() {
     let first = call(
         &fa,
         "a",
-        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/checkout.md")}),
+        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/workspace-checkout.md")}),
     );
     let second = call(
         &fb,
         "b",
-        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/main.md")}),
+        json!({"action":"configure_project","prompt":include_str!("../../../issues/prompts/delivery-main.md")}),
     );
     assert_ne!(first["revision"], second["revision"]);
     capture_all(&a, &mut ea);
