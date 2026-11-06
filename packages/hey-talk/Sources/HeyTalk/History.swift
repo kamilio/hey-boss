@@ -119,64 +119,29 @@ private struct HistoryView: View {
     var body: some View {
         let visible = matching
         VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: 14) {
-                Image(systemName: "waveform")
-                    .font(.system(size: 24, weight: .medium)).foregroundStyle(.teal)
-                    .frame(width: 52, height: 52)
-                    .background(.teal.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Hey Talk").font(.system(size: 26, weight: .semibold, design: .rounded))
-                    Text("Your words, always within reach.").font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Label("On this Mac", systemImage: "lock.shield")
-                    .font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 26).padding(.top, 38).padding(.bottom, 24)
-            HStack {
-                Text("Dictation history").font(.system(size: 14, weight: .semibold))
-                Spacer()
-                HStack(spacing: 7) {
-                    Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                    TextField("Search loaded dictations", text: $search).textFieldStyle(.plain)
-                        .accessibilityLabel("Search loaded dictations")
-                    if !search.isEmpty {
-                        Button { search = "" } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain).accessibilityLabel("Clear search")
-                    }
-                }
-                .font(.system(size: 12)).padding(9).frame(width: 240)
-                .background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 10))
-            }.padding(.horizontal, 26).padding(.bottom, 14)
-            Divider().padding(.horizontal, 26)
+            LibraryHeader(subtitle: "Your words, always within reach.", badge: "On this Mac", symbol: "lock.shield")
+            LibraryToolbar(title: "Dictation history", placeholder: "Search loaded dictations", search: $search)
             if let warning = history.warning {
                 Label(warning, systemImage: "exclamationmark.triangle")
                     .font(.callout).foregroundStyle(.orange).padding(16)
             }
             if visible.isEmpty {
                 VStack(spacing: 12) {
-                    Image(systemName: search.isEmpty ? "text.bubble" : "magnifyingglass")
-                        .font(.system(size: 34, weight: .light)).foregroundStyle(.teal)
-                    Text(history.loading ? "Loading history…" : search.isEmpty ? "Your dictations will appear here" : "No matching dictations")
-                        .font(.system(size: 17, weight: .medium))
-                    Text(search.isEmpty ? "Press \(DictationShortcut.hint) to start. Press again to finish." : "Try another phrase or load older dictations below.")
-                        .font(.callout).foregroundStyle(.secondary)
+                    LibraryEmptyState(symbol: search.isEmpty ? "text.bubble" : "magnifyingglass",
+                                      title: history.loading ? "Loading history…" : search.isEmpty ? "Your dictations will appear here" : "No matching dictations",
+                                      detail: search.isEmpty ? "Press \(DictationShortcut.hint) to start. Press again to finish." : "Try another phrase or load older dictations below.")
                     if history.hasMore { loadMore }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(visible) { entry in
-                            DictationRow(entry: entry, saved: !history.unsaved.contains(entry.id))
-                                .overlay(alignment: .bottom) {
-                                    if entry.id != visible.last?.id { Divider().padding(.horizontal, 18) }
-                                }
-                        }
-                        if history.hasMore { loadMore.padding(16) }
+                LibraryRows {
+                    ForEach(visible) { entry in
+                        DictationRow(entry: entry, saved: !history.unsaved.contains(entry.id))
+                            .overlay(alignment: .bottom) {
+                                if entry.id != visible.last?.id { Divider().padding(.horizontal, 18) }
+                            }
                     }
-                    .padding(8)
+                    if history.hasMore { loadMore.padding(16) }
                 }
-                .padding(.horizontal, 10)
             }
             Divider().padding(.horizontal, 26)
             HStack(spacing: 8) {
@@ -202,9 +167,11 @@ private struct DictationRow: View {
     let saved: Bool
     @State private var copied = false
     @State private var copiedOriginal = false
-    @State private var hovered = false
     @State private var showFullText = false
     var body: some View {
+        LibraryRow { rowContent }
+    }
+    private var rowContent: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 7) {
                 Image(systemName: entry.source == "file" ? "doc.waveform" : "mic")
@@ -269,9 +236,6 @@ private struct DictationRow: View {
                 Text("Original not saved for this older entry").font(.system(size: 11)).foregroundStyle(.secondary)
             }
         }
-        .padding(18)
-        .background(.teal.opacity(hovered ? 0.055 : 0), in: RoundedRectangle(cornerRadius: 14))
-        .onHover { hovered = $0 }
     }
 }
 

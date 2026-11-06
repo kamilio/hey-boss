@@ -289,7 +289,7 @@ reports capture latency, inference duration, and real-time factor. `status
 --json` exposes readiness, measured microphone levels, hotkey registration,
 and process IDs. `last` reads the most recent transcript, including after restart.
 
-With AI correction on, say “Add word: Kunal Tum” in any app. Hey Talk saves “Kunal Tum” as one vocabulary entry and shows the spelling without pasting or submitting anything. Click the pencil beside the saved spelling to correct it, or open **Vocabulary…** from the waveform menu to edit an older entry. Saving updates the dictionary used by both speech recognition and AI correction. File transcription and `--no-paste` leave the vocabulary unchanged.
+With AI correction on, say “Add word: Kunal Tum” in any app. Hey Talk saves “Kunal Tum” as one vocabulary entry and shows the spelling without pasting or submitting anything. Click the pencil beside the saved spelling to correct it, or open **Vocabulary…** from the waveform menu to search your saved entries. Use the pencil to edit a spelling or the trash button to delete a word from the shared list. Saving updates the dictionary used by both speech recognition and AI correction. File transcription and `--no-paste` leave the vocabulary unchanged.
 
 Manage vocabulary hints from the CLI:
 
