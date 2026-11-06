@@ -80,8 +80,8 @@ pub(super) fn saved_command(host: &str, saved: &Value) -> Result<String> {
         saved["session_ref"]["path"].as_str(),
     )
 }
-pub(super) fn steer(ctx: &Context, request: &Value) -> Result<Value> {
-    Ok(Store::open(&ctx.path)?.worker_steer(request["run"].as_str().unwrap_or(""), request)?)
+pub(super) fn broadcast_delivery(ctx: &Context, request: &Value) -> Result<Value> {
+    Ok(Store::open(&ctx.path)?.queue_broadcast(request)?)
 }
 
 pub(super) fn apply(ctx: &Context, run: &str) -> Result<Value> {

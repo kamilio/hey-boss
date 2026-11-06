@@ -18,6 +18,12 @@ macro_rules! prompts {
             pub subtask: Option<String>,
             #[serde(skip_serializing)]
             pub github: Option<String>,
+            #[serde(skip_serializing)]
+            pub steering: Option<String>,
+            #[serde(skip_serializing)]
+            pub dependency_update: Option<String>,
+            #[serde(skip_serializing)]
+            pub prompt_update: Option<String>,
             // Accept legacy saved settings, but never apply or expose Chief wrappers.
             #[serde(skip_serializing)]
             pub chief_wrapper: Option<String>,
@@ -50,9 +56,6 @@ prompts! {
     (main, DEFAULT_MAIN_PROMPT, "Push to main", ""),
     (handoff, DEFAULT_HANDOFF_PROMPT, "Ready handoff", "PR tasks that unblock dependencies before merge."),
     (resume, DEFAULT_RESUME_PROMPT, "Resume", "Resumed tasks."),
-    (steering, DEFAULT_STEERING_PROMPT, "New instructions", "Live instructions. Variables: {{scope}}, {{instruction}}."),
-    (dependency_update, DEFAULT_DEPENDENCY_UPDATE_PROMPT, "Dependency updates", "Live dependency changes. Variable: {{instruction}}."),
-    (prompt_update, DEFAULT_PROMPT_UPDATE_PROMPT, "Prompt updates", "Changed project instructions. Variable: {{instructions}}."),
     (goal_continue, DEFAULT_GOAL_CONTINUE_PROMPT, "Continue a goal", "A goal turn ends before a completion report."),
     (error_task, DEFAULT_ERROR_TASK_PROMPT, "Error task", "Tasks created from Errors. Variable: {{command}} reads the error evidence."),
 }

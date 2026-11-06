@@ -477,7 +477,7 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
             Some("configure") => Some("configure"),
             Some("sync_config") => Some("sync_config"),
             Some("ping") => Some("heartbeat"),
-            Some("conversation" | "takeover" | "steer") => Some("request"),
+            Some("conversation" | "takeover" | "broadcast_delivery") => Some("request"),
             _ => None,
         };
         let _progress =
@@ -574,10 +574,10 @@ pub(super) fn stdio(ctx: Context, startup: super::handshake::Progress) -> Result
                         )?;
                     }
                 }
-                Some("conversation" | "takeover" | "steer") => {
+                Some("conversation" | "takeover" | "broadcast_delivery") => {
                     let cursor = message.get("cursor").cloned().unwrap_or(json!(0));
-                    let result = if message["kind"] == "steer" {
-                        takeover::steer(&ctx, &message)
+                    let result = if message["kind"] == "broadcast_delivery" {
+                        takeover::broadcast_delivery(&ctx, &message)
                     } else if message["kind"] == "takeover" {
                         takeover::apply(&ctx, message["run"].as_str().unwrap_or(""))
                     } else {

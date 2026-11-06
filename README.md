@@ -211,17 +211,7 @@ current work; **Kill now** stops a finishing worker immediately. **Add project**
 saves a Git repository and checkout path on that machine and can assign it to a
 worker. The workspace folder defaults to `~/Workspace` and remembers each machine’s
 last choice. Existing checkouts must match the repository; files are preserved.
-Choose **Steer** in a live conversation to add an instruction while the agent keeps
-working. **This agent** sends a message to that session; **This issue** also appends
-the requirement to the saved issue; **This project** also appends it to the project’s
-base instructions. Other running agents using those project instructions receive
-the update; worker overrides keep their own instructions. Messages are queued on
-the owning device and delivery confirmation appears in the conversation. Retries
-reuse the same request, so a connection interruption cannot duplicate a saved
-requirement. Completed and standalone saved conversations cannot be steered.
-Sending dismisses the instruction dialog immediately, so you can keep reading.
-If submission fails or remains unconfirmed for 15 seconds, the dialog returns
-with your text and scope preserved for a safe retry.
+Choose **Broadcast** on the Workers page to send one message to all current task agents on connected machines. The result shows how many messages were queued. Each conversation shows its delivery status. Saved prompt edits apply on the next launch.
 
 Choose **Take over** in a live conversation to stop that agent and assign its issue
 to Boss. After it stops, **Copy command** gives you a terminal command to resume
@@ -304,14 +294,8 @@ check the issue revision and use stable request IDs across the supervisor tunnel
 worker pickup. The supervisor polls through the shared `hey-gh` daemon. A fresh
 required-check failure wakes work immediately, without waiting for optional jobs
 or reviews. Completed checks and later review findings also wake work. PRs without
-checks can deliver review findings; an empty check list alone does not wake work. A running
-agent receives the latest update through steering; otherwise, the next event
-starts a fresh session. Successful work returns to watching after the current
-event is delivered. An explicit handoff also acknowledges an unchanged event
-already present in that run's launch snapshot; newer undelivered work remains
-queued. Claims and steering include
-structured GitHub evidence, with size limits and explicit omission counts.
-Polling does not post status comments. Removing the last open PR returns waiting
+checks can deliver review findings; an empty check list alone does not wake work. A new actionable event starts a fresh thread. If an agent already owns the task, the latest event waits until its claim is released. The new model claims the issue and can inspect the current GitHub evidence.
+Removing the last open PR returns waiting
 work to Boss; an active agent keeps its claim. Existing merged-fix auto-close
 behavior still applies. Stale or unavailable evidence stays an error, not a
 successful check result.
@@ -496,7 +480,7 @@ Click a notification’s title or body to open it; click a collapsed project sum
 displayed on the Mac. Repeating it preserves the stored terminal status and answer.
 
 Notifications capture their sending agent, session, worker run, invocation, and
-process trace. The **•••** menu contains **Open agent** and **Steer agent**, which open that session on the web;
+process trace. The **•••** menu contains **Open agent**, which opens that session on the web;
 **Mute agent** opens its Inbox sender controls. Muting persists across restarts,
 silences desktop and phone delivery from that agent on that machine, and keeps
 history and unanswered questions. Unmuting does not replay suppressed notices.
@@ -1089,7 +1073,7 @@ when the viewer or app reopens. New repositories remain collapsed.
 
 The phone interface runs on your Mac and is localhost-only by default. Allow your home LAN with `hey-boss issue web --allow-public-ip YOUR_HOME_PUBLIC_IP`; the public-IP check runs in the background without Location permission. See [local mobile access](docs/mobile.md).
 
-Codex sessions on a managed app-server can be steered and their saved goals paused
+Codex sessions on a managed app-server can have their saved goals paused
 or re-enabled from expanded Agents rows. See [Codex controls](docs/codex-steering.md)
 for endpoint configuration and the limits of existing standalone sessions.
 

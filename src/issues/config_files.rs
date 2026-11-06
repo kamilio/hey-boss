@@ -330,7 +330,10 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         let previous: Files = serde_json::from_value(base["files"].clone())?;
         let pending: Files = serde_json::from_value(base["pending"].clone())?;
         for (key, text) in &pending {
-            if disk.get(key) == previous.get(key) && disk.get(key) != Some(text) {
+            if template.contains_key(key)
+                && disk.get(key) == previous.get(key)
+                && disk.get(key) != Some(text)
+            {
                 if let Some(text) = text {
                     write(&dir.join(key), text)?;
                 }

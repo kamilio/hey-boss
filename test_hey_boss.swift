@@ -48,6 +48,7 @@ func audit() {
         ui.updateEnabled(); ui.layout()
         withExtendedLifetime(ui) { app.run() }; return
     }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGENTS"] == "1" { auditNotificationAgents(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUIET_HOURS"] == "1" { auditQuietHours(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PAGING"] == "1" { auditPaging(); return }
@@ -161,7 +162,6 @@ func audit() {
     auditNotificationReplay()
     auditPaging()
     if ProcessInfo.processInfo.environment["HEY_BOSS_PERFORMANCE"] == "1" { auditPerformance(); return }
-    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_AGENTS_ONLY"] == "1" { _ = auditAgentOverview(); return }
     let root = FileManager.default.temporaryDirectory.appendingPathComponent("hey-boss-test-\(UUID().uuidString)")
     try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
     defer { try! FileManager.default.removeItem(at: root) }
@@ -1384,13 +1384,12 @@ func auditAgentControlPanel() {
     var done: (([String: Any]) -> Void)?
     panel.perform = { action, input, completion in
         calls.append(action)
-        if action == "steer" { precondition(input["expectedTurnId"] as? String == "turn" && input["text"] as? String == "Prioritize re-enabling the goal") }
         done = completion
     }
     func reply(_ status: String) {
         done?(["ok": true, "goal": ["status": status, "objective": "Build the substantial feature"], "turnId": "turn", "canSteer": true]); done = nil
     }
-    precondition(!panel.goalButton.isEnabled && !panel.sendButton.isEnabled)
+    precondition(!panel.goalButton.isEnabled)
     panel.connect(); panel.connect()
     precondition(calls == ["inspect"] && panel.busy)
     reply("paused")
@@ -1398,14 +1397,7 @@ func auditAgentControlPanel() {
     panel.toggleGoal(); precondition(calls.last == "enable-goal"); reply("active")
     precondition(panel.goalButton.title == "Pause goal")
     panel.toggleGoal(); precondition(calls.last == "disable-goal"); reply("paused")
-    panel.editor.string = "Prioritize re-enabling the goal"
-    panel.sendInstruction(); panel.sendInstruction()
-    precondition(calls.filter { $0 == "steer" }.count == 1 && !panel.editor.isEditable)
-    done?(["ok": false, "error": "Turn changed"]); done = nil
-    precondition(panel.editor.string == "Prioritize re-enabling the goal" && !panel.sendButton.isEnabled && panel.editor.isEditable)
-    panel.connect(); reply("paused"); panel.sendInstruction(); reply("paused")
-    precondition(panel.editor.string.isEmpty && panel.status.stringValue == "Instruction accepted by Codex.")
-    print("Passed: saved goal re-enable/pause, pending action isolation, stale-turn draft preservation, acknowledged send clears draft")
+    print("Passed: saved goal re-enable/pause, pending action isolation")
 }
 
 func auditActiveAgentFilter() {
@@ -3790,13 +3782,12 @@ func auditNotificationAgents() {
     let menu = card.info.menu!
     precondition(menu.items.contains { $0.title.contains("agent-1") })
     precondition(menu.items.contains { $0.title.contains("gpt-6-astra") })
-    for title in ["Mute agent", "Open agent", "Steer agent"] {
+    for title in ["Mute agent", "Open agent"] {
         let item = menu.items.first { $0.title == title }!
         NSApp.sendAction(item.action!, to: item.target, from: item)
     }
-    precondition(links.count == 3 && links.allSatisfy { $0.host == "hey-boss.test" })
+    precondition(links.count == 2 && links.allSatisfy { $0.host == "hey-boss.test" })
     precondition(links[1].fragment!.contains("run=run-1") && links[1].fragment!.contains("at=42"))
-    precondition(links[2].fragment!.contains("steer=1"))
     card.configure(grouped: false)
     let senderButtons = card.view.content.subviews.compactMap { $0 as? ActionButton }.filter { $0.title.hasSuffix("agent") }
     precondition(senderButtons.isEmpty, "Agent actions must not consume a footer row")
@@ -3809,8 +3800,8 @@ func auditNotificationAgents() {
     let scroll = content.subviews.compactMap { $0 as? NSScrollView }.first!
     precondition(scroll.frame.minY == 0 && scroll.frame.height == content.bounds.height, "Question has no reserved action footer")
     let info = scroll.documentView!.subviews.compactMap { $0 as? InfoButton }.first!
-    let steer = info.menu!.items.first { $0.title == "Steer agent" }!
-    NSApp.sendAction(steer.action!, to: steer.target, from: steer)
+    let open = info.menu!.items.first { $0.title == "Open agent" }!
+    NSApp.sendAction(open.action!, to: open.target, from: open)
     precondition(questionLinks.count == 1 && ui.current?.taskID == question.taskID)
     print("PASS sender trace, native web actions, persistent scoped mute, pending questions, unmute without replay")
 }

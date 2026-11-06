@@ -353,10 +353,85 @@ impl Supervisor {
         }
         Ok(result)
     }
+    fn remote_request(&self, host: &str, mut message: Value) -> Result<Value> {
+        let identifier = id()?;
+        let (tx, rx) = mpsc::sync_channel(1);
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.waiters.len() >= 32 {
+                return Err(invalid("Conversations are busy. Try again in a moment."));
+            }
+            let (_, outgoing) = state.connections.get(host).ok_or_else(|| {
+                invalid("This device is disconnected. Reconnect to load its conversation.")
+            })?;
+            message["id"] = json!(identifier);
+            outgoing
+                .try_send(message)
+                .map_err(|_| invalid("This device is busy. Try again in a moment."))?;
+            state.waiters.insert(identifier.clone(), tx);
+        }
+        let result = rx
+            .recv_timeout(Duration::from_secs(10))
+            .map_err(|_| invalid("This device did not respond. Try again when it reconnects."));
+        self.state.lock().unwrap().waiters.remove(&identifier);
+        result
+    }
+    fn broadcast(&self, request: &Value) -> Result<Value> {
+        let text = request["text"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty() && s.len() <= 32_000)
+            .ok_or_else(|| invalid("Enter a message of up to 32000 bytes"))?;
+        let mut pending = Vec::new();
+        let mut total = 0;
+        let mut offline = 0;
+        let status = self.overview()?;
+        let submission = id()?;
+        for machine in status["machines"].as_array().into_iter().flatten() {
+            if machine["state"] != "connected" {
+                offline += 1;
+                continue;
+            }
+            let runs: Vec<_> = machine["workers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|w| w["pid"].as_i64().unwrap_or(0) > 0)
+                .flat_map(|w| w["runs"].as_array().into_iter().flatten())
+                .filter(|r| {
+                    r["finished_at"].is_null()
+                        && r["stop_requested"] != true
+                        && r["kind"] != "chief"
+                        && r["standalone"] != true
+                })
+                .filter_map(|r| r["id"].as_str())
+                .collect();
+            if runs.is_empty() {
+                continue;
+            }
+            total += runs.len();
+            pending.push((machine["host"].as_str().unwrap(),json!({"kind":"broadcast_delivery","request_id":submission,"text":text,"runs":runs})));
+        }
+        let queued: u64 = std::thread::scope(|scope| {
+            let handles: Vec<_> = pending
+                .into_iter()
+                .map(|(host, message)| {
+                    scope.spawn(move || {
+                        let reply = if host == "local" {
+                            takeover::broadcast_delivery(&self.ctx, &message)
+                        } else {
+                            self.remote_request(host, message)
+                        };
+                        reply.ok().and_then(|r| r["queued"].as_u64()).unwrap_or(0)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap_or(0)).sum()
+        });
+        Ok(json!({"ok":true,"total":total,"queued":queued,"offline":offline}))
+    }
     fn conversation(&self, request: &Value) -> Result<Value> {
         let taking_over = request["kind"] == "takeover";
-        let steering = request["kind"] == "steer";
-        let mutation = taking_over || steering;
+        let mutation = taking_over;
         let host = request["host"]
             .as_str()
             .ok_or_else(|| invalid("Missing device"))?;
@@ -422,9 +497,6 @@ impl Supervisor {
             return Err(invalid("This project is hidden or no longer available"));
         }
         if host == "local" {
-            if steering {
-                return takeover::steer(&self.ctx, request);
-            }
             if taking_over {
                 return takeover::apply(&self.ctx, run_id);
             }
@@ -432,33 +504,10 @@ impl Supervisor {
             crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
             return Ok(result);
         }
-        let identifier = id()?;
-        let (tx, rx) = mpsc::sync_channel(1);
-        {
-            let mut state = self.state.lock().unwrap();
-            if state.waiters.len() >= 32 {
-                return Err(invalid("Conversations are busy. Try again in a moment."));
-            }
-            let (_, outgoing) = state.connections.get(host).ok_or_else(|| {
-                invalid("This device is disconnected. Reconnect to load its conversation.")
-            })?;
-            if machine["state"] != "connected" {
-                return Err(invalid(
-                    "This device is disconnected. Reconnect to load its conversation.",
-                ));
-            }
-            outgoing
-                .try_send(
-                    json!({"kind":request["kind"],"id":identifier,"run":run_id,"cursor":cursor,"scope":request["scope"],"text":request["text"],"request_id":request["request_id"]}),
-                )
-                .map_err(|_| invalid("This device is busy. Try again in a moment."))?;
-            state.waiters.insert(identifier.clone(), tx);
-        }
-        let result = rx
-            .recv_timeout(Duration::from_secs(10))
-            .map_err(|_| invalid("This device did not respond. Try again when it reconnects."));
-        self.state.lock().unwrap().waiters.remove(&identifier);
-        let mut result = result?;
+        let mut result = self.remote_request(
+            host,
+            json!({"kind":request["kind"],"run":run_id,"cursor":cursor}),
+        )?;
         if !mutation && result["ok"] == true {
             crate::issues::provenance::enrich_conversation(&self.ctx.db()?, run_id, &mut result)?;
         }
@@ -1345,7 +1394,7 @@ impl Supervisor {
                     }
                 }
                 Some("utility") => self.utility_reply(host, &message),
-                Some("conversation" | "takeover" | "steer") => {
+                Some("conversation" | "takeover" | "broadcast_delivery") => {
                     if let Some(waiter) = self
                         .state
                         .lock()
@@ -1838,6 +1887,9 @@ impl Supervisor {
             Some("overview") => self
                 .overview()
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
+            Some("broadcast") => self
+                .broadcast(value)
+                .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
             Some("configuration") => self
                 .configuration_request(value)
                 .map_err(|e| crate::issues::Error::new("fleet_error", e.to_string())),
@@ -1891,7 +1943,8 @@ impl Supervisor {
             Some("utils_resolve" | "utils_start" | "utils_poll") => self.utility_request(&request),
             Some("status") => self.status_request(&request),
             Some("overview") => self.overview(),
-            Some("conversation" | "takeover" | "steer") => self.conversation(&request),
+            Some("conversation" | "takeover") => self.conversation(&request),
+            Some("broadcast") => self.broadcast(&request),
             Some("signal") => self.signal(&request),
             Some("chief_run") => self.chief_run(&request),
             Some("configuration") => self.configuration_request(&request),

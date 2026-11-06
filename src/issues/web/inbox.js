@@ -19,18 +19,17 @@ let inboxTasks = [],
   noticeLinkSelection = null,
   noticeLinkIssues = [];
 const noticeDecision = (task) => ["approval", "prompt"].includes(task.kind);
-function noticeAgentURL(task, steer = false) {
+function noticeAgentURL(task) {
   const agent = task.origin?.agent;
   if (!agent?.session_id) return null;
   const params = new URLSearchParams({host: agent.host, run: agent.creation_run?.id || "session:" + agent.session_id, project: agent.creation_run?.project_id || task.issue?.project || ""});
   if (Number.isSafeInteger(agent.invocation?.offset)) params.set("at", agent.invocation.offset);
-  if (steer) params.set("steer", "1");
   return "/agents/session#" + params;
 }
 function noticeSender(task) {
   const origin = task.origin, agent = origin?.agent, href = noticeAgentURL(task);
   const fields = [["Agent", agent?.id], ["Model", agent?.model], ["Session", agent?.session_id], ["Machine", agent?.host], ["Worker run", agent?.creation_run?.id], ["Identity source", agent?.source], ["Invocation", agent?.invocation?.call_id], ["Directory", origin?.cwd], ["Executable", origin?.executable], ["Process", origin?.pid], ["Branch", origin?.git?.branch], ["Revision", origin?.git?.revision]];
-  const actions = agent ? `<details class="issue-overflow notice-agent-menu"><summary class="icon-button" aria-label="Agent actions" title="Agent actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-notice-mute>${task.senderMuted ? "Unmute agent" : "Mute agent"}</button>${href ? `<a href="${esc(href)}">Open agent</a><a href="${esc(noticeAgentURL(task, true))}">Steer agent</a>` : ""}</div></details>` : "";
+  const actions = agent ? `<details class="issue-overflow notice-agent-menu"><summary class="icon-button" aria-label="Agent actions" title="Agent actions"><span aria-hidden="true">•••</span></summary><div class="issue-overflow-menu"><button type="button" data-notice-mute>${task.senderMuted ? "Unmute agent" : "Mute agent"}</button>${href ? `<a href="${esc(href)}">Open agent</a>` : ""}</div></details>` : "";
   return `<div class="side-section" id="notice-sender"><div class="notice-sender-heading"><h2 class="side-heading">Sender</h2>${actions}</div>${agent ? `<p class="notice-sender-identity"><strong>${esc(agent.model || "Model not recorded")}</strong><br><code>${esc(agent.id)}</code><br>${esc(agent.host)}</p>${task.senderMuted ? "<p>Muted. Notices stay in Inbox without banners or push notifications.</p>" : ""}` : "<p>Agent identity was not recorded for this notice. The saved process trace is shown below.</p>"}<details><summary>Sender trace</summary><dl>${fields.filter(([,value]) => value != null).map(([name,value]) => `<dt>${esc(name)}</dt><dd style="overflow-wrap:anywhere">${esc(value)}</dd>`).join("")}${(origin?.launchers || []).map(item => `<dt>Parent process ${esc(item.pid)}</dt><dd style="overflow-wrap:anywhere">${esc(item.executable)}</dd>`).join("")}</dl></details></div>`;
 }
 const noticeReview = (task) => task.kind === "update" && !!task.commentsEnabled;

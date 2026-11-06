@@ -115,12 +115,11 @@ struct NotificationAgent: Codable {
     struct Run: Codable { let id: String; let project_id: String; let number: Int64; let started_at: Int64; let title: String? }
     struct Invocation: Codable { let offset: UInt64; let call_id: String? }
     var key: String { machine + ":" + id }
-    func webURL(steer: Bool = false) -> URL? {
+    func webURL() -> URL? {
         guard let session_id else { return nil }
         var params = URLComponents()
         params.queryItems = [URLQueryItem(name: "host", value: host), URLQueryItem(name: "run", value: creation_run?.id ?? "session:" + session_id), URLQueryItem(name: "project", value: creation_run?.project_id ?? "")]
         if let invocation { params.queryItems!.append(URLQueryItem(name: "at", value: String(invocation.offset))) }
-        if steer { params.queryItems!.append(URLQueryItem(name: "steer", value: "1")) }
         var url = URLComponents(string: "http://hey-boss.test/agents/session")!
         url.percentEncodedFragment = params.percentEncodedQuery
         return url.url
@@ -1301,7 +1300,7 @@ final class InfoButton: ActionButton {
             }
             menu.addItem(.separator())
         }
-        for (index, title) in ["Mute agent", "Open agent", "Steer agent", "Sender trace…"].enumerated() {
+        for (index, title) in ["Mute agent", "Open agent", "Sender trace…"].enumerated() {
             let item = NSMenuItem(title: title, action: #selector(selectAction(_:)), keyEquivalent: "")
             item.tag = index; item.target = self
             menu.addItem(item)
@@ -1321,8 +1320,8 @@ final class InfoButton: ActionButton {
         NSPasteboard.general.setString(parts.joined(separator: "\n\n"), forType: .string)
     }
     @objc func selectAction(_ item: NSMenuItem) {
-        if item.tag == 3 { showInfo(); return }
-        openURL(item.tag == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL(steer: item.tag == 2) ?? notificationSenderURL(row)))
+        if item.tag == 2 { showInfo(); return }
+        openURL(item.tag == 0 ? notificationSenderURL(row) : (row.origin?.agent?.webURL() ?? notificationSenderURL(row)))
     }
     func showInfo() {
         let popover = NSPopover()
@@ -3719,32 +3718,13 @@ final class AgentOverviewWindow: NSWindow {
     }
 }
 
-final class SteeringTextView: NSTextView {
-    var send: (() -> Void)?
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        if string.isEmpty {
-            let hint = NSAttributedString(string: "Give this active turn an instruction…", attributes: [.font: font ?? NSFont.systemFont(ofSize: 12), .foregroundColor: NSColor.placeholderTextColor])
-            hint.draw(at: NSPoint(x: textContainerInset.width + 5, y: textContainerInset.height))
-        }
-    }
-    override func keyDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command), event.keyCode == 36 { send?(); return }
-        super.keyDown(with: event)
-    }
-}
-
 final class AgentControlPanel: NSStackView {
-    let status = NSTextField(wrappingLabelWithString: "Connect to manage the saved goal or steer this session.")
+    let status = NSTextField(wrappingLabelWithString: "Connect to manage the saved goal.")
     let objective = NSTextField(wrappingLabelWithString: "")
     let goalButton = NSButton(title: "Re-enable goal", target: nil, action: nil)
     let refreshButton = NSButton(title: "Connect controls", target: nil, action: nil)
-    let sendButton = NSButton(title: "Send instruction", target: nil, action: nil)
-    let editor = SteeringTextView()
     var perform: ((String, [String: Any], @escaping ([String: Any]) -> Void) -> Void)?
     var goalStatus: String?
-    var turnId: String?
-    var canSteer = false
     var busy = false
     init() {
         super.init(frame: .zero)
@@ -3753,54 +3733,34 @@ final class AgentControlPanel: NSStackView {
         objective.font = .systemFont(ofSize: 11); objective.maximumNumberOfLines = 2; objective.isSelectable = true
         goalButton.target = self; goalButton.action = #selector(toggleGoal); goalButton.isEnabled = false
         refreshButton.target = self; refreshButton.action = #selector(connect)
-        sendButton.target = self; sendButton.action = #selector(sendInstruction); sendButton.isEnabled = false
         let actions = NSStackView(views: [goalButton, refreshButton]); actions.orientation = .horizontal; actions.spacing = 8
-        editor.isRichText = false; editor.font = .systemFont(ofSize: 12); editor.textContainerInset = NSSize(width: 8, height: 7)
-        editor.isAutomaticQuoteSubstitutionEnabled = false; editor.isAutomaticDashSubstitutionEnabled = false
-        editor.setAccessibilityLabel("Instruction for this Codex session")
-        editor.send = { [weak self] in self?.sendInstruction() }
-        let scroll = NSScrollView(); scroll.hasVerticalScroller = true; scroll.borderType = .bezelBorder; scroll.documentView = editor
-        editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false; editor.autoresizingMask = [.width]
-        editor.textContainer?.widthTracksTextView = true
-        for view in [status, objective, actions, scroll, sendButton] { addArrangedSubview(view) }
-        scroll.heightAnchor.constraint(equalToConstant: 60).isActive = true
-        for view in [status, objective, scroll] { view.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
-        sendButton.toolTip = "Send to the verified active turn (⌘Return). Your draft clears after Codex acknowledges it."
+        for view in [status, objective, actions] { addArrangedSubview(view) }
+        for view in [status, objective] { view.widthAnchor.constraint(equalTo: widthAnchor).isActive = true }
     }
     required init?(coder: NSCoder) { nil }
     @objc func connect() { request("inspect") }
     @objc func toggleGoal() { request(goalStatus == "active" ? "disable-goal" : "enable-goal") }
-    @objc func sendInstruction() {
-        guard canSteer, let turnId, !editor.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        request("steer", input: ["text": editor.string, "expectedTurnId": turnId])
-    }
     func request(_ action: String, input: [String: Any] = [:]) {
         guard !busy, let perform else { return }
-        busy = true; goalButton.isEnabled = false; sendButton.isEnabled = false; refreshButton.isEnabled = false
-        editor.isEditable = action != "steer"
+        busy = true; goalButton.isEnabled = false; refreshButton.isEnabled = false
         status.stringValue = action == "inspect" ? "Checking session connection…" : "Waiting for Codex acknowledgement…"
         status.textColor = .secondaryLabelColor
         perform(action, input) { [weak self] response in
             guard let self else { return }
-            self.busy = false; self.refreshButton.isEnabled = true; self.editor.isEditable = true
+            self.busy = false; self.refreshButton.isEnabled = true
             self.refreshButton.title = "Refresh controls"
             if response["ok"] as? Bool == true {
                 let goal = response["goal"] as? [String: Any]
                 self.goalStatus = goal?["status"] as? String
-                self.turnId = response["turnId"] as? String
-                self.canSteer = response["canSteer"] as? Bool == true
                 self.goalButton.title = self.goalStatus == "active" ? "Pause goal" : "Re-enable goal"
                 self.goalButton.isEnabled = goal != nil
-                self.sendButton.isEnabled = self.canSteer
                 self.objective.stringValue = goal?["objective"] as? String ?? "No saved goal in this session."
                 self.objective.toolTip = self.objective.stringValue
-                self.status.stringValue = action == "steer" ? "Instruction accepted by Codex." : "Goal: \(self.goalStatus ?? "none") · \(self.canSteer ? "Ready to steer · ⌘Return to send" : "No steerable active turn")"
-                if action == "steer" { self.editor.string = "" }
+                self.status.stringValue = "Goal: \(self.goalStatus ?? "none")"
             } else {
                 self.status.stringValue = response["error"] as? String ?? "Unable to control this session."
                 self.status.textColor = .systemOrange
-                self.canSteer = false; self.turnId = nil
-                self.goalButton.isEnabled = false; self.sendButton.isEnabled = false
+                self.goalButton.isEnabled = false
             }
         }
     }
@@ -5742,7 +5702,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
             }
         }
         if controlPanels.count >= 200,
-           let key = controlPanels.first(where: { !$0.value.busy && $0.value.editor.string.isEmpty && !expandedAgents.contains($0.key) })?.key {
+           let key = controlPanels.first(where: { !$0.value.busy && !expandedAgents.contains($0.key) })?.key {
             controlPanels.removeValue(forKey: key)
         }
         controlPanels[row.key] = panel

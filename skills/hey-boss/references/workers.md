@@ -33,5 +33,4 @@ hey-boss agent control --help
 
 Control requires an owning app-server socket configured in
 `~/.config/hey-boss/agent-control.json`; standalone terminal sessions cannot be
-controlled. Use the discovered thread ID for any subsequent control; starting
-workers and steering an existing session are separate operations.
+controlled.

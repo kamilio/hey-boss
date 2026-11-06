@@ -205,8 +205,6 @@ if (typeof document !== 'undefined') (() => {
   let cursor=0, olderCursor=0, loading=false, loaded=false, generation=0, follow=!route().has('at'), selected, historical, assignmentLoading=false;
   const seen = new Set();
   let takeoverBusy=false, takeoverTarget;
-  let steerBusy=false, steerTarget, steerRequest;
-  const steerDrafts=new Map();
   const takeovers=new Map();
   const takeoverKey=entry=>entry.machine.host+':'+entry.run.id;
   function savedTakeover(entry) {
@@ -430,7 +428,7 @@ if (typeof document !== 'undefined') (() => {
     if(!selected&&resource?.entity==='agent'&&resource.project){
       selected=historical||{machine:(data.machines||[]).find(m=>m.host===resource.host||m.hostname===resource.host)||{host:resource.host,state:'disconnected'},run:{id:resource.id,project_id:resource.project,title:'Saved creator conversation',finished_at:1,state:'completed',standalone:true},online:false};
     }
-    if(!selected){const issueNum=Number(route().get('issue')),proj=route().get('project');if(issueNum>0&&proj){$('session-issue').hidden=false;$('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:proj,issue:issueNum});$('session-issue').textContent='Issue #'+issueNum+' ↗';}$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to the issue to see its activity.':'This agent is no longer in recent activity.';$('conversation-empty').textContent='The saved session could not be loaded.';$('takeover-open').hidden=true;$('steer-open').hidden=true;$('steering-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
+    if(!selected){const issueNum=Number(route().get('issue')),proj=route().get('project');if(issueNum>0&&proj){$('session-issue').hidden=false;$('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:proj,issue:issueNum});$('session-issue').textContent='Issue #'+issueNum+' ↗';}$('session-title').textContent='Conversation unavailable';$('session-status').textContent=assignment?'No recorded conversation for this assignment is in recent activity. Return to the issue to see its activity.':'This agent is no longer in recent activity.';$('conversation-empty').textContent='The saved session could not be loaded.';$('takeover-open').hidden=true;$('broadcast-updates').hidden=true;$('resume-panel').hidden=true;$('takeover-note').hidden=true;return;}
     selected=jobConversation(selected,data);
     const {run,machine}=selected;
     taskNavigation(run);
@@ -442,11 +440,6 @@ if (typeof document !== 'undefined') (() => {
     $('session-issue').href=(mobile?'/project-resource#':'/#')+new URLSearchParams({project:run.project_id,issue:run.number});$('session-issue').textContent='Issue #'+run.number+' ↗';
     $('session-status').textContent=run.state==='infrastructure_blocked'?infrastructureGuidance(run):!selected.online&&run.finished_at==null?'Device disconnected. Showing the conversation loaded so far.':run.finished_at!=null?'This conversation has ended.':'Live conversation · updates as the agent works';
     renderTakeover();
-    if(route().get('steer')==='1') {
-      const params=route();params.delete('steer');history.replaceState(null,'',location.pathname+'#'+params);
-      if(!$('steer-open').hidden&&!$('steer-open').disabled)$('steer-open').click();
-      else {$('steer-note').hidden=false;$('steer-note').textContent='This agent cannot be steered right now. Its conversation remains available; steering requires a connected, running task.';}
-    }
     if(!loaded&&!loading)loadConversation();
   }
   function render(data) {last=data;if(detail)renderDetail(data);else renderOverview(data);}
@@ -479,11 +472,8 @@ if (typeof document !== 'undefined') (() => {
     if(!selected)return;
     const state=savedTakeover(selected), button=$('takeover-open');
     button.hidden=selected.run.standalone||Boolean(state?.stopped)||(runEnded()&&!state?.pending);
-    button.disabled=takeoverBusy||steerBusy||!selected.online;
+    button.disabled=takeoverBusy||!selected.online;
     button.textContent=state?.pending?'Check takeover':'Take over';
-    $('steer-open').hidden=selected.run.standalone||runEnded()||Boolean(state?.pending||state?.stopped)||selected.run.stop_requested===true;
-    $('steer-open').disabled=steerBusy||!selected.online;
-    $('steer-open').title=selected.online?'Add an instruction while this agent keeps working':'Reconnect this device to steer its agent';
     $('takeover-note').hidden=!state?.pending;
     $('takeover-note').textContent=state?.error||(!selected.online?'Reconnect this device to finish taking over.':state?.assigned?'Stopping the agent. Your issue is assigned to you; the resume command will appear when it stops.':'Waiting for the device to confirm takeover…');
     $('resume-panel').hidden=!state?.stopped;
@@ -547,12 +537,12 @@ if (typeof document !== 'undefined') (() => {
         $('session-resources-more').hidden=!data.more_created_resources;
       }
       if(!earlier){
-        const receipts=data.steering||[];
-        $('steering-updates').hidden=!receipts.length;$('steering-count').textContent=receipts.length?'('+receipts.length+')':'';
-        $('steering-list').replaceChildren(...receipts.map(receipt=>{
-          const row=element('li'),state=({queued:'Queued',sending:'Delivery unconfirmed',delivered:'Delivered',rejected:'Not delivered',superseded:'Replaced by newer GitHub status',uncertain:'Delivery unconfirmed'})[receipt.state]||'Delivery unconfirmed';
-          row.append(element('div','steering-receipt',state+' · '+({session:'This agent',issue:'This issue',project:'This project'})[receipt.scope]),element('p','steering-instruction',receipt.text));
-          if(receipt.error)row.append(element('p','steering-problem',receipt.error));
+        const receipts=data.broadcasts||[];
+        $('broadcast-updates').hidden=!receipts.length;$('broadcast-count').textContent=receipts.length?'('+receipts.length+')':'';
+        $('broadcast-list').replaceChildren(...receipts.map(receipt=>{
+          const row=element('li'),state=({queued:'Queued',sending:'Delivery unconfirmed',delivered:'Delivered',rejected:'Not delivered',uncertain:'Delivery unconfirmed'})[receipt.state]||'Delivery unconfirmed';
+          row.append(element('div','broadcast-receipt',state),element('p','broadcast-instruction',receipt.text));
+          if(receipt.error)row.append(element('p','broadcast-problem',receipt.error));
           return row;
         }));
       }
@@ -585,53 +575,23 @@ if (typeof document !== 'undefined') (() => {
   };
   $('takeover-cancel').onclick=()=>$('takeover-dialog').close();
   $('takeover-confirm').onclick=()=>{const entry=takeoverTarget;$('takeover-dialog').close();if(entry)takeOver(entry);};
-  const steerDraft=()=>({text:$('steer-text').value,scope:$('steer-form').elements.scope.value});
-  const keepSteerDraft=()=>{if(steerTarget)steerDrafts.set(takeoverKey(steerTarget),steerDraft());};
-  $('steer-open').onclick=()=>{
-    if(!selected||!selected.online||runEnded()||steerBusy)return;
-    steerTarget=selected;
-    const draft=steerDrafts.get(takeoverKey(selected))||{text:'',scope:'session'};
-    $('steer-text').value=draft.text;$('steer-form').elements.scope.value=draft.scope;
-    $('steer-task').textContent='Issue #'+selected.run.number+' · '+(selected.run.title||'Your task')+' · '+(selected.machine.hostname||selected.machine.host);
-    $('steer-error').hidden=true;$('steer-dialog').showModal();$('steer-text').focus();$('steer-text').scrollIntoView({block:'center'});
-  };
-  $('steer-form').oninput=keepSteerDraft;
-  $('steer-dialog').addEventListener('cancel',event=>{if(steerBusy)event.preventDefault();else keepSteerDraft();});
-  $('steer-dialog').addEventListener('close',()=>{if(!steerBusy&&!$('steer-dialog').open&&!$('steer-open').hidden)$('steer-open').focus();});
-  $('steer-cancel').onclick=()=>{keepSteerDraft();$('steer-dialog').close();};
-  $('steer-form').onsubmit=async event=>{
-    event.preventDefault();if(steerBusy||!steerTarget)return;
-    const draft=steerDraft(),entry=steerTarget,token=generation,key=takeoverKey(entry);
-    if(!draft.text.trim()||new TextEncoder().encode(draft.text).length>32000){$('steer-error').textContent='Enter an instruction of up to 32000 bytes.';$('steer-error').hidden=false;return;}
-    const payload=JSON.stringify({host:entry.machine.host,run:entry.run.id,...draft});
-    if(steerRequest?.payload!==payload)steerRequest={payload,id:HeyBossUI.requestId()};
-    steerBusy=true;keepSteerDraft();$('steer-error').hidden=true;
-    for(const control of $('steer-form').elements)control.disabled=true;
-    // Sending should never hold the conversation behind a modal. Keep the draft
-    // and request ID until acceptance, since a lost reply may already be saved.
-    $('steer-dialog').close();$('main').focus({preventScroll:true});
-    $('steer-note').hidden=false;$('steer-note').textContent='Sending your instruction… You can keep reading the conversation.';
-    renderTakeover();
-    const controller=new AbortController();
-    const timeout=setTimeout(()=>controller.abort(),15000);
-    try{
-      const response=await fetch('/api/fleet/steer',{method:'POST',signal:controller.signal,headers:{'Content-Type':'application/json',...(csrf?{'X-Hey-Boss-CSRF':csrf}:{})},body:JSON.stringify({...JSON.parse(payload),request_id:steerRequest.id})});
+  const broadcast = $('broadcast-dialog'), broadcastText = $('broadcast-text'), notice = $('broadcast-status');
+  $('broadcast-open').onclick=()=>{broadcast.showModal();broadcastText.focus();};
+  $('broadcast-cancel').onclick=()=>broadcast.close();
+  broadcastText.oninput=()=>broadcastText.setCustomValidity('');
+  $('broadcast-form').onsubmit=async event=>{
+    event.preventDefault();
+    if(!broadcastText.value.trim() || new TextEncoder().encode(broadcastText.value).length>32000){broadcastText.setCustomValidity('Enter a message of up to 32000 bytes.');broadcastText.reportValidity();return;}
+    const text=broadcastText.value;
+    broadcast.close();$('broadcast-open').disabled=true;notice.hidden=false;notice.textContent='Sending broadcast…';
+    try {
+      const response=await fetch('/api/fleet/broadcast',{method:'POST',headers:{'Content-Type':'application/json','X-Hey-Boss-CSRF':csrf},body:JSON.stringify({text})});
       const result=await response.json();
-      if(!response.ok||result.ok===false)throw Error(result.error?.message||result.error||'Could not send. Your instruction is preserved; retry when the device reconnects.');
-      if(!['queued','delivered'].includes(result.state))throw Error(result.error||'Delivery is unconfirmed. Check the conversation before sending another instruction.');
-      steerDrafts.delete(key);steerRequest=null;
-      if(token===generation&&!disposed){$('steer-text').value='';$('steer-note').textContent=result.state==='delivered'?'Instruction delivered to this agent.':({session:'Message queued for this agent.',issue:'Issue requirement saved. Message queued for this agent.',project:'Project instruction saved. Updates queued for agents using project instructions.'})[draft.scope]+' Watch the conversation for delivery confirmation.';}
-    }catch(error){
-      if(token===generation&&!disposed){
-        $('steer-note').hidden=true;
-        $('steer-text').value=draft.text;$('steer-form').elements.scope.value=draft.scope;
-        $('steer-error').textContent=controller.signal.aborted?'No confirmation yet. Your instruction is preserved. Retry to check the same submission without sending it twice.':error.message;
-        $('steer-error').hidden=false;
-        for(const control of $('steer-form').elements)control.disabled=false;
-        $('steer-dialog').showModal();$('steer-text').focus();$('steer-text').scrollIntoView({block:'center'});
-      }
-    }
-    finally{clearTimeout(timeout);steerBusy=false;for(const control of $('steer-form').elements)control.disabled=false;if(selected&&!disposed)renderTakeover();}
+      if(!response.ok || result.ok!==true)throw Error(result.error?.message||result.error||'Broadcast not confirmed.');
+      notice.textContent=(result.total ? 'Queued for '+result.queued+' of '+result.total+' active agents.' : 'No active agents on connected machines.')+(result.total>result.queued?' Some agents could not be confirmed. Check their conversations before sending again.':'')+(result.offline?' Offline machines: '+result.offline+'.':'');
+      if(result.queued)broadcastText.value='';
+    } catch(error){notice.textContent='Broadcast not confirmed. '+error.message+' Check conversations before sending again.';}
+    finally{$('broadcast-open').disabled=false;}
   };
   $('resume-copy').onclick=async()=>{const command=$('resume-command').textContent;try{await navigator.clipboard.writeText(command);$('copy-status').textContent='Command copied.';}catch{$('copy-status').textContent='Select the command and copy it with your keyboard.';const range=document.createRange();range.selectNodeContents($('resume-command'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);}};
   $('refresh').onclick=async()=>{$('error').hidden=true;await refresh();if(detail)await loadConversation();};
@@ -789,7 +749,7 @@ if (typeof document !== 'undefined') (() => {
   };
 
   addEventListener('beforeunload',event=>{if(workerEdit&&editFingerprint()!==workerEditOriginal){event.preventDefault();event.returnValue='';}});
-  addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;}if(detail){keepSteerDraft();$('steer-dialog').close();$('steer-note').hidden=true;$('steering-updates').hidden=true;$('steering-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
+  addEventListener('hashchange',()=>{if(route().has('find')){workerSearch=route().get('find');$('worker-search').value=workerSearch;}if(detail){$('broadcast-updates').hidden=true;$('broadcast-list').replaceChildren();historical=null;$('session-resources').hidden=true;follow=!route().has('at');$('takeover-dialog').close();$('copy-status').textContent='';generation++;cursor=0;olderCursor=0;loading=false;loaded=false;seen.clear();$('conversation').replaceChildren();}context();});
   addEventListener('pagehide',()=>{disposed=true;generation++;});
   addEventListener('pageshow',event=>{if(event.persisted){disposed=false;loading=false;refresh();if(detail)loadConversation();}});
   (async()=>{try{

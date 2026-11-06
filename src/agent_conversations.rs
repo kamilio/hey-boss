@@ -475,8 +475,8 @@ pub(crate) fn window_page(
         [],
         |r| r.get::<_, bool>(0),
     )? {
-        let mut stmt = db.prepare("SELECT request_id,scope,text,state,error FROM agent_steering WHERE run_id=?1 ORDER BY created_at DESC,rowid DESC LIMIT 16")?;
-        result["steering"] = json!(stmt.query_map([run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"scope":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?);
+        let mut stmt = db.prepare("SELECT request_id,scope,text,state,error FROM agent_steering WHERE run_id=?1 AND scope='broadcast' ORDER BY created_at DESC,rowid DESC LIMIT 16")?;
+        result["broadcasts"] = json!(stmt.query_map([run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"scope":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?})))?.collect::<rusqlite::Result<Vec<_>>>()?);
     }
     let Some(session) = session else {
         return Ok(result);

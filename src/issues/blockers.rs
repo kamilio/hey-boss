@@ -665,7 +665,6 @@ fn reconcile_graph(
                     now,
                     &dependencies,
                 )?;
-                db.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at) SELECT ?1||':'||id,id,'dependency',?2,?3 FROM worker_runs WHERE project_id=?4 AND issue_number=?5 AND finished_at IS NULL", params![format!("dependency-rework-{id}"),body,now,project,number])?;
             }
         }
         if issue["state"] != "ready" && (!issue["assignee"].is_null() || issue["reserved"] == true)

@@ -1,6 +1,5 @@
 //! Messages are delivered by the worker that owns the live session, never by resuming it.
 use super::*;
-use crate::issues::worker::Job;
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     if db.query_row(
@@ -24,110 +23,46 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 impl Store {
-    pub(crate) fn worker_steer(&mut self, run: &str, input: &Value) -> Result<Value> {
-        let request = input["request_id"]
+    pub(crate) fn queue_broadcast(&mut self, input: &Value) -> Result<Value> {
+        let id = input["request_id"]
             .as_str()
-            .ok_or_else(|| Error::invalid("Missing steering request ID"))?;
-        identifier(request, "request ID", 128)?;
-        if request.starts_with("github:") {
-            return Err(Error::invalid(
-                "The github: request prefix is reserved for watcher updates",
-            ));
-        }
+            .ok_or_else(|| Error::invalid("Missing broadcast ID"))?;
+        identifier(id, "broadcast ID", 128)?;
+        let runs = input["runs"]
+            .as_array()
+            .ok_or_else(|| Error::invalid("Missing broadcast recipients"))?;
         let text = input["text"]
             .as_str()
             .filter(|s| !s.trim().is_empty() && s.len() <= 32_000)
-            .ok_or_else(|| Error::invalid("Instruction must contain 1–32000 bytes"))?;
-        let scope = input["scope"]
-            .as_str()
-            .filter(|s| ["session", "issue", "project"].contains(s))
-            .ok_or_else(|| Error::invalid("Choose agent, issue or project scope"))?;
+            .ok_or_else(|| Error::invalid("Enter a message of up to 32000 bytes"))?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let saved: Option<String> = tx.query_row("SELECT r.job FROM worker_runs r JOIN projects p ON p.id=r.project_id WHERE r.id=?1 AND r.finished_at IS NULL AND r.stop_requested=0 AND p.hidden_at IS NULL", [run], |r| r.get(0)).optional()?;
-        let job: Job = serde_json::from_str(&saved.ok_or_else(|| {
-            Error::conflict(
-                "This agent stopped or is no longer available. Refresh before steering.",
-            )
-        })?)?;
-        let issue = get_issue(&tx, &job.project.id, job.number(), false)?;
-        if !matches!(issue.state.as_str(), "open" | "ready")
-            || issue.assignee.as_deref() != Some(&job.actor.id)
-        {
-            return Err(Error::conflict(
-                "The issue owner changed. Refresh before steering.",
-            ));
-        }
-        let existing: Option<Value> = tx.query_row("SELECT run_id,scope,text,state,error FROM agent_steering WHERE request_id=?1", [request], |r| Ok(json!({"run":r.get::<_,String>(0)?,"scope":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?,"state":r.get::<_,String>(3)?,"error":r.get::<_,Option<String>>(4)?}))).optional()?;
-        if let Some(existing) = existing {
-            if existing["run"] != run || existing["scope"] != scope || existing["text"] != text {
-                return Err(Error::conflict(
-                    "Steering request ID was already used for another instruction",
-                ));
-            }
-            return Ok(
-                json!({"ok":true,"request_id":request,"state":existing["state"],"error":existing["error"]}),
-            );
-        }
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM agent_steering WHERE run_id=?1 AND state IN ('queued','sending')",
-            [run],
-            |r| r.get(0),
-        )?;
-        if count >= 16 {
-            return Err(Error::conflict(
-                "Wait for queued instructions to reach this agent before sending more.",
-            ));
-        }
-        let mut issue_body = None;
-        let mut boss = job.actor.clone();
-        boss.id = "human:boss".into();
-        boss.kind = "human".into();
-        boss.session_id = None;
-        tx.execute("INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,last_seen=excluded.last_seen", params![boss.id,serde_json::to_string(&boss)?,crate::issues::worker::now()])?;
-        if scope == "issue" {
-            let operation: Operation = serde_json::from_value(
-                json!({"action":"edit","number":job.number(),"body":format!("{}\n\n{}",issue.body.trim_end(),text),"add_labels":[],"remove_labels":[],"if_version":issue.version}),
-            )?;
-            mutate(
-                &tx,
-                &job.project,
-                &boss,
-                &operation,
-                crate::issues::worker::now(),
-            )?;
-            issue_body = Some(get_issue(&tx, &job.project.id, job.number(), false)?.body);
-        } else if scope == "project" {
-            let settings = registry::project_settings(&tx, &job.project)?;
-            let operation: Operation = serde_json::from_value(
-                json!({"action":"configure_project","prompt":format!("{}\n\n{}",settings["prompt"].as_str().unwrap().trim_end(),text),"if_version":settings["version"]}),
-            )?;
-            registry::execute(&tx, &job.project, &operation, Some(&boss))?;
-        }
-        tx.execute("INSERT INTO agent_steering(request_id,run_id,scope,text,created_at,issue_body) VALUES(?1,?2,?3,?4,?5,?6)", params![request,run,scope,text,crate::issues::worker::now(),issue_body])?;
+        let runs = serde_json::to_string(runs)?;
+        tx.execute("INSERT OR IGNORE INTO agent_steering(request_id,run_id,scope,text,created_at)
+            SELECT 'broadcast:'||?1||':'||r.id,r.id,'broadcast',?2,?3 FROM json_each(?4) target
+            JOIN worker_runs r ON r.id=target.value JOIN issues i ON i.project_id=r.project_id AND i.number=r.issue_number
+            JOIN projects p ON p.id=r.project_id WHERE r.finished_at IS NULL AND r.stop_requested=0
+            AND i.state IN ('open','ready') AND i.assignee=r.actor_id AND i.deleted_at IS NULL AND p.hidden_at IS NULL",
+            params![id,text,crate::issues::worker::now(),runs])?;
+        let queued: i64 = tx.query_row("SELECT count(*) FROM agent_steering WHERE request_id IN
+            (SELECT 'broadcast:'||?1||':'||value FROM json_each(?2)) AND scope='broadcast' AND text=?3 AND state IN ('queued','sending','delivered')",
+            params![id,runs,text], |r|r.get(0))?;
         tx.commit()?;
-        Ok(json!({"ok":true,"request_id":request,"state":"queued"}))
+        Ok(json!({"ok":true,"queued":queued}))
     }
 
-    pub(crate) fn worker_steering(&self, run: &str) -> Result<Option<Value>> {
-        if let Err(error) = assignments::queue_steering(&self.db, run)
-            && error.code != "database_busy"
-        {
-            return Err(error);
-        }
+    pub(crate) fn pending_broadcast(&self, run: &str) -> Result<Option<Value>> {
         pending(&self.db, run)
     }
-    pub(crate) fn worker_steering_result(
+    pub(crate) fn broadcast_result(
         &self,
         request: &str,
         state: &str,
         error: Option<&str>,
     ) -> Result<bool> {
         let changed = self.db.execute(
-            // Automatic snapshots already live in the watcher record. Keep the
-            // delivery receipt, but release its payload once acknowledged.
-            "UPDATE agent_steering SET state=?2,error=?3,text=CASE WHEN ?2='delivered' AND substr(request_id,1,7)='github:' THEN '' ELSE text END WHERE request_id=?1 AND (?2<>'sending' OR state='queued')",
+            "UPDATE agent_steering SET state=?2,error=?3 WHERE request_id=?1 AND scope='broadcast' AND (?2<>'sending' OR state='queued')",
             params![request, state, error],
         )?;
         Ok(changed != 0)
@@ -135,7 +70,7 @@ impl Store {
 }
 
 fn pending(db: &Connection, run: &str) -> Result<Option<Value>> {
-    Ok(db.query_row("SELECT request_id,text,scope,issue_body FROM agent_steering WHERE run_id=?1 AND state='queued' ORDER BY created_at,rowid LIMIT 1", [run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"text":r.get::<_,String>(1)?,"scope":r.get::<_,String>(2)?,"issue_body":r.get::<_,Option<String>>(3)?}))).optional()?)
+    Ok(db.query_row("SELECT request_id,text FROM agent_steering WHERE run_id=?1 AND state='queued' AND scope='broadcast' ORDER BY created_at,rowid LIMIT 1", [run], |r| Ok(json!({"request_id":r.get::<_,String>(0)?,"text":r.get::<_,String>(1)?}))).optional()?)
 }
 
 #[cfg(test)]
@@ -170,26 +105,6 @@ mod migration_tests {
             db,
             attachment_root: std::env::temp_dir(),
         };
-        let queued = pending(&store.db, "run").unwrap().unwrap();
-        assert_eq!(queued["request_id"], "message");
-        assert_eq!(queued["scope"], "issue");
-        assert_eq!(queued["text"], "Keep this instruction");
-        assert!(queued["issue_body"].is_null());
-        store
-            .worker_steering_result("message", "delivered", None)
-            .unwrap();
-        assert_eq!(
-            pending(&store.db, "run").unwrap().unwrap()["issue_body"],
-            "Saved issue body"
-        );
-        store
-            .worker_steering_result("new", "rejected", Some("Scheduling changed"))
-            .unwrap();
-        assert!(
-            !store
-                .worker_steering_result("new", "sending", None)
-                .unwrap()
-        );
         assert!(pending(&store.db, "run").unwrap().is_none());
     }
 }

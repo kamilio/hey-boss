@@ -1,5 +1,7 @@
 # Dependency notices during rolling upgrades
 
+When an upstream task needs more work, the current scheduler records an issue comment. It does not message the running agent.
+
 Installing a new executable does not replace an active worker process. Older
 workers can keep their sessions and use the shared SQLite service, but their
 compiled scheduler still applies the old sibling-order rule. Before this guard,

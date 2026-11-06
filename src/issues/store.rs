@@ -3337,9 +3337,10 @@ fn mutate(
                 action = "claimed";
                 data = json!({"previous_assignee":issue.assignee,"assignee":target,"forced":force});
                 issue.assignee = Some(target.into());
-            }
-            if matches!(operation, Operation::Claim { .. }) {
-                assignments::acknowledge_claim(db, &project.id, number, actor)?;
+                // A repeated claim by the same thread cannot acknowledge a later watcher event.
+                if matches!(operation, Operation::Claim { .. }) {
+                    assignments::acknowledge_claim(db, &project.id, number, actor)?;
+                }
             }
         }
         Operation::Unassign { force: false, .. }

@@ -21,13 +21,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         // Darwin's default temp directory leaves too little room for Unix sockets.
-        let root = PathBuf::from("/tmp").join(format!(
-            "hb-native-runtime-{}-{}-{}",
+        let root = std::env::current_dir().unwrap().join(format!(
+            ".fleet-{}-{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos(),
             SERIAL.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&root).unwrap();
@@ -1140,7 +1136,7 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
         thread::sleep(Duration::from_millis(50));
     }
     let request = serde_json::json!({"kind":"takeover","host":"local","run":run["id"]});
-    let call = || {
+    let call = |request: &Value| {
         let mut stream = UnixStream::connect(f.root.join("fleet.sock")).unwrap();
         stream
             .set_read_timeout(Some(Duration::from_secs(15)))
@@ -1151,7 +1147,14 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
         stream.read_to_end(&mut bytes).unwrap();
         serde_json::from_slice::<Value>(&bytes).unwrap()
     };
-    let first = call();
+    let broadcast =
+        call(&serde_json::json!({"kind":"broadcast","text":"Two-agent fixture message"}));
+    assert_eq!(
+        (broadcast["total"].as_u64(), broadcast["queued"].as_u64()),
+        (Some(2), Some(2)),
+        "{broadcast}"
+    );
+    let first = call(&request);
     assert_eq!(first["ok"], true);
     assert_eq!(first["stopped"], false);
     assert!(first["resume_command"].is_null());
@@ -1183,7 +1186,7 @@ fn takeover_stops_only_selected_agent_and_keeps_issue_out_of_pickup() {
     ]);
     assert_eq!(issue["issue"]["assignee"], "human:boss");
     assert_eq!(issue["issue"]["state"], "open");
-    let resumed = call();
+    let resumed = call(&request);
     assert_eq!(resumed["stopped"], true);
     let command = resumed["resume_command"].as_str().unwrap();
     assert!(command.contains(f.root.to_str().unwrap()));
@@ -1310,29 +1313,8 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
     );
     let request =
         serde_json::json!({"version":1,"kind":"takeover","id":"takeover-fixture","run":run["id"]});
-    let steering = serde_json::json!({"version":1,"kind":"steer","id":"steer-fixture","request_id":"companion-steering","run":run["id"],"scope":"issue","text":"Check keyboard navigation"});
-    // This fixture changes a running standalone worker into a companion without
-    // a supervisor pull. Issue-scoped steering must not acknowledge an edit
-    // until the synthetic supervisor has supplied its allocation.
-    writeln!(input, "{steering}").unwrap();
-    input.flush().unwrap();
-    line.clear();
-    output.read_line(&mut line).unwrap();
-    let denied: Value = serde_json::from_str(&line).unwrap();
-    assert_eq!(denied["result"]["ok"], false);
-    assert!(
-        denied["result"]["error"]
-            .as_str()
-            .unwrap()
-            .contains("Changes were not saved")
-    );
+    let steering = serde_json::json!({"version":1,"kind":"broadcast_delivery","id":"steer-fixture","request_id":"companion-steering","runs":[run["id"]],"text":"Check keyboard navigation"});
     let db = rusqlite::Connection::open(f.root.join("issues.db")).unwrap();
-    assert_eq!(
-        db.query_row("SELECT count(*) FROM agent_steering", [], |r| r
-            .get::<_, i64>(0))
-            .unwrap(),
-        0
-    );
     db.execute("INSERT INTO fleet_allocations SELECT project_id,number,node FROM issues CROSS JOIN fleet_meta WHERE number=1 AND fleet_meta.id=1", []).unwrap();
     for _ in 0..2 {
         writeln!(input, "{steering}").unwrap();
@@ -1340,8 +1322,9 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
         line.clear();
         output.read_line(&mut line).unwrap();
         let response: Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(response["kind"], "steer");
+        assert_eq!(response["kind"], "broadcast_delivery");
         assert_eq!(response["id"], "steer-fixture");
+        assert_eq!(response["result"]["queued"], 1);
         assert_eq!(response["result"]["ok"], true);
     }
     assert_eq!(
@@ -1353,7 +1336,7 @@ fn companion_takeover_acknowledges_stop_and_journals_boss_assignment() {
     let body: String = db
         .query_row("SELECT body FROM issues WHERE number=1", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(body.matches("Check keyboard navigation").count(), 1);
+    assert_eq!(body.matches("Check keyboard navigation").count(), 0);
     for stopped in [false, true] {
         writeln!(input, "{request}").unwrap();
         input.flush().unwrap();

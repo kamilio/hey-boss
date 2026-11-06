@@ -674,13 +674,13 @@ fn takeover_requires_csrf_and_json_before_contacting_the_fleet() {
 }
 
 #[test]
-fn steering_requires_csrf_json_and_same_origin() {
+fn broadcast_requires_csrf_json_and_same_origin() {
     let web = Web::start();
-    let body = br#"{"host":"local","run":"synthetic","scope":"session","text":"Focus","request_id":"test"}"#;
+    let body = br#"{"text":"Focus"}"#;
     assert_eq!(
         web.http(
             "POST",
-            "/api/fleet/steer",
+            "/api/fleet/broadcast",
             &[("Content-Type", "application/json")],
             body
         )
@@ -690,7 +690,7 @@ fn steering_requires_csrf_json_and_same_origin() {
     assert_eq!(
         web.http(
             "POST",
-            "/api/fleet/steer",
+            "/api/fleet/broadcast",
             &[
                 ("X-Hey-Boss-CSRF", &web.token),
                 ("Content-Type", "text/plain")
@@ -703,7 +703,7 @@ fn steering_requires_csrf_json_and_same_origin() {
     assert_eq!(
         web.http(
             "POST",
-            "/api/fleet/steer",
+            "/api/fleet/broadcast",
             &[
                 ("X-Hey-Boss-CSRF", &web.token),
                 ("Content-Type", "application/json"),
@@ -1795,15 +1795,7 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
     web.ok(json!({"action":"configure_project","prompt":"Implement {{number}}.","prs_enabled":true,"prompt_overrides":overrides}));
     let settings = web.ok(json!({"action":"project_settings"}));
     assert_eq!(settings["prompt_overrides"], overrides);
-    for key in [
-        "layout",
-        "handoff",
-        "resume",
-        "steering",
-        "dependency_update",
-        "prompt_update",
-        "goal_continue",
-    ] {
+    for key in ["layout", "handoff", "resume", "goal_continue"] {
         assert!(settings["prompt_defaults"][key].is_string(), "{key}");
         assert!(
             settings["prompt_sections"]
@@ -1813,7 +1805,15 @@ fn prompt_layout_and_context_defaults_round_trip_and_reset() {
                 .any(|section| section["key"] == key)
         );
     }
-    for key in ["dependencies", "plan_document", "subtask", "github"] {
+    for key in [
+        "dependencies",
+        "plan_document",
+        "subtask",
+        "github",
+        "steering",
+        "dependency_update",
+        "prompt_update",
+    ] {
         assert!(settings["prompt_defaults"].get(key).is_none());
         assert!(
             !settings["prompt_sections"]

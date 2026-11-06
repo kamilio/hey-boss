@@ -14,16 +14,6 @@ link. Repeating the link reuses it; a second issue for that session is rejected.
 Links require an unassigned, unreserved draft with no worker. They do not change
 claims, source, worker settings, or the session.
 
-After saving an ordinary issue comment, its author or the human can deliver its
-exact text with `agent coordinate PATH --issue NUMBER --comment COMMENT_ID`.
-The issue must belong to that session or be its approved draft. Delivery requires
-the existing configured owning server below. No worker or thread is started.
-Receipts are retained on the owning device; retries never resend an acknowledged
-or uncertain delivery. `unknown` means inspect the conversation before taking
-further action, not successful delivery. A missing endpoint fails before sending.
-Run the command on the session's device; it does not redirect through a remote
-issue override. `--json` exposes the owner, evidence, issue absence and outcome.
-
 Expand a Codex row and click **Connect controls**. The inline panel displays the
 saved objective and goal status, with **Re-enable goal** or **Pause goal**.
 Re-enabling sends `thread/goal/set` with status `active`; pausing sends status
@@ -31,12 +21,6 @@ Re-enabling sends `thread/goal/set` with status `active`; pausing sends status
 goal and accounting. No goal is cleared. If Codex refuses to reactivate a
 terminal/budget-limited goal, the rejection is displayed instead of creating a
 replacement or resetting its budget.
-
-When the thread accepts input and has an active turn, write an instruction and
-click **Send instruction** or press **⌘Return**. Acknowledgement clears the draft;
-errors preserve it. Idle sessions are not automatically resumed or started.
-If a connection drops during an action, refresh controls and check its state
-before retrying: delivery may have happened before the acknowledgement was lost.
 
 ## Configure the owning server
 
