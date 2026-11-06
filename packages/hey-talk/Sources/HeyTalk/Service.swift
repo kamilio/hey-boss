@@ -906,7 +906,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility, retry: retry) }
             else if let error = info["error"] as? String { overlay?.error(copiedOriginal ? "Raw transcript copied. " + error : error, retry: retry) }
-            if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated"].contains(delivery) {
+            if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated", "vocabulary_added"].contains(delivery) {
                 restartAutomatic(id: id)
             }
         }
@@ -944,6 +944,22 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let originalField = field
             save(action) {
                 guard self.paste else { finish("stdout"); return }
+                if case .addVocabularyTerm(let term) = action {
+                    self.refreshVocabulary(["add", term]) { result in
+                        guard current() else { return }
+                        guard result["ok"] as? Bool == true else {
+                            let message = result["error"] as? String ?? "Couldn’t save vocabulary."
+                            info["error"] = message; info["status"] = "failed"
+                            response["ok"] = false; response["error"] = message
+                            finish("history"); return
+                        }
+                        self.commands.executed(action)
+                        self.overlay?.confirmAction(action)
+                        lastDelivery = "vocabulary_added"
+                        next("vocabulary_added")
+                    }
+                    return
+                }
                 if case .slack(let command) = action {
                     Task { @MainActor in
                         do {
@@ -995,7 +1011,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                }
                                return app
                            },
-                           package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : slackTeam != nil ? .slack : nil, canClear: paste && field != nil,
+                           package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : slackTeam != nil ? .slack : nil, canClear: paste && field != nil, canAddVocabularyTerm: paste,
                            recent: transcriptionSource == "microphone" ? previousCommands : [],
                            perform: paste ? perform : nil) { result in
             guard current() else { return }

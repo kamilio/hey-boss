@@ -12,7 +12,7 @@ struct Vocabulary {
         self.file = file; self.defaults = defaults
     }
 
-    private static func term(_ value: String) throws -> String {
+    static func term(_ value: String) throws -> String {
         let forbidden = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "/:"))
         guard value.rangeOfCharacter(from: forbidden) == nil else {
             throw TalkError("Vocabulary terms cannot contain control characters, slashes, or colons.")

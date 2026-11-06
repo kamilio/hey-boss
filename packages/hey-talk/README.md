@@ -289,6 +289,8 @@ reports capture latency, inference duration, and real-time factor. `status
 --json` exposes readiness, measured microphone levels, hotkey registration,
 and process IDs. `last` reads the most recent transcript, including after restart.
 
+With AI correction on, say “Add word: Kunal Tum” in any app. Hey Talk saves “Kunal Tum” as one vocabulary entry and shows the spelling without pasting or submitting anything. File transcription and `--no-paste` leave the vocabulary unchanged.
+
 Manage vocabulary hints from the CLI:
 
 ```sh
