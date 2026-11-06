@@ -1,5 +1,6 @@
 // Real SQLite/API/CLI round trip with an isolated web service and Chrome.
 import assert from 'node:assert/strict';
+import {checkExplorer} from './file_explorer_checks.mjs';
 import {mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
 import {resolve, join} from 'node:path';
 import {spawn, spawnSync} from 'node:child_process';
@@ -84,6 +85,7 @@ try {
     check(await page.locator('#project-settings-close').isVisible(),'Close remains accessible');
     await page.screenshot({path:resolve('.config-qa',`activity-${width}-${colorScheme}.png`)});
   }
+  await checkExplorer(page,root,run,info.url);
   check(errors.length===0,'No browser exceptions: '+errors.join('; '));
   console.log(JSON.stringify({status:'passed',checks:checks.length,details:checks},null,2));
 } finally {

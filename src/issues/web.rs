@@ -935,6 +935,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/global-settings.js"),
             )),
+            "/file-explorer.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/file-explorer.js"))),
+            "/file-explorer.css" => Some(("text/css; charset=utf-8", include_bytes!("web/file-explorer.css"))),
             "/project-settings.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/project-settings.js"),
@@ -1124,6 +1126,8 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             "/api/fleet/configuration",
             "/api/admin/preview",
             "/api/skills",
+            "/api/pages/files",
+            "/api/prompts/open",
             "/api/pages/delete",
             "/api/pages/share",
             "/api/pages/sync",
@@ -1150,6 +1154,38 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/pages/files" { return json_response(pages::edit(app, &bytes)?); }
+        if path == "/api/prompts/open" {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Open {
+                project: String,
+                key: String,
+            }
+            let open: Open = serde_json::from_slice(&bytes)?;
+            let Backend::Local(database) = &app.backend else {
+                return Err(Error::invalid("Use the browser editor for remote projects."));
+            };
+            if !cfg!(target_os = "macos")
+                || !request.remote_addr().is_some_and(|addr| addr.ip().is_loopback())
+                || header(request, "host").and_then(|h| local_http::authority(h, &app.local_ports)).is_none()
+            {
+                return Err(Error::invalid("Open the native editor from the local Mac dashboard."));
+            }
+            let value = app.execute(Some(open.project), Operation::ProjectSettings, None)?;
+            let project: Project = serde_json::from_value(value["project"].clone())?;
+            let path = super::config_files::prompt_file(database, &project, &open.key)?;
+            return json_response(crate::notices::execute(&crate::notices::Action::OpenArtifact {
+                project: project.id,
+                title: Some(format!("{} · {}.md", project.name, open.key)),
+                file: Some(path.to_string_lossy().into_owned()),
+                id: None,
+                host: None,
+                body: None,
+                issue: None,
+                skill_session: None,
+            })?);
         }
         if path == "/api/pages/delete" { return json_response(pages::delete(app, &bytes)?); }
         if path == "/api/pages/share" { return json_response(pages::share(app, &bytes)?); }

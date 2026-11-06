@@ -15,3 +15,5 @@ Unchanged default prompt sections remain inherited. Editing a section creates an
 `hey-boss config log`, `diff REVISION`, `undo REVISION`, and `restore REVISION` expose the same history. See `--help` for options.
 
 Concurrent saves use the existing deterministic last-write-wins replication order. Both revisions remain available, including offline edits. History begins with changes made after this feature is installed. Filesystem saves identify the local account and machine; CLI/API operations can identify the submitting agent. A watcher cannot identify the process that originally edited a file.
+
+On the Issues dashboard, **Prompts** opens the selected project's Markdown files. Search by filename or purpose, select a file, then save with ⌘S or Ctrl+S. **Restore default** removes a project override. Workers use fixed filenames, so prompts cannot be renamed or moved. The local Mac dashboard also offers **Open in Mac editor**, which opens the managed copy in the native Markdown editor. Native saves follow the same filesystem sync and appear in **Activity**.

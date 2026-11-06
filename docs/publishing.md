@@ -22,6 +22,8 @@ up to 10,000 files / 256 MiB. HTML runs in an opaque-origin iframe: scripts work
 but cannot access hey-boss's session, APIs, or browser storage. No build server,
 server-side functions, or public DNS are involved.
 
+**Files** in the page viewer opens the published source tree. Open folders or search across paths, edit UTF-8 Markdown, HTML and other supported text files up to 1 MiB, and choose **Save & publish**. Move or delete individual assets without downloading the site. Moves do not rewrite links inside files. The root `index.html` must stay in place. Each change uses the usual publication and external auto-sync settings; a stale editor cannot replace a newer local publication.
+
 Downloads restore the entire original file tree into a new directory and never
 overwrite an existing destination. **Delete everywhere** removes the named page,
 its old versions, unshared files, and their journal payloads. Offline machines

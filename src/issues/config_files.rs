@@ -395,6 +395,30 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
     Ok(json!({"ok":true,"project":project,"directory":dir,"revision":revision,"changed":changed}))
 }
 
+fn automatic_copy(configs: &Path, project: &Project) -> PathBuf {
+    let slug = project
+        .id
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let slug = &slug[..slug.len().min(80)];
+    let hash = project_config::digest(&json!(project.id));
+    configs.join(format!("{slug}-{}", &hash[..16]))
+}
+
+pub(super) fn prompt_file(path: &Path, project: &Project, key: &str) -> Result<PathBuf> {
+    if key != "worker" && worker::prompt_defaults().get(key).is_none() {
+        return Err(Error::invalid("Unknown project prompt"));
+    }
+    let configs = path.parent().unwrap().join("project-configs");
+    let root = automatic_copy(&configs, project);
+    directory(&configs)?;
+    directory(&root)?;
+    sync_root(path, &root, project)?;
+    Ok(root.join(".hey-boss/prompts").join(format!("{key}.md")))
+}
+
 pub(crate) fn reconcile(path: &Path) -> Result<()> {
     let store = Store::open(path)?;
     let mut rows = store.db.prepare("SELECT c.path,p.id,p.name,c.error FROM project_config_checkouts c JOIN projects p ON p.id=c.project_id")?
@@ -410,15 +434,7 @@ pub(crate) fn reconcile(path: &Path) -> Result<()> {
         root.parent() != Some(&configs) || visible.contains(&project.id)
     });
     for project in projects.into_iter().filter(|p| visible.contains(&p.id)) {
-        let slug = project
-            .id
-            .split(|c: char| !c.is_ascii_alphanumeric())
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("-");
-        let slug = &slug[..slug.len().min(80)];
-        let hash = project_config::digest(&json!(project.id));
-        let root = configs.join(format!("{slug}-{}", &hash[..16]));
+        let root = automatic_copy(&configs, &project);
         rows.entry(root).or_insert((project, None));
     }
     for (root, (project, previous_error)) in rows {
