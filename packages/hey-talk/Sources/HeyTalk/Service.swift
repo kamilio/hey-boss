@@ -748,6 +748,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
             if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
+        if paste {
+            Paste.log.notice("Capture: target=\(self.target?.bundleIdentifier ?? "none", privacy: .public), field=\(self.startingInput != nil), return=\(self.returnToField)")
+        }
         idleRelease?.cancel(); hotkey?.captureEscape(true)
         let begin: () -> Void = {
             guard self.session.generation == id, self.session.phase == .recording || self.session.phase == .listening else { return }
@@ -880,6 +883,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         var info: [String: Any] = ["status": correctionEnabled ? "applied" : "off",
                                    "context_ms": context?.milliseconds ?? 0, "context_characters": context?.text?.count ?? 0]
         func report(_ delivery: String, _ reason: PasteBlockReason? = nil) {
+            if self.paste {
+                Paste.log.notice("Delivery: \(delivery, privacy: .public), reason=\(reason?.rawValue ?? "none", privacy: .public), correction=\(info["status"] as? String ?? "off", privacy: .public)")
+            }
             response["delivery"] = delivery; response["paste_block"] = reason?.rawValue
             if correctionEnabled { info["elapsed_ms"] = (ProcessInfo.processInfo.systemUptime - started) * 1000 }
             response["correction"] = info
@@ -955,10 +961,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     }
                     return
                 }
-                let focused = { originalField?.isFocused() ?? !needsField }
                 Paste.deliver(action, target: target, originalField: originalField,
                               shouldPressEnter: allowsSubmit,
-                              returnToField: self.returnToField ? originalField : nil, targetStillFocused: focused,
+                              returnToField: self.returnToField ? originalField : nil, needsField: needsField,
                               onWait: lastDelivery == nil && (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = (timer, action.text)
                                   self.hotkey?.captureEscape(true)
@@ -1040,6 +1045,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         pendingReply?(failure(message)); pendingReply = nil; scheduleRelease()
     }
     private func clearAutomatic() {
+        if waitingPaste != nil { Paste.log.notice("Pending paste cancelled") }
         waitingPaste = nil
         automatic = nil
         autoSubmitKey.passNextEnter = false

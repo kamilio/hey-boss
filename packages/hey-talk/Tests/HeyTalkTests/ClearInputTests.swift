@@ -43,7 +43,7 @@ final class ClearInputTests: XCTestCase {
                 else { fail("Scratch input lost focus or changed before tool \(actions.count + 1)"); return }
                 actions.append(action)
                 Paste.deliver(action, target: app, originalField: field, shouldPressEnter: { false },
-                              returnToField: nil, targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
+                              returnToField: nil, needsField: true, onWait: nil, isCurrent: { true }) { delivery, reason in
                     if let reason { fail("Delivery blocked: " + reason.rawValue); return }
                     if action == .clearInput { XCTAssertEqual(NSPasteboard.general.changeCount, board) }
                     next(delivery)

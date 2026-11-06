@@ -99,6 +99,75 @@ final class AutoDictationTests: XCTestCase {
         }
     }
 
+    func testReturnCanReopenAnExactDraftWithoutEnablingSavedThreadActions() {
+        let id = "80d9fef0-18a1-4f4b-b1d4-9b9defac6d1d"
+        let draft = "t3code://app/#/draft/" + id
+        XCTAssertEqual(FocusedInput.composerLink(draft)?.absoluteString, "t3code://threads/draft/" + id)
+        XCTAssertNil(FocusedInput.threadLink(draft))
+        for route in [draft + "?prompt=x", draft + "/extra", "t3code://app/#/draft/new"] {
+            XCTAssertNil(FocusedInput.composerLink(route))
+        }
+    }
+
+    @MainActor
+    func testLiveReturnToDraftAfterSwitchingThreads() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_RETURN_DRAFT_TEST"] == "1" else { throw XCTSkip("Requires a focused saved T3 thread") }
+        let initial = try XCTUnwrap(FocusedInput.current(bundleIDs: ["com.t3tools.t3code"]))
+        let back = try XCTUnwrap(initial.document.flatMap(FocusedInput.composerLink))
+        defer { NSWorkspace.shared.open(back) }
+        if !initial.canUseThreadActions {
+            XCTAssertTrue(Paste.post(18, flags: .maskCommand, to: initial.app.processIdentifier))
+            for _ in 0..<30 {
+                if FocusedInput.read(app: initial.app)?.canUseThreadActions == true { break }
+                try await Task.sleep(for: .milliseconds(50))
+            }
+        }
+        let start = try XCTUnwrap(FocusedInput.current(bundleIDs: ["com.t3tools.t3code"]))
+        let startLink = try XCTUnwrap(start.document.flatMap(FocusedInput.threadLink))
+        let opened = await start.openNewThread(project: nil, isCurrent: { true })
+        let draft = try XCTUnwrap(opened)
+        guard SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .newlines).isEmpty else {
+            throw XCTSkip("Requires an empty scratch draft")
+        }
+        NSWorkspace.shared.open(startLink)
+        for _ in 0..<30 {
+            if start.isFocused() { break }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard start.isFocused() else { return XCTFail("Did not leave the scratch draft") }
+        let marker = "Hey Talk return fixture " + UUID().uuidString
+        let board = NSPasteboard.general
+        let saved = (board.pasteboardItems ?? []).map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types { if let data = item.data(forType: type) { copy.setData(data, forType: type) } }
+            return copy
+        }
+        defer {
+            if board.string(forType: .string) == marker {
+                board.clearContents()
+                if !saved.isEmpty { board.writeObjects(saved) }
+            }
+        }
+        let done = expectation(description: "returned and posted paste")
+        var retry: Timer?
+        defer { retry?.invalidate() }
+        Paste.deliver(.paste(marker), target: draft.app, originalField: draft, shouldPressEnter: { false },
+                      returnToField: draft, needsField: true, onWait: { retry = $0 }, isCurrent: { true }) { delivery, reason in
+            XCTAssertEqual(delivery, "pasted"); XCTAssertNil(reason); done.fulfill()
+        }
+        await fulfillment(of: [done], timeout: 4)
+        for _ in 0..<20 {
+            if let actual = FocusedInput.read(app: draft.app), draft.isFocused(), actual == draft,
+               SpeechAX.string(actual.element, "AXValue").trimmingCharacters(in: .newlines) == marker {
+                XCTAssertTrue(Paste.post(6, flags: .maskCommand, to: draft.app.processIdentifier))
+                try await Task.sleep(for: .milliseconds(100))
+                return
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTFail("The scratch draft did not receive the paste")
+    }
+
     func testFocusGraceExpiresOnceAndResetsAfterReturningToAnInput() {
         var recording = AutoRecording(target: "composer", followsFocus: false)
         recording.focusChanged(nil, at: 10)
