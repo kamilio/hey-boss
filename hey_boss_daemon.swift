@@ -7415,14 +7415,26 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var activities: [ToolActivity] = []
     private var toolPanels: [NSButton: NSScrollView] = [:]
     struct Capture: Codable { let source: String; let text: String? }
+    private struct PlaybackInterruption: Codable {
+        let spoken: String
+        let unconfirmedUserTurn: String?
+        let unfinishedReply: String?
+    }
     private struct Message: Codable {
         var text: String
         let speaker: String
         var capture: Capture?
+        var interruptedAfter: PlaybackInterruption?
         var content: String {
-            guard let capture, let snapshot = capture.text else { return text }
+            var playback = ""
+            if let cutoff = interruptedAfter {
+                if let previous = cutoff.unconfirmedUserTurn { playback += "Previous user turn:\n" + previous + "\n\n" }
+                if let draft = cutoff.unfinishedReply { playback += "Unfinished reply draft:\n" + draft + "\n\n" }
+                playback += "Interrupted assistant audio (played through):\n" + (cutoff.spoken.isEmpty ? "[no words played]" : cutoff.spoken) + "\n\nUser:\n"
+            }
+            guard let capture, let snapshot = capture.text else { return playback + text }
             let quote = (capture.source + "\n" + snapshot).components(separatedBy: .newlines).map { "> " + $0 }.joined(separator: "\n")
-            return quote + "\n\n" + text
+            return playback + quote + "\n\n" + text
         }
     }
     let contextChip = NSButton()
@@ -7439,6 +7451,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let directory: URL?
         let thread: String?
         var activities: [ToolActivity]?
+        var interruptedAfter: PlaybackInterruption?
     }
     private let saveURL: URL
     private var messages: [Message] = []
@@ -7456,6 +7469,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var audio: ReviewAudio?
     var recording: Data?
     private var resumePlayback: Timer?
+    private var recordedClips: [Data] = []
+    private var transcripts: [String] = []
+    private var transcriptionID: UUID?
+    private var playedPassages = [String]()
+    private var playingPassage = ""
+    private var playingThrough = 0
+    private var interruptedAfter: PlaybackInterruption?
     var decoding: SFSpeechRecognitionTask?
     var timeout: Timer?
     var reply: Task<Void, Never>?
@@ -7713,6 +7733,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
+        interruptedAfter = nil
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
@@ -7758,9 +7779,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         return true
     }
     private var answering: Bool { phase == .thinking || phase == .speaking }
-    private var folderTurnAccepted = false
+    private var turnAccepted = false
     private var canListenNext: Bool {
-        audio != nil && answering && (turnDone || directory == nil || folderTurnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
+        audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
     }
     private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
     private func updateComposerActions() {
@@ -7784,10 +7805,19 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         input.stringValue = ""; respond(text)
     }
     private func interruptPlayback() {
-        guard reading else { return }
-        audio?.stopPlayback()
-        if let (field, _) = lit { highlight(field, nil) }
-        speech.removeAll(); reading = false
+        if reading {
+            audio?.stopPlayback()
+            if let (field, _) = lit { highlight(field, nil) }
+            speech.removeAll(); reading = false
+        }
+        if answering, audio != nil {
+            let partial = (playingPassage as NSString).substring(to: playingThrough)
+            let spoken = (playedPassages + [partial]).filter { !$0.isEmpty }.joined(separator: " ")
+            interruptedAfter = PlaybackInterruption(spoken: spoken,
+                unconfirmedUserTurn: turnDone || turnAccepted ? nil : messages.last(where: { $0.speaker == "You" })?.content,
+                unfinishedReply: !turnDone && !stream.isEmpty ? stream : nil)
+            save()
+        }
     }
     func controlTextDidChange(_ notification: Notification) {
         if (input.currentEditor() as? NSTextView)?.hasMarkedText() == true { return }
@@ -7813,9 +7843,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func voiceFailed(_ message: String) {
         guard let audio else { return }
-        if phase == .decoding {
-            // The submitted recording is already in memory.
-            audio.stop(); state(.decoding, "Microphone off · Finishing transcription…")
+        if phase == .decoding || (phase == .recording && recording?.isEmpty == false) {
+            audio.stop()
+            if phase == .recording { endRecording("microphone disconnected") }
+            state(.decoding, "Microphone off · Finishing transcription…")
         } else if answering {
             interruptPlayback(); audio.stop(); self.audio = nil
             if !turnDone { publish(final: false) }
@@ -7840,8 +7871,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.resumePlayback = nil
                 self.audio?.resume()
             }
-        case .began where phase == .listening || canListenNext:
-            if answering { listenForNextTurn() }
+        case .began where phase == .listening || phase == .decoding || answering:
+            if answering {
+                interruptPlayback()
+                if !turnDone { cancelTurn() }
+            }
             // The detector sends the buffered opening frames immediately after began.
             recording = Data(); state(.recording, "Pause or Hyper+R to send · Esc to cancel")
         case .pcm(let pcm) where phase == .recording:
@@ -7852,27 +7886,48 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     private func endRecording(_ reason: String) {
-        guard let audio, let samples = recording, let recognizer else { stop("Dictation unavailable."); return }
+        guard let samples = recording else { return }
         ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
         recording = nil; state(.decoding, reason == "duration limit" ? "Two-minute limit reached · Transcribing…" : "Transcribing…")
-        let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
-            guard let self, let audio, self.audio === audio else { return }
-            self.timeout?.invalidate(); self.decoding = nil
+        recordedClips.append(samples)
+        transcribeNext()
+    }
+    private func transcribeNext() {
+        guard transcriptionID == nil, let audio else { return }
+        guard !recordedClips.isEmpty else {
+            guard recording == nil else { return }
+            let text = transcripts.joined(separator: "\n")
+            transcripts.removeAll()
             if audio.stopped { self.audio = nil }
+            if text.isEmpty { state(audio.stopped ? .idle : .listening, audio.stopped ? "Microphone off" : "Listening") }
+            else { respond(text) }
+            return
+        }
+        guard let recognizer else { stop("Dictation unavailable."); return }
+        let samples = recordedClips.removeFirst(), id = UUID()
+        transcriptionID = id
+        let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
+            guard let self, let audio, self.audio === audio, self.transcriptionID == id else { return }
+            self.transcriptionID = nil
+            self.timeout?.invalidate(); self.timeout = nil; self.decoding = nil
             switch result {
             case .failure(let error):
                 let failure = error as NSError
                 ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcription failed \(failure.domain, privacy: .public) \(failure.code)")
-                self.stop(error.localizedDescription)
+                self.append(error.localizedDescription, from: "Conversation")
             case .success(let text):
                 ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
-                if text.isEmpty { self.state(audio.stopped ? .idle : .listening, audio.stopped ? "No speech recognized · Microphone off" : "Listening") }
-                else { self.respond(text) }
+                if !text.isEmpty { self.transcripts.append(text) }
             }
+            self.transcribeNext()
         }
         do {
             let buffer = try recordedBuffer(samples, format: audio.format)
-            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in self?.stop("Dictation timed out.") }
+            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
+                guard let self, self.transcriptionID == id else { return }
+                self.reply?.cancel(); self.reply = nil; self.decoding?.cancel()
+                finish(.failure(StorageError(description: "Dictation timed out.")))
+            }
             reply = Task { @MainActor [weak self] in
                 if SpeechTranscriber.isAvailable, let locale = await SpeechTranscriber.supportedLocale(equivalentTo: recognizer.locale),
                    await SpeechTranscriber.installedLocales.contains(locale), !Task.isCancelled,
@@ -7950,9 +8005,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func respond(_ text: String) {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
-        turnDone = false; lastMessage = nil; folderTurnAccepted = false
+        playedPassages.removeAll(); playingPassage = ""; playingThrough = 0
+        turnDone = false; lastMessage = nil; turnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
-        append(text, from: "You", capture: capture); rememberTurn(); state(.thinking, "Thinking…")
+        append(text, from: "You", capture: capture)
+        messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
+        rememberTurn(); state(.thinking, "Thinking…")
         let question = messages.last!.content
         if let directory {
             save()
@@ -8119,14 +8177,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard !reading else { return }
         if let audio, !speech.isEmpty {
             let part = speech.removeFirst()
-            reading = true
+            reading = true; playingPassage = part.text; playingThrough = 0
             let speaksCount = part.text.utf16.count != part.span.length
             audio.speak(part.text, following: speech.prefix(3).map(\.text), highlight: { [weak self] word in
-                guard let self, NSMaxRange(word) <= part.span.length else { return }
+                guard let self, NSMaxRange(word) <= part.text.utf16.count else { return }
+                self.playingThrough = NSMaxRange(word)
                 let span = speaksCount ? part.span : NSRange(location: part.span.location + word.location, length: word.length)
                 if self.lit?.0 !== part.label || self.lit?.1 != span { self.highlight(part.label, span) }
             }, finished: { [weak self] in
                 guard let self else { return }
+                self.playedPassages.append(part.text); self.playingPassage = ""; self.playingThrough = 0
                 self.highlight(part.label, nil); self.reading = false; self.playNext()
             })
         } else if turnDone {
@@ -8204,13 +8264,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let id = data["id"] as? String ?? ""
         switch kind {
         case "AgentAccepted":
+            turnAccepted = true
             updateComposerActions(); save()
         case "AgentStatus":
             if phase != .speaking, let text = data["text"] as? String { state(.thinking, text) }
         case "Session":
             thread = data["id"] as? String
-            folderTurnAccepted = thread != nil && data["accepted"] as? Bool == true
-            updateComposerActions(); save(unfinishedWorkspace: folderTurnAccepted)
+            turnAccepted = thread != nil && data["accepted"] as? Bool == true
+            updateComposerActions(); save(unfinishedWorkspace: turnAccepted)
         case "TextDelta":
             if let delta = data["text"] as? String { stream += delta; if audio == nil || messageLabel == nil || delta.rangeOfCharacter(from: .newlines) != nil { publish(final: false) } }
         case "Message":
@@ -8360,7 +8421,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         for index in activities.indices where activities[index].state == "Running" {
             activities[index].state = "Interrupted"; renderTool(activities[index])
         }
-        let unfinishedWorkspace = directory != nil && answering && !turnDone && (folderTurnAccepted || lastMessage?.isEmpty == false)
+        let unfinishedWorkspace = directory != nil && answering && !turnDone && (turnAccepted || lastMessage?.isEmpty == false)
         let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
         save()
@@ -8376,6 +8437,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
     }
     func stop(_ message: String) {
+        if answering { interruptPlayback() }
+        transcriptionID = nil; recordedClips.removeAll(); transcripts.removeAll()
         cancelTurn()
         decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
         state(.idle, message)
@@ -8394,14 +8457,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, activities: activities)
+                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, activities: activities, interruptedAfter: interruptedAfter)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
         } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
     }
     private func apply(_ saved: Saved) {
-        directory = saved.directory; thread = saved.thread
+        directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
         pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
         activities = (saved.activities ?? []).map { activity in
             var value = activity
@@ -8410,6 +8473,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         for message in saved.messages {
             append(message.text, from: message.speaker, capture: message.capture)
+            messages[messages.count - 1].interruptedAfter = message.interruptedAfter
             for activity in activities where activity.afterMessage == messages.count { renderTool(activity) }
         }
         refreshScope()
