@@ -151,11 +151,18 @@ func runInferenceWorker(model: String, library: String, vocabulary: String) thro
         // Snapshot the latest list for this utterance; updates never reload the model
         // or interrupt an in-flight decode.
         let hotwords = try terms.words().joined(separator: "/")
-        guard let result = samples.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count), hotwords) }) else {
-            throw TalkError("Orukeet could not decode audio")
+        var remaining = samples[...]
+        var parts: [String] = []
+        while !remaining.isEmpty {
+            let chunk = AudioCapture.recognitionChunk(remaining)
+            guard let result = chunk.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count), hotwords) }) else {
+                throw TalkError("Orukeet could not decode audio")
+            }
+            let text = String(cString: result).trimmingCharacters(in: .whitespacesAndNewlines)
+            ht_free_text(result)
+            if !text.isEmpty { parts.append(text) }
+            remaining = remaining[chunk.endIndex...]
         }
-        let text = String(cString: result)
-        ht_free_text(result)
-        try Wire.write(Wire.json(["text": text]), to: STDOUT_FILENO)
+        try Wire.write(Wire.json(["text": parts.joined(separator: " ")]), to: STDOUT_FILENO)
     }
 }

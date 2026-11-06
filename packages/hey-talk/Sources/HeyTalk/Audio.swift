@@ -472,6 +472,17 @@ final class AudioCapture {
         return result
     }
 
+    // A long single pass can silently omit speech. Cut near 30 seconds at low energy.
+    static func recognitionChunk(_ samples: ArraySlice<Float>) -> ArraySlice<Float> {
+        let limit = samples.startIndex + 30 * PCMFrame.rate
+        guard samples.endIndex > limit else { return samples }
+        let cut = stride(from: limit - PCMFrame.rate, through: limit - 160, by: 160)
+            .min { a, b in
+                samples[a..<a+160].reduce(0) { $0 + abs($1) } < samples[b..<b+160].reduce(0) { $0 + abs($1) }
+            }! + 80
+        return samples[..<cut]
+    }
+
     static func readFileChunks(_ file: AVAudioFile, consume: ([Float]) throws -> Void) throws {
         guard file.length > 0 else { throw TalkError("Audio file is empty") }
         let format = file.processingFormat
@@ -495,13 +506,10 @@ final class AudioCapture {
             if let channel = output.floatChannelData?[0] {
                 result.append(contentsOf: UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
             }
-            if result.count >= 30 * PCMFrame.rate {
-                let cut = stride(from: result.count - PCMFrame.rate, to: result.count - 160, by: 160)
-                    .min { a, b in
-                        result[a..<a+160].reduce(0) { $0 + abs($1) } < result[b..<b+160].reduce(0) { $0 + abs($1) }
-                    }! + 80
-                try consume(Array(result[..<cut]))
-                result.removeFirst(cut)
+            if result.count > 30 * PCMFrame.rate {
+                let chunk = recognitionChunk(result[...])
+                try consume(Array(chunk))
+                result.removeFirst(chunk.count)
             }
             if status == .endOfStream { break }
             if status == .error { throw TalkError("Cannot decode audio file") }

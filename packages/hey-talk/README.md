@@ -373,6 +373,7 @@ A separate disposable process runs Orukeet v0.1.0 INT8 through sherpa-onnx and
 ONNX Runtime. Private pipes carry PCM; the CLI uses a same-user Unix socket
 with mode 0600. Hey Talk opens no network listener. Recognition runs locally;
 optional AI correction sends text through the local proxy as described above.
+Long dictations are transcribed in sections of at most 30 seconds, split near quiet points.
 An inference crash retries once without restarting the recording service.
 
 Microphone recordings are limited to five minutes. When you finish one, Hey Talk saves

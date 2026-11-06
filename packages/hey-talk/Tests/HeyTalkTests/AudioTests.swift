@@ -517,6 +517,23 @@ final class AudioTests: XCTestCase {
             XCTAssertGreaterThan(samples.map { abs($0) }.max() ?? 0, 0.1)
         }
     }
+    func testLongDictationSplitsAtPausesAndKeepsTheFinalPartialWindow() {
+        let rate = PCMFrame.rate
+        var samples = Array(repeating: Float(0.5), count: 74 * rate + 1)
+        let firstPause = 29 * rate + rate / 2
+        let secondPause = firstPause + 80 + 29 * rate + rate / 2
+        for pause in [firstPause, secondPause] {
+            samples.replaceSubrange(pause..<pause+160, with: repeatElement(0, count: 160))
+        }
+        let first = AudioCapture.recognitionChunk(samples[...])
+        let second = AudioCapture.recognitionChunk(samples[first.endIndex...])
+        let tail = AudioCapture.recognitionChunk(samples[second.endIndex...])
+        XCTAssertEqual(first.endIndex, firstPause + 80)
+        XCTAssertEqual(second.endIndex, secondPause + 80)
+        XCTAssertEqual(tail.endIndex, samples.endIndex)
+        XCTAssertEqual(Array(first) + second + tail, samples)
+    }
+
     func testEmptyAndOverlongAudioFailCleanly() throws {
         let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
         for seconds in [0, 301] {
