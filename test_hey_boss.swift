@@ -81,6 +81,7 @@ func audit() {
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SOL"] { auditSolChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_INTERRUPTED_CHAT"] { auditInterruptedChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
     if let id = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPOKEN_REVIEW"] { auditSpokenReview(id); return }
@@ -4557,7 +4558,63 @@ func auditChatPolish(_ root: String) {
 }
 
 @available(macOS 26, *)
+func auditInterruptedChat(_ root: String) {
+    let dir = URL(fileURLWithPath: root)
+    let path = dir.appendingPathComponent(UUID().uuidString).appendingPathComponent("current.json")
+    let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let chat = VoiceConversation(cli: cli, saveURL: path), voice = ReviewAudio()
+    voice.engine.attach(voice.player)
+    voice.engine.connect(voice.player, to: voice.engine.mainMixerNode, format: nil)
+    voice.engine.mainMixerNode.outputVolume = 0
+    try! voice.engine.start()
+    func wait(_ label: String, _ done: () -> Bool) {
+        let deadline = Date().addingTimeInterval(90)
+        while !done(), Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+        precondition(done(), "Timed out at " + label + ": " + chat.status.stringValue)
+    }
+    chat.connect(voice); chat.append("Read this.", from: "You"); chat.state(.thinking, "Thinking…")
+    let answer = "First we check the device and operating system. The secret unused tail is pineapple."
+    chat.event(["TurnCompleted": ["status": "Completed", "output": answer]])
+    wait("first word in playback") {
+        let row = chat.rows.last!.attributedStringValue
+        return row.length > 0 && row.attribute(.backgroundColor, at: 0, effectiveRange: nil) != nil
+    }
+    chat.receive(.candidate)
+    for name in ["first", "second"] {
+        chat.receive(.began)
+        precondition(chat.phase == .recording, "New speech must be accepted during transcription")
+        chat.receive(.pcm(try! Data(contentsOf: dir.appendingPathComponent(name + ".pcm"))))
+        chat.receive(.ended)
+    }
+    wait("both transcriptions") { chat.conversationHistory.filter { $0["role"] == "user" }.count == 2 }
+    let correction = chat.rows.last!.stringValue.lowercased()
+    guard let mobile = correction.range(of: "mobile"), let account = correction.range(of: "account"), mobile.lowerBound < account.lowerBound else {
+        preconditionFailure("Expected both corrections in order, got: " + correction)
+    }
+    let sent = chat.conversationHistory.last!["content"]!
+    precondition(sent.contains("First") && !sent.contains("pineapple"))
+    let reopened = VoiceConversation(cli: cli, saveURL: path)
+    precondition(reopened.conversationHistory.last?["content"] == sent)
+    let folder = path.deletingLastPathComponent()
+    wait("agent accepted the correction and playback cutoff") {
+        guard let file = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first(where: { $0.lastPathComponent.hasSuffix(".agent.json") }),
+              let data = try? Data(contentsOf: file), let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let history = saved["messages"] as? [[String: Any]] else { return false }
+        return history.contains { $0["role"] as? String == "user" && $0["content"] as? String == sent }
+    }
+    chat.stop("Done")
+    chat.connect(ReviewAudio())
+    chat.respond("First correction before acceptance."); chat.receive(.began)
+    chat.receive(.pcm(try! Data(contentsOf: dir.appendingPathComponent("second.pcm")))); chat.receive(.ended)
+    wait("new speech before previous turn was accepted") { chat.conversationHistory.last?["content"]?.contains("Previous user turn:") == true }
+    precondition(chat.conversationHistory.last!["content"]!.contains("First correction before acceptance."))
+    chat.stop("Done")
+    print("PASS: both interruptions transcribed in order; playback cutoff survives reopening")
+}
+
+@available(macOS 26, *)
 func auditConversation(_ root: String) {
+
     let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
     let measured = "Use a ¼-inch bit and 5/16\" coils.", reading = ReaderVoice.spokenMeasurements(measured)
     precondition(reading.text == "Use a one quarter inch bit and 5 over 16 inch coils.")

@@ -15,3 +15,9 @@ dd if=/dev/zero bs=51200 count=1 2>/dev/null >> "$root/so.pcm"
 cat "$root/first.pcm" >> "$root/so.pcm"
 mv "$root/so.pcm" "$root/first.pcm"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_CONVERSATION="$root" "$2"
+say -v Samantha -o "$root/mobile.aiff" 'Only on mobile.'
+say -v Alex -o "$root/accounts.aiff" 'Only after switching accounts.'
+mkdir "$root/interruptions"
+ffmpeg -nostdin -loglevel error -i "$root/mobile.aiff" -ar 16000 -ac 1 -f s16le "$root/interruptions/first.pcm"
+ffmpeg -nostdin -loglevel error -i "$root/accounts.aiff" -ar 16000 -ac 1 -f s16le "$root/interruptions/second.pcm"
+HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_INTERRUPTED_CHAT="$root/interruptions" "$2"
