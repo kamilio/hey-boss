@@ -1,3 +1,4 @@
+- “Conversations” means the Hey Boss desktop conversation chat. Start with `VoiceConversation` in `hey_boss_daemon.swift`; its end-to-end checks are in `tools/conversation_checks.sh`.
 - No PRs, straight to main
 - Commit small changes
 - TDD
