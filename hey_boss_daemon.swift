@@ -6914,7 +6914,7 @@ final class ConversationRecording: @unchecked Sendable {
 final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Sendable {
     let engine = AVAudioEngine()
     let player = AVAudioPlayerNode()
-    let synth = AVSpeechSynthesizer()
+    private var synth: AVSpeechSynthesizer?
     private let worker = Process(), input = Pipe(), output = Pipe()
     private var detectorLog: FileHandle?
     private var tapped = false
@@ -7017,21 +7017,21 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         let changed: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.updatePlaybackRoute() }
         if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, changed) == noErr { outputChanged = changed }
         NotificationCenter.default.addObserver(self, selector: #selector(engineRouteChanged(_:)), name: .AVAudioEngineConfigurationChange, object: engine)
-        try openMicrophone(writer, lastInput)
-        var attempted = ProcessInfo.processInfo.systemUptime, waiting = true, recovering = false
+        try openMicrophone(writer, lastInput, ready)
+        var attempted = ProcessInfo.processInfo.systemUptime, recovering = false
         micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             guard let self, !self.stopped else { return }
             let now = ProcessInfo.processInfo.systemUptime, last = lastInput.withLock { $0 }
-            if self.engine.isRunning && last >= attempted && now - last < 1 {
+            let wrongRoute = self.conversation && self.engine.inputNode.isVoiceProcessingEnabled == self.headphoneOutput
+            if self.engine.isRunning && !wrongRoute && last >= attempted && now - last < 1 {
                 if recovering { Self.log.notice("Microphone reconnected"); recovering = false }
-                if waiting { waiting = false; ready() }
-            } else if now - attempted >= 1 {
+            } else if (wrongRoute && !recovering) || now - attempted >= 1 {
                 if !recovering { Self.log.notice("Microphone interrupted; reconnecting"); recovering = true }
                 attempted = now
                 self.engine.stop()
                 self.removeTaps()
                 do {
-                    try self.openMicrophone(writer, lastInput)
+                    try self.openMicrophone(writer, lastInput, ready)
                     if !self.paused && self.passages.first?.deliver != nil { self.player.play() }
                 } catch { /* A device can be absent while macOS switches routes. */ }
             }
@@ -7042,16 +7042,18 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         if tapped { engine.inputNode.removeTap(onBus: 0); engine.mainMixerNode.removeTap(onBus: 0); tapped = false }
     }
 
-    private func openMicrophone(_ writer: FileHandle, _ lastInput: OSAllocatedUnfairLock<TimeInterval>) throws {
+    private func openMicrophone(_ writer: FileHandle, _ lastInput: OSAllocatedUnfairLock<TimeInterval>, _ ready: @escaping () -> Void) throws {
         let mic = engine.inputNode
-        try mic.setVoiceProcessingEnabled(true)
-        mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        updatePlaybackRoute()
+        let cancelEcho = !conversation || !headphoneOutput
+        if mic.isVoiceProcessingEnabled != cancelEcho { try mic.setVoiceProcessingEnabled(cancelEcho) }
+        if cancelEcho { mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min) }
         let source = mic.outputFormat(forBus: 0)
         guard source.sampleRate > 0, source.channelCount > 0, let converter = microphoneConverter(from: source) else {
             throw StorageError(description: "No microphone available. Check Sound settings.")
         }
         // VoiceProcessingIO requires both client buses to agree, including with a USB input and built-in speakers.
-        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: source)
+        engine.connect(engine.mainMixerNode, to: engine.outputNode, format: cancelEcho ? source : nil)
         let target = format
         let renderFormat = engine.mainMixerNode.outputFormat(forBus: 0)
         guard let renderConverter = microphoneConverter(from: renderFormat) else { throw StorageError(description: "Cannot read playback audio.") }
@@ -7065,13 +7067,17 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
             return error == nil ? pcm : nil
         }
-        updatePlaybackRoute()
         engine.mainMixerNode.installTap(onBus: 0, bufferSize: 960, format: renderFormat) { [weak self] buffer, _ in
             guard let pcm = mono(buffer, renderConverter) else { return }
             self?.bufferPlayback(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: Int(pcm.frameLength)))
         }
         mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, time in
-            lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+            guard buffer.frameLength > 0 else { return }
+            let first = lastInput.withLock { last in
+                defer { last = ProcessInfo.processInfo.systemUptime }
+                return last == 0
+            }
+            if first { onMain { [weak self] in guard self?.stopped == false else { return }; ready() } }
             guard let self, self.acceptsInput(at: time.hostTime), let pcm = mono(buffer, converter) else { return }
             let n = Int(pcm.frameLength)
             guard n > 0 else { return }
@@ -7145,7 +7151,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             renderNextPassage()
         }
         func systemVoice() {
-            synth.delegate = self
+            let synth = self.synth ?? AVSpeechSynthesizer()
+            self.synth = synth; synth.delegate = self
             synth.write(passage.utterance) { [weak self] audio in
                 guard let buffer = audio as? AVAudioPCMBuffer else { return }
                 onMain {
@@ -7218,7 +7225,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     func stopPlayback() {
         paused = false
         passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
-        timer?.invalidate(); synth.stopSpeaking(at: .immediate)
+        timer?.invalidate(); synth?.stopSpeaking(at: .immediate)
         if player.engine != nil { player.stop() }
     }
     func stop() {
