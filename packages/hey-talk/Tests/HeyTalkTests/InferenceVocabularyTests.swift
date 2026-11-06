@@ -78,6 +78,14 @@ final class InferenceVocabularyTests: XCTestCase {
                 _ = try vocabulary.command(["add"] + original)
             }
         }
+        // One microphone request, with distinct speech in the first, middle and final windows.
+        var dictation: [Float] = []
+        for index in cases.indices {
+            dictation += repeatElement(0, count: index * 32 * PCMFrame.rate - dictation.count)
+            dictation += try AudioCapture.readFile(directory.appendingPathComponent("\(index).aiff").path)
+        }
+        let longText = try transcribe(dictation).lowercased()
+        XCTAssertTrue(longText.contains("poe") && longText.contains("macbook") && longText.contains("poem"), longText)
         XCTAssertTrue(try transcribe([Float](repeating: 0, count: 16_000)).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
     }
 }
