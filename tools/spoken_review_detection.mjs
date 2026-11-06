@@ -46,6 +46,15 @@ const quiet = signal(voice.length / 2, i => voice.readInt16LE(i * 2) / 10);
 // Frequent key strikes can keep a conventional voice gate open for several seconds.
 const typing = signal(64000, i => (i % 2400 < 160 ? Math.exp(-(i % 2400) / 45) * noise.readInt16LE((i % 48000) * 2) * 18 : 0));
 const chat = (...parts) => readTurns(Buffer.concat([silence(1000), ...parts, silence(3500)]), ['--conversation']);
+const onsetInput = Buffer.concat([silence(2000), voice, silence(3500)]);
+const scored = spawnSync(cli, ['review-audio', '--conversation'], {input: onsetInput});
+assert.equal(scored.status, 0);
+const confirmed = /speech confirmed at (\d+)ms/.exec(String(scored.stderr));
+assert(confirmed, 'report the detector time at confirmation');
+let peak = 0, onset = 0;
+for (let i = 0; i < voice.length; i += 2) peak = Math.max(peak, Math.abs(voice.readInt16LE(i)));
+while (onset < voice.length && Math.abs(voice.readInt16LE(onset)) < peak * 0.015) onset += 2;
+assert(+confirmed[1] - 2000 - onset / 32 <= 250, 'clear speech must interrupt promptly');
 const ping = spawnSync('ffmpeg', ['-loglevel', 'error', '-i', '/System/Library/Sounds/Ping.aiff', '-ar', '16000', '-ac', '1', '-f', 's16le', '-']);
 assert.equal(ping.status, 0, String(ping.stderr));
 assert.equal(chat(ping.stdout).length, 0, 'a notification must not open a chat turn');
@@ -54,7 +63,12 @@ for (const speech of [voice, quiet]) {
   const mixed = signal(speech.length / 2, i => Math.max(-32768, Math.min(32767, speech.readInt16LE(i * 2) + typing.readInt16LE((i * 2) % typing.length))));
   const turns = chat(typing, mixed, typing);
   assert.equal(turns.length, 1, 'speech amid typing opens one chat turn');
-  assert(turns[0].length < mixed.length + 32000 * 3.5, 'continued typing must not hold the turn open');
+  // Locate the clip in the input: its 1.5 s of pre-roll is not endpoint delay.
+  const input = Buffer.concat([silence(1000), typing, mixed, typing, silence(3500)]);
+  const start = input.indexOf(turns[0]);
+  assert(start >= 0);
+  const tail = start + turns[0].length - (silence(1000).length + typing.length + mixed.length);
+  assert(tail < 32000 * 3.5, 'continued typing must not hold the turn open');
 }
 for (const sound of [voice, quiet]) {
   const input = Buffer.concat([silence(1000), sound, silence(1500)]);

@@ -4629,6 +4629,26 @@ func auditHeadphoneInterrupt(_ root: String) {
     ref.withUnsafeBufferPointer { audio.bufferPlayback($0) }
     precondition(mic.withUnsafeBufferPointer { audio.microphoneFrame($0) } == [1, 10, 2, 20], "Speaker echo reference must return on a route change")
     chat.stop("Done")
+    let fm = FileManager.default, root = dir.appendingPathComponent(UUID().uuidString)
+    let active = UUID(), folder = root.appendingPathComponent(active.uuidString)
+    for id in [active] + (0..<5).map({ _ in UUID() }) {
+        try! fm.createDirectory(at: root.appendingPathComponent(id.uuidString), withIntermediateDirectories: true)
+    }
+    for i in 0..<12 { try! Data().write(to: folder.appendingPathComponent("\(i).wav")) }
+    let archive = ConversationRecording(root: root, chat: active)
+    archive.append([123, 321, -100, 200]); archive.finish()
+    let until = Date().addingTimeInterval(3)
+    var saved: AVAudioFile?
+    while saved == nil && Date() < until {
+        if let path = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first(where: { $0.lastPathComponent.count > 10 }),
+           let file = try? AVAudioFile(forReading: path, commonFormat: .pcmFormatInt16, interleaved: true), file.length == 2 { saved = file }
+        else { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02)) }
+    }
+    let file = saved!, buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 2)!
+    try! file.read(into: buffer)
+    precondition(Array(UnsafeBufferPointer(start: buffer.int16ChannelData![0], count: 4)) == [123, 321, -100, 200])
+    let chats = try! fm.contentsOfDirectory(atPath: root.path), clips = try! fm.contentsOfDirectory(atPath: folder.path)
+    precondition(chats.count == 5 && clips.count == 12 && chats.contains(active.uuidString))
     print("PASS: quiet headset speech interrupted playback; speaker echo reference restored")
 }
 
@@ -4654,6 +4674,11 @@ func auditInterruptedChat(_ root: String) {
         let row = chat.rows.last!.attributedStringValue
         return row.length > 0 && row.attribute(.backgroundColor, at: 0, effectiveRange: nil) != nil
     }
+    chat.receive(.candidate); chat.receive(.began)
+    precondition(!voice.player.isPlaying && chat.phase == .recording)
+    chat.receive(.pcm(Data(count: 32000))); chat.receive(.ended)
+    wait("noise decoded") { chat.phase != .decoding }
+    precondition(chat.phase == .speaking && voice.player.isPlaying && chat.conversationHistory.count == 2, "An empty interruption must resume the same reply")
     chat.receive(.candidate)
     for name in ["first", "second"] {
         chat.receive(.began)
@@ -4936,11 +4961,10 @@ func auditConversation(_ root: String) {
     ui.event(["TextDelta": ["text": "Here is a longer sentence that should stop as soon as you speak over it. There is more to come."]])
     wait("playing the unfinished reply") { ui.phase == .speaking && audio.player.isPlaying }
     ui.receive(.candidate)
-    precondition(!audio.player.isPlaying && ui.recording == nil, "Pause at voice onset")
-    wait("unconfirmed noise lets playback resume") { audio.player.isPlaying }
+    precondition(audio.player.isPlaying && ui.recording == nil, "Tentative noise must leave playback alone")
     feed("second", finishManually: true)
     wait("speech interrupts playback") { ui.phase == .recording }
-    precondition(!audio.player.isPlaying && ui.audio === audio && ui.rows.last?.stringValue == "Reply stopped before it finished.")
+    precondition(!audio.player.isPlaying && ui.audio === audio, "Pause while the interruption is being verified")
     wait("remembered spoken reply") { ui.phase == .speaking && audio.player.isPlaying }
     precondition(ui.rows[ui.rows.count - 2].stringValue.localizedCaseInsensitiveContains("which fruit"), "Keep the opening words of an interruption")
     precondition(ui.rows.last!.stringValue.localizedCaseInsensitiveContains("pineapple"), ui.rows.map(\.stringValue).description)

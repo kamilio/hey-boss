@@ -9,19 +9,19 @@ mod tests {
     fn brief_noise_during_a_chat_pause_does_not_hold_the_turn_open() {
         let mut gate = Turn::new(true);
         assert_eq!(
-            (0..8).filter_map(|_| gate.push(true)).last(),
+            (0..8).filter_map(|_| gate.push(true, false)).last(),
             Some(Edge::Start)
         );
         for _ in 0..3 {
             for _ in 0..15 {
-                assert_eq!(gate.push(false), None);
+                assert_eq!(gate.push(false, false), None);
             }
             for _ in 0..4 {
-                assert_eq!(gate.push(true), None);
+                assert_eq!(gate.push(true, false), None);
             }
         }
         assert_eq!(
-            (0..80).filter_map(|_| gate.push(false)).last(),
+            (0..80).filter_map(|_| gate.push(false, false)).last(),
             Some(Edge::End)
         );
     }
@@ -30,11 +30,11 @@ mod tests {
     fn repeated_short_noise_counts_toward_the_chat_pause() {
         let mut gate = Turn::new(true);
         for _ in 0..8 {
-            gate.push(true);
+            gate.push(true, false);
         }
         // Brief detector false positives must not turn 2.5 seconds into 20 seconds.
         let edges = (0..128)
-            .filter_map(|frame| gate.push(frame % 8 != 7))
+            .filter_map(|frame| gate.push(frame % 8 != 7, false))
             .collect::<Vec<_>>();
         assert_eq!(edges, [Edge::End]);
         assert!(!gate.active);
@@ -46,7 +46,7 @@ mod tests {
             let mut gate = Turn::new(conversation);
             let mut advance = |frames, speech| {
                 (0..frames)
-                    .filter_map(|_| gate.push(speech))
+                    .filter_map(|_| gate.push(speech, false))
                     .collect::<Vec<_>>()
             };
             assert!(advance(3, true).is_empty());
@@ -86,7 +86,7 @@ impl Turn {
         }
     }
 
-    fn push(&mut self, speech: bool) -> Option<Edge> {
+    fn push(&mut self, speech: bool, confident_onset: bool) -> Option<Edge> {
         // In chat, a short burst during a pause is not enough to resume speech.
         if self.conversation && self.active && speech {
             self.speech_run += 1;
@@ -105,6 +105,7 @@ impl Turn {
         } else {
             self.consecutive += 1;
             let threshold = match (self.active, self.conversation) {
+                (false, true) if confident_onset => 1,
                 (false, _) => 8,
                 (true, true) => 125,
                 (true, false) => 40,
@@ -117,6 +118,21 @@ impl Turn {
         }
         None
     }
+}
+
+// Normalized periodicity across typical voice pitches. Only use this to
+// accelerate onset: whispered and unvoiced speech can still open a turn.
+fn pitched(window: &[f32]) -> bool {
+    (32..=224).step_by(4).any(|lag| {
+        let (mut cross, mut a, mut b) = (0.0, 0.0, 0.0);
+        for i in (224..window.len()).step_by(2) {
+            let (x, y) = (window[i], window[i - lag]);
+            cross += x * y;
+            a += x * x;
+            b += y * y;
+        }
+        cross > 0.0 && cross * cross > 0.80 * 0.80 * a * b
+    })
 }
 
 // Frames on stdout: little-endian u16 byte count, then that many PCM bytes.
@@ -145,8 +161,10 @@ pub fn stream(
         .transpose()
         .map_err(io::Error::other)?;
     let mut pending = Vec::new();
-    let mut chat_speech = false;
+    let mut probability = 0.0;
+    let mut voiced = false;
     let mut turn = Turn::new(conversation);
+    let mut elapsed_ms = 0_u64;
     // Keep quiet opening words as well as the detector's confirmation delay.
     let history_frames = if conversation { 75 } else { 20 }; // 1.5 s / 400 ms
     let mut history = std::collections::VecDeque::with_capacity(history_frames);
@@ -178,18 +196,26 @@ pub fn stream(
         }
         let samples: [i16; 320] =
             std::array::from_fn(|i| i16::from_le_bytes([frame[i * 2], frame[i * 2 + 1]]));
+        elapsed_ms += 20;
+        let mut confident_onset = false;
         let speech = if let Some(detector) = &mut chat_vad {
             // Silero scores 32 ms at a time; keep its last decision between windows.
             pending.extend(samples.iter().map(|&s| f32::from(s) / 32768.0));
             let n = detector.source_window_samples();
             if pending.len() >= n {
-                chat_speech = detector
+                let previous = probability;
+                probability = detector
                     .forward_chunk(&pending[..n])
-                    .map_err(io::Error::other)?
-                    >= 0.5;
+                    .map_err(io::Error::other)?;
+                // Two independent 32 ms windows: a likely onset followed by strong speech.
+                let periodic = !turn.active && probability >= 0.50 && pitched(&pending[..n]);
+                confident_onset = (previous >= 0.50 && probability >= 0.88 && voiced && periodic)
+                    || (previous >= 0.85 && probability >= 0.98 && periodic)
+                    || (previous >= 0.995 && probability >= 0.995);
+                voiced = periodic;
                 pending.drain(..n);
             }
-            chat_speech
+            confident_onset || probability >= if turn.active { 0.5 } else { 0.96 }
         } else {
             vad.is_voice_segment(&samples).expect("20 ms frame")
         };
@@ -204,8 +230,11 @@ pub fn stream(
             }
             history.push_back(frame);
         }
-        match turn.push(speech) {
+        match turn.push(speech, confident_onset) {
             Some(Edge::Start) => {
+                if conversation {
+                    eprintln!("speech confirmed at {elapsed_ms}ms score={probability:.3} fast={confident_onset}");
+                }
                 output.write_all(&0u16.to_le_bytes())?;
                 for prior in history.drain(..) {
                     output.write_all(&640u16.to_le_bytes())?;
