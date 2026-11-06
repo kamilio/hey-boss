@@ -27,3 +27,4 @@ for turn in reply blue; do
   ffmpeg -nostdin -loglevel error -i "$root/$turn.aiff" -ar 16000 -ac 1 -f s16le "$root/$turn.pcm"
 done
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT="$root" "$2"
+HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_FOREGROUND_MIC="$root" "$2"
