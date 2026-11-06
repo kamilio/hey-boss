@@ -205,3 +205,54 @@ fn deletion_reclaims_old_versions_but_preserves_shared_publications() {
     pages::publish(&database, &source, "report").unwrap();
     pages::download(&database, "report", &f.0.join("republished")).unwrap();
 }
+
+#[test]
+fn file_edits_preserve_assets_and_reject_stale_or_invalid_moves() {
+    use pages::FileChange::*;
+    let f = Fixture::new();
+    let db = f.0.join("issues.db");
+    let site = f.0.join("site");
+    fs::create_dir_all(site.join("notes")).unwrap();
+    for (path, text) in [
+        ("index.html", "home"),
+        ("notes/a.md", "one"),
+        ("photo.png", "asset"),
+    ] {
+        fs::write(site.join(path), text).unwrap();
+    }
+    let first = pages::publish(&db, &site, "report").unwrap();
+    let edit = |p: &pages::Page, file, change| {
+        pages::edit_file(&db, "report", &p.deployment, p.updated_at, file, change)
+    };
+    for dest in ["index.html", "../file", "photo.png/child", "notes"] {
+        assert!(
+            edit(
+                &first,
+                "photo.png",
+                Move {
+                    destination: dest.into()
+                }
+            )
+            .is_err()
+        );
+    }
+    assert!(edit(&first, "index.html", Delete).is_err());
+    let second = edit(
+        &first,
+        "notes/a.md",
+        Move {
+            destination: "draft/new.md".into(),
+        },
+    )
+    .unwrap();
+    assert!(edit(&first, "photo.png", Delete).is_err());
+    let third = edit(&second, "draft/new.md", Save { text: "two".into() }).unwrap();
+    let latest = edit(&third, "photo.png", Delete).unwrap();
+    pages::download(&db, "report", &f.0.join("result")).unwrap();
+    assert_eq!(
+        fs::read_to_string(f.0.join("result/draft/new.md")).unwrap(),
+        "two"
+    );
+    assert!(!f.0.join("result/photo.png").exists());
+    assert_eq!(latest.files, 2);
+}
