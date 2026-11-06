@@ -129,6 +129,8 @@ final class Overlay {
     private let identity = IdentityView()
     private let wave = WaveView()
     private let resultIcon = NSImageView()
+    private let chatButton = NSButton()
+    private var hover = false
     private let editSpelling = NSButton()
     private var addedTerm: String?
     private let confirmation = NSTextField(labelWithString: "")
@@ -178,6 +180,8 @@ final class Overlay {
     var onToggleCorrection: (() -> Void)?
     var onEditVocabulary: ((String?) -> Void)?
     var onShowHistory: (() -> Void)?
+    var onStartConversation: (() -> Void)?
+    var onOpenTranscript: (() -> Void)?
     var onChatWithContext: (() -> Void)?
     var onInterruptConversation: (() -> Void)?
     var onStopConversation: (() -> Void)?
@@ -274,6 +278,11 @@ final class Overlay {
         editSpelling.target = self; editSpelling.action = #selector(editAddedTerm)
         editSpelling.isHidden = true
         pillContent.addSubview(editSpelling)
+        chatButton.title = ""; chatButton.isBordered = false
+        chatButton.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right", accessibilityDescription: nil)
+        chatButton.toolTip = "Start conversation · Hyper+C"; chatButton.setAccessibilityLabel("Start conversation")
+        chatButton.target = self; chatButton.action = #selector(startConversation)
+        pillContent.addSubview(chatButton)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -290,7 +299,10 @@ final class Overlay {
         updateModeAppearance()
         pillContent.onClick = { [weak self] in if self?.pasteWait == nil { self?.onToggle?() } }
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
-        pillContent.onHover = { [weak self] hover in self?.pillContent.emphasized = hover }
+        pillContent.onHover = { [weak self] hover in
+            guard let self, self.hover != hover else { return }
+            self.hover = hover; self.pillContent.emphasized = hover; self.layout(animated: false)
+        }
         pillContent.onDrag = { [weak self] in
             self?.dockMotion?.stop(); self?.dockMotion = nil; self?.dockRestY = nil
         }
@@ -505,6 +517,7 @@ final class Overlay {
             if conversation["phase"] as? String == "recording" {
                 menu.addItem(withTitle: "Cancel recording", action: #selector(stopConversation), keyEquivalent: "").target = self
             }
+            if conversation["approval"] as? Bool != true { menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self }
             return menu
         }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
@@ -528,10 +541,13 @@ final class Overlay {
             }
         }
         menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "Setup"))
+        menu.addItem(.sectionHeader(title: "Conversation"))
+        let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
+        start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         let context = NSMenuItem(title: "Chat with Context", action: #selector(chatWithContext), keyEquivalent: "m")
         context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         context.target = self; menu.addItem(context)
+        menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Setup"))
         let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
         return menu
@@ -549,6 +565,8 @@ final class Overlay {
         onEditVocabulary?(addedTerm)
     }
     @objc private func showHistory() { onShowHistory?() }
+    @objc private func startConversation() { onStartConversation?() }
+    @objc private func openTranscript() { onOpenTranscript?() }
     @objc private func chatWithContext() { onChatWithContext?() }
     @objc private func interruptConversation() { onInterruptConversation?() }
     @objc private func stopConversation() { onStopConversation?() }
@@ -605,8 +623,10 @@ final class Overlay {
         let statusWidth = labelX + connecting.frame.width + (compactVoice ? labelX : 12)
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26 + (editSpelling.isHidden ? 0 : 26)
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
+        let showChat = hover && phase == .idle && conversation == nil && !showConnecting && confirmation.isHidden && notice == nil && status == nil && pasteWait == nil
+        chatButton.isHidden = !showChat
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
-            ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
+            ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : showChat ? NSSize(width: 84, height: 36) : TalkDesign.idleSize)
         // Status messages grow only the right edge of the window, keeping the recording control still.
         let baseWidth = max(200, size.width + 96, size.width + 2 * leftExtension + 16)
         let anchorX = baseWidth / 2
@@ -661,7 +681,8 @@ final class Overlay {
         autoHalo.path = autoOutline
         CATransaction.commit()
         let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (size.width - 22) / 2
+        let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (showChat ? 13 : (size.width - 22) / 2)
+        chatButton.frame = NSRect(x: 44, y: 3, width: 32, height: 30)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
@@ -686,7 +707,7 @@ final class Overlay {
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         status?.frame.origin = NSPoint(x: leftExtension + size.width, y: 0)
         noticeRecordButton.isHidden = notice == nil && status == nil
-        pillContent.setAccessibilityRole(pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
+        pillContent.setAccessibilityRole(showChat || pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(conversation?["action"] as? String ?? (phase == .recording ? "Stop dictation" : "Start dictation"))
     }

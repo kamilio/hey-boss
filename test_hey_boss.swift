@@ -4583,7 +4583,8 @@ func auditChatPolish(_ root: String) {
         precondition(check(), "key=\(chat.window.isKeyWindow), active=\(NSApp.isActive), microphone permission=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue), standby=\(chat.standby != nil)")
     }
     let start = ProcessInfo.processInfo.systemUptime
-    chat.openWithContext(source: nil, text: nil)
+    chat.startFromPill()
+    precondition(!chat.window.isVisible && chat.contextChip.isHidden && chat.voiceStatus["active"] as? Bool == true)
     await wait { chat.phase == .listening || chat.phase == .recording }
     print("Cold conversation microphone: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000)) ms")
     let cold = chat.audio!
@@ -4937,6 +4938,7 @@ func auditConversation(_ root: String) {
         return result
     }
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
+    precondition(ui.caption.isVisible && !ui.caption.isKeyWindow && ui.caption.line.stringValue.contains(highlighted()!))
     precondition(!ui.listenNext.isHidden && ui.listenNext.title == "Interrupt reply")
     precondition(!ui.send.isEnabled, "Keep the current model turn together while new words are still arriving")
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
@@ -4962,6 +4964,7 @@ func auditConversation(_ root: String) {
     wait("speak the repeat count and highlight its full numeric value") { highlighted() == digits }
     wait("keep the text following the long number") { highlighted() == "Done" }
     wait("all streamed speech drained") { ui.phase == .listening }
+    precondition(!ui.caption.isVisible)
     precondition(highlighted() == nil && ui.rows.count == 2 && ui.rows.last!.stringValue.hasSuffix(digits + "\nDone."))
     let visible = ui.rows.last!.stringValue
     precondition(visible.components(separatedBy: "•  Apples").count == 13 && visible.contains("21. Plums") && throughList < 29, "Keep the full list visible without repeatedly speaking the same items")
