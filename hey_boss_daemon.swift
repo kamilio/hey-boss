@@ -6901,6 +6901,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     private let worker = Process(), input = Pipe(), output = Pipe()
     private var tapped = false
     private var micWatch: Timer?
+    let inputSince = OSAllocatedUnfairLock(initialState: UInt64(0))
+    func acceptsInput(at hostTime: UInt64) -> Bool { inputSince.withLock { hostTime >= $0 } }
     static let log = Logger(subsystem: "local.hey-boss.desktop", category: "voice")
     // Audio can be rendered before its turn, but only the playing passage
     // publishes word offsets or advances the document.
@@ -7043,12 +7045,11 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             guard let pcm = mono(buffer, renderConverter) else { return }
             self?.bufferPlayback(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: Int(pcm.frameLength)))
         }
-        mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
-            guard let pcm = mono(buffer, converter) else { return }
+        mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, time in
+            lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+            guard let self, self.acceptsInput(at: time.hostTime), let pcm = mono(buffer, converter) else { return }
             let n = Int(pcm.frameLength)
             guard n > 0 else { return }
-            lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
-            guard let self else { return }
             let stereo = self.microphoneFrame(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: n))
             if stereo.withUnsafeBytes({ Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) != $0.count }) {
                 onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Start again.") }
@@ -7510,6 +7511,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let recognizer = SFSpeechRecognizer()
     var phase: Phase = .idle
     var audio: ReviewAudio?
+    private(set) var standby: ReviewAudio?
     var recording: Data?
     private var resumePlayback: Timer?
     private var recordedClips: [Data] = []
@@ -7815,8 +7817,29 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard Bundle.main.bundleIdentifier == "local.hey-boss.desktop" else { return }
         DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: voiceStatus, deliverImmediately: true)
     }
-    func windowDidBecomeKey(_ notification: Notification) { publishVoiceStatus() }
-    func windowDidResignKey(_ notification: Notification) { publishVoiceStatus() }
+    func windowDidBecomeKey(_ notification: Notification) {
+        publishVoiceStatus()
+        onMain { [weak self] in
+            guard let self, self.window.isKeyWindow, self.audio == nil, self.standby == nil,
+                  AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
+            let mic = ReviewAudio()
+            mic.conversation = true
+            mic.inputSince.withLock { $0 = .max }
+            self.standby = mic
+            mic.failed = { [weak self, weak mic] _ in
+                if let self, let mic, self.standby === mic { self.releaseStandby() }
+            }
+            do { try mic.start(cli: self.cli) {} } catch {
+                ReviewAudio.log.notice("Foreground microphone unavailable: \(error.localizedDescription, privacy: .public)")
+                self.releaseStandby()
+            }
+        }
+    }
+    private func releaseStandby() { standby?.stop(); standby = nil }
+    func windowDidResignKey(_ notification: Notification) {
+        releaseStandby()
+        publishVoiceStatus()
+    }
     func modelReady() -> Bool {
         if let restoreError { state(.idle, restoreError); return false }
         return true
@@ -7873,6 +7896,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.starting, "Starting…")
         window.displayIfNeeded()
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
+        if let mic = standby, mic.engine.isRunning {
+            standby = nil
+            mic.failed = { [weak self] in self?.voiceFailed($0) }
+            mic.inputSince.withLock { $0 = mach_absolute_time() }
+            connect(mic)
+            return
+        }
+        releaseStandby()
         let audio = ReviewAudio(); audio.conversation = true; self.audio = audio
         state(.starting, "Opening microphone…")
         AVCaptureDevice.requestAccess(for: .audio) { [weak self, weak audio] granted in onMain {
@@ -7897,6 +7928,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         } else { stop(message) }
     }
     func connect(_ audio: ReviewAudio) {
+        releaseStandby()
         self.audio = audio
         audio.readerVoice = ReaderVoice()
         audio.playbackStarted = { [weak self] in self?.state(.speaking, "Speaking") }
@@ -8545,7 +8577,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     func windowWillClose(_ notification: Notification) {
-        stop("Ready"); save()
+        releaseStandby(); stop("Ready"); save()
         if Bundle.main.bundleIdentifier == "local.hey-boss.desktop" {
             DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: ["active": false], deliverImmediately: true)
         }

@@ -81,6 +81,11 @@ func audit() {
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SOL"] { auditSolChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_FOREGROUND_MIC"] {
+        app.setActivationPolicy(.regular)
+        Task { @MainActor in await auditForegroundMic(root); exit(0) }
+        app.run(); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT"] { auditHeadphoneInterrupt(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_INTERRUPTED_CHAT"] { auditInterruptedChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
@@ -4556,6 +4561,38 @@ func auditChatPolish(_ root: String) {
         NSApp.setActivationPolicy(.regular); chat.show(); chat.state(.listening, "Listening")
         withExtendedLifetime(chat) { NSApp.run() }
     }
+}
+
+@available(macOS 26, *)
+@MainActor func auditForegroundMic(_ root: String) async {
+    guard AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else {
+        print("SKIP: foreground microphone test requires microphone access"); return
+    }
+    let path = URL(fileURLWithPath: root).appendingPathComponent(UUID().uuidString).appendingPathComponent("current.json")
+    let chat = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: path)
+    func wait(_ check: () -> Bool) async {
+        let until = Date().addingTimeInterval(8)
+        while !check() && Date() < until { try? await Task.sleep(for: .milliseconds(20)) }
+        precondition(check(), "key=\(chat.window.isKeyWindow), active=\(NSApp.isActive), microphone permission=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue), standby=\(chat.standby != nil)")
+    }
+    chat.show()
+    await wait { chat.window.isKeyWindow && chat.standby?.engine.isRunning == true }
+    let first = chat.standby!
+    precondition(chat.audio == nil && chat.phase == .idle && chat.rows.isEmpty && chat.voiceStatus["microphone"] as? Bool == false)
+    precondition(!first.acceptsInput(at: mach_absolute_time()))
+    chat.window.orderOut(nil)
+    await wait { chat.standby == nil && first.stopped }
+    chat.show()
+    await wait { chat.standby?.engine.isRunning == true }
+    let prepared = chat.standby!, beforeStart = mach_absolute_time()
+    chat.toggle()
+    precondition(chat.audio === prepared && chat.phase == .listening && chat.standby == nil)
+    precondition(!prepared.acceptsInput(at: beforeStart) && prepared.acceptsInput(at: mach_absolute_time()))
+    chat.window.orderOut(nil)
+    precondition(!prepared.stopped && chat.phase == .listening)
+    chat.window.close()
+    precondition(prepared.stopped)
+    print("PASS: foreground warmed the microphone without listening; Start reused it and excluded earlier audio")
 }
 
 @available(macOS 26, *)
