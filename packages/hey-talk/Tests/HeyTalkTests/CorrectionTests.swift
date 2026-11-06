@@ -376,7 +376,7 @@ final class CorrectionTests: XCTestCase {
     func testRequestUsesLunaWithoutReasoningAndKeepsVocabularySeparateFromTranscript() throws {
         let request = try Correction.request(text: "hello kamil", vocabulary: ["Kamil", "T3 Code"])
         XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8080/v1/responses")
-        XCTAssertLessThanOrEqual(request.timeoutInterval, 8)
+        XCTAssertGreaterThanOrEqual(request.timeoutInterval, 30)
         let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
         XCTAssertEqual(body["model"] as? String, "gpt-6-luna")
         XCTAssertEqual(body["service_tier"] as? String, "priority")

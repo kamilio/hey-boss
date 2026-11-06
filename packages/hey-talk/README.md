@@ -76,8 +76,8 @@ from the dictation's target window go to the existing
 Hey Proxy at `127.0.0.1:8080` as `gpt-6-luna`, requesting priority service with reasoning disabled and storage off.
 The proxy's configured routing, model rewrites, and authentication remain authoritative.
 Audio stays local. Correction applies before History, copy, paste, or submission,
-including file transcription. A response can stream for up to 30 seconds, with at most eight seconds
-between updates. If correction fails, a notice explains why and the original transcript is kept. Escape discards pending correction too.
+including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
+If correction fails, a notice explains why and the original transcript is kept. Escape discards pending correction too.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
 uses T3’s local server API without submitting a message or touching the clipboard.

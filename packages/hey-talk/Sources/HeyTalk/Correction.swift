@@ -70,7 +70,7 @@ final class Correction {
         var tools = [try tool("paste", "text")]
         if canClear { tools.append(try tool("clear_input")) }
         if let package { tools += try package.definitions(prompt: prompt) }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!, timeoutInterval: 8)
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
