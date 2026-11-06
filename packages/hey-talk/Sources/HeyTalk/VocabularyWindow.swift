@@ -31,7 +31,6 @@ private struct VocabularyView: View {
     @FocusState private var editing: Bool
 
     @State private var search = ""
-    @State private var deleting: String?
     private var matching: [String] { search.isEmpty ? words : words.filter { $0.localizedStandardContains(search) } }
 
     var body: some View {
@@ -64,7 +63,9 @@ private struct VocabularyView: View {
                                         Button { select(word) } label: { Image(systemName: "pencil") }
                                             .help("Edit spelling").accessibilityLabel("Edit \(word)")
                                     }
-                                    Button { deleting = word } label: { Image(systemName: "trash") }
+                                    Button {
+                                        change(["remove", word], selected: selected == word ? nil : selected, success: "Deleted “\(word)”.")
+                                    } label: { Image(systemName: "trash") }
                                         .help("Delete this entry").accessibilityLabel("Delete \(word)")
                                 }.buttonStyle(.bordered).controlSize(.small)
                             }
@@ -87,10 +88,6 @@ private struct VocabularyView: View {
                 .padding(.horizontal, 26).padding(.vertical, 17)
         }
         .tint(.teal)
-        .alert("Delete this vocabulary entry?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), presenting: deleting) { word in
-            Button("Delete", role: .destructive) { change(["remove", word], selected: selected == word ? nil : selected, success: "Deleted “\(word)”.") }
-            Button("Cancel", role: .cancel) {}
-        } message: { word in Text("“\(word)” will be removed from your shared vocabulary.") }
         .onAppear {
             command([]) { response in
                 words = response["vocabulary"] as? [String] ?? []
