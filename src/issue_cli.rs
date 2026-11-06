@@ -66,6 +66,10 @@ enum GlobalSettingsAction {
 }
 #[derive(Subcommand)]
 enum VocabularyAction {
+    Rename {
+        old: String,
+        new: String,
+    },
     Add {
         #[arg(required = true, num_args = 1..)]
         words: Vec<String>,
@@ -92,6 +96,12 @@ pub fn run_global(options: &GlobalOptions) -> Result<()> {
                 Some(VocabularyAction::Remove { words }) => issues::vocabulary::Operation::Remove {
                     words: words.clone(),
                 },
+                Some(VocabularyAction::Rename { old, new }) => {
+                    issues::vocabulary::Operation::Rename {
+                        old: old.clone(),
+                        new: new.clone(),
+                    }
+                }
                 Some(VocabularyAction::Initialize { file }) => {
                     let text = read_text(std::fs::File::open(file)?, 65_792)?;
                     issues::vocabulary::Operation::Initialize {
