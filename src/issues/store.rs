@@ -1746,13 +1746,33 @@ impl Store {
         if matches!(r.operation, Operation::Job { .. }) {
             return self.execute_job_at(r, super::worker::now());
         }
-        if r.operation.writes() {
+        let mut result = if r.operation.writes() {
             self.execute_once(r, deadline, false)
         } else {
             // Failed read transactions are rolled back before retrying with a
             // fresh WAL snapshot. Never replay mutation or attachment effects.
             retry_contention(deadline, || self.execute_once(r, deadline, false))
+        }?;
+        // The collector is local. Scope the returned catalog, not the stored overrides or revision history.
+        if result.get("prompt_sections").is_some() {
+            let enabled = match (self.db.path(), result["project"]["id"].as_str()) {
+                (Some(path), Some(project)) => {
+                    crate::error_inbox::Inbox::collection_enabled(Path::new(path), project)?
+                }
+                _ => false,
+            };
+            if !enabled {
+                result["prompt_sections"]
+                    .as_array_mut()
+                    .unwrap()
+                    .retain(|s| s["key"] != "error_task");
+                result["prompt_defaults"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("error_task");
+            }
         }
+        Ok(result)
     }
 
     fn refresh_issue_numbers(&mut self, request: &Request) -> Result<()> {
