@@ -270,8 +270,6 @@
   .artifact-search input, .artifact-thread textarea, #artifact-comment,
   .artifact-attachment-picker input, .artifact-attachment-picker select { font-size: 16px; }
   #artifact-edit-preview { min-height: 380px; }
-  .app-navigation .navigation-inner { overflow-x: auto; scrollbar-width: none; }
-  .app-navigation .navigation-inner::-webkit-scrollbar { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .artifact-row { transition: none; }

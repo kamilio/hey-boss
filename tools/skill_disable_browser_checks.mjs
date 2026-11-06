@@ -46,8 +46,7 @@ try{
   const page=await browser.newPage({viewport:{width:1440,height:1000}}),errors=[];
   page.on('pageerror',e=>errors.push(e.message));
   await page.goto(origin+'/skills#skill=global%3Aexample');
-  await page.locator('#navigation-more').click();await page.locator('#nav-skills').waitFor({state:'visible'});
-  await page.locator('#navigation-more').click();
+  await page.locator('.global-navigation > #nav-skills').waitFor({state:'visible'});
   await put(join(root,'offline'),'');
   await page.locator('[data-disable-skill="example"]').click();
   report=await idle();assert.ok(report.disabled.includes('example'));assert.match(report.message,/needs attention/);

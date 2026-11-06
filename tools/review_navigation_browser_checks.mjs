@@ -6,7 +6,7 @@ import {resolve} from 'node:path';
 import assert from 'node:assert/strict';
 const {chromium} = await import(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const source = resolve('src/issues/web');
-const project = {id:'named:Navigation',name:'Navigation'};
+const project = {id:'named:Navigation',name:'Navigation',prs_enabled:true};
 const server = createServer((req,res) => {
   const path = new URL(req.url,'http://fixture').pathname;
   res.setHeader('Content-Type','application/json');
@@ -31,14 +31,19 @@ try {
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(origin+'/merged-prs#project=named%3ANavigation&host=connected-mac');
   await page.locator('#merged-status').filter({hasText:'No merged'}).waitFor();
-  const trigger = page.getByRole('button',{name:'More navigation',exact:true});
+  const trigger = page.getByRole('button',{name:'More project destinations',exact:true});
   const review = page.locator('#nav-admin');
   assert.equal(await trigger.count(),1,'Review has an overflow entry point');
   assert.equal(await review.isVisible(),false,'Review is hidden initially');
-  assert.equal(await page.locator('.app-navigation #nav-admin').count(),0,'Review is outside the primary tabs');
+  assert.equal(await page.locator('.navigation-inner > #nav-admin').count(),0,'Review is outside the primary tabs');
   for(const [width,height] of [[1440,1000],[768,1000],[390,844],[320,760]]) for(const colorScheme of ['light','dark']) {
     await page.setViewportSize({width,height});
     await page.emulateMedia({colorScheme});
+    assert.ok(await page.locator('.global-navigation > #nav-skills').isVisible());
+    assert.ok(await page.locator('.global-navigation > #nav-inbox').isVisible());
+    await page.locator('#navigation-more').tap();
+    assert.ok(await page.locator('#nav-secrets').isVisible());
+    assert.ok(!await review.isVisible());
     await trigger.tap();
     assert.equal(await review.isVisible(),true,'Touch opens Review');
     assert.match(await review.getAttribute('href'),/project=named%3ANavigation&host=connected-mac/,'Project and host survive');
@@ -50,12 +55,12 @@ try {
       mkdirSync(process.env.REVIEW_SCREENSHOTS,{recursive:true});
       await page.screenshot({path:resolve(process.env.REVIEW_SCREENSHOTS,`${width}-${colorScheme}.png`)});
     }
-    await page.locator('h1').click();
+    await page.mouse.click(6,height-6);
     assert.equal(await review.isVisible(),false,'Outside click dismisses');
   }
   await trigger.focus();
   await page.keyboard.press('Enter');
-  const links = await page.locator('#navigation-more-links a:visible').count();
+  const links = await page.locator('#project-more-links a:visible').count();
   for (let i=0; i<links && !await review.evaluate(el=>el===document.activeElement); i++) await page.keyboard.press('Tab');
   assert.equal(await review.evaluate(el=>el===document.activeElement),true,'Tab reaches Review');
   await page.keyboard.press('Escape');
@@ -67,17 +72,22 @@ try {
   assert.equal(await review.isVisible(),false,'Trigger toggles closed');
   await trigger.click();
   await page.setViewportSize({width:768,height:1000});
-  await page.waitForFunction(()=>!document.querySelector('#navigation-more-links').matches(':popover-open'));
+  await page.waitForFunction(()=>!document.querySelector('#project-more-links').matches(':popover-open'));
   assert.equal(await review.isVisible(),false,'Resizing dismisses the anchored menu');
   await review.evaluate(el=>el.setAttribute('aria-current','page'));
   assert.notEqual(await trigger.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)','Review has an active indicator');
-  await page.evaluate(({actions,profile})=>{
-    document.querySelector('#quick-issue-open').insertAdjacentHTML('afterend',actions+profile);
+  await page.evaluate(({profile})=>{
+    document.querySelector('#quick-issue-open').insertAdjacentHTML('afterend',profile);
     document.querySelector('#project-name').textContent='A project with a very long name';
     HeyBossUI.icons();
-  },{actions:readFileSync(resolve(source,'issue-header-actions.html'),'utf8'),profile:readFileSync(resolve(source,'issue-profile.html'),'utf8')});
+  },{profile:readFileSync(resolve(source,'issue-profile.html'),'utf8')});
   await page.setViewportSize({width:320,height:760});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Full issue header fits a narrow phone');
+  await page.locator('#project-trigger').click();
+  const picker = await page.locator('#project-menu').boundingBox();
+  const row = await page.locator('.app-navigation').boundingBox();
+  assert.ok(picker.y>=row.y+row.height-4 && picker.x>=0 && picker.x+picker.width<=320,'Project picker opens below the second row');
+  await page.keyboard.press('Escape');
   await trigger.click();
   if(process.env.REVIEW_SCREENSHOTS) await page.screenshot({path:resolve(process.env.REVIEW_SCREENSHOTS,'320-full-header.png')});
   assert.deepEqual(errors,[],'No runtime errors');

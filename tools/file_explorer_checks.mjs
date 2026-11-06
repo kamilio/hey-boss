@@ -8,6 +8,7 @@ export async function checkExplorer(page, root, run, origin) {
   const dialog = page.locator('.file-explorer'), find = dialog.getByRole('searchbox');
   const open = name => dialog.getByRole('button',{name,exact:true}).click();
   const edit = dialog.locator('.cm-content');
+  await page.locator('#project-more').click();
   await page.locator('#project-settings-trigger').click();
   const settings = page.locator('#project-settings-dialog');
   assert.deepEqual(await settings.getByRole('tab').allTextContents(),['Configuration','Activity']);
@@ -17,7 +18,12 @@ export async function checkExplorer(page, root, run, origin) {
   await edit.waitFor();
   assert.equal(await dialog.locator('h3').innerText(),'prs.md');
   assert.equal(await page.locator('#nav-prompts').getAttribute('aria-current'),'page');
-  await page.locator('#nav-issues').click();
+  await page.locator('#project-more').click();
+  await page.locator('#project-settings-trigger').click();
+  await page.locator('#project-prs:enabled').waitFor();
+  assert.equal(await settings.locator('#project-settings-name').innerText(), 'Configuration browser verification');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  await page.locator('#project-more').click();
   await page.locator('#nav-prompts').click();
   await edit.waitFor();
   assert.equal(await dialog.locator('h3').innerText(),'worker.md');

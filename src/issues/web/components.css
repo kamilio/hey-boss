@@ -197,8 +197,8 @@ kbd,
   z-index: 20;
 }
 .header-inner {
-  max-width: 1360px;
-  padding: 0 48px;
+  max-width: 1224px;
+  padding: 0 40px;
   margin: auto;
   height: 100%;
   display: flex;
@@ -579,9 +579,13 @@ h1 {
   color: var(--muted);
   font-size: 12px;
 }
+.global-navigation, .navigation-inner { display:flex; align-items:center; }
+.global-navigation { gap:14px; }
+.navigation-inner .project-trigger {max-width:min(30vw,350px); margin-left:0}
+.navigation-inner .project-trigger > span:last-child {flex-shrink:0}
 .app-navigation {
-  overflow-x: auto;
-  scrollbar-width: thin;
+  position:relative;
+  z-index:10;
   border-bottom: 1px solid var(--line);
   background: var(--hover);
 }
@@ -592,7 +596,7 @@ h1 {
   display: flex;
   gap: 28px;
 }
-.navigation-inner > a {
+:is(.navigation-inner,.global-navigation) > a {
   flex-shrink: 0;
   display: inline-flex;
   gap: 8px;
@@ -603,11 +607,11 @@ h1 {
   font-size: 13px;
   font-weight: 600;
 }
-.navigation-inner > a.selected {
+:is(.navigation-inner,.global-navigation) > a.selected {
   color: var(--text);
   border-bottom-color: var(--accent);
 }
-.navigation-inner svg {
+:is(.navigation-inner,.global-navigation) svg {
   width: 16px;
   height: 16px;
 }
@@ -664,8 +668,10 @@ h1 {
     display: none;
   }
   .project-control {
-    flex: 1;
+    flex: 0 1 auto;
+    min-width: 54px;
   }
+  .global-navigation {gap:6px;}
   .header-divider {
     height: 20px;
   }
@@ -739,8 +745,9 @@ h1 {
     right: 18px;
     min-width: 0;
     max-width: none;
-    top: 66px;
-    max-height: calc(100dvh - 84px - env(safe-area-inset-bottom));
+    top: auto;
+    margin-top: 4px;
+    max-height: calc(100dvh - 128px - env(safe-area-inset-bottom));
   }
   .popover-search input {
     font-size: 16px;
@@ -759,9 +766,9 @@ h1 {
 @media (max-width: 700px) {
   .navigation-inner {
     padding: 0 20px;
-    gap: 24px;
+    gap: 10px;
   }
-  .navigation-inner > a {
+  :is(.navigation-inner,.global-navigation) > a {
     padding-top: 12px;
     padding-bottom: 10px;
     font-size: 12px;
@@ -773,12 +780,12 @@ h1 {
   .project-trigger {
     max-width: max(70px, calc(100vw - 265px));
   }}
-.navigation-inner > a[aria-current="page"] {color:var(--text);border-bottom-color:var(--accent);}
+:is(.navigation-inner,.global-navigation) > a[aria-current="page"] {color:var(--text);border-bottom-color:var(--accent);}
 
 /* Keep secondary navigation out of the main tabs and above scrolling surfaces. */
 .navigation-overflow:not(:has(a:not([hidden]))) { display: none; }
-#navigation-more { width: 44px; height: 44px; }
-.navigation-overflow:has([aria-current="page"]) #navigation-more {
+.navigation-overflow > .icon-button { width: 44px; height: 44px; }
+.navigation-overflow:has([aria-current="page"]) > .icon-button {
   color: var(--accent);
   background: var(--accent-soft);
 }
@@ -804,13 +811,14 @@ h1 {
   color: var(--muted);
   text-decoration: none;
 }
+.navigation-more-links a[hidden] {display:none}
 .navigation-more-links a:hover { background: var(--hover); color: var(--text); }
 .navigation-more-links a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
 
 @media (max-width: 380px) {
   .header-inner { gap: 8px; padding: 0 12px; }
   .header-divider { display: none; }
-  .navigation-inner { gap: 14px; }
+  .navigation-inner { gap: 8px; }
 }
 
 /* Reusable controls and surfaces from the Issues page. */
@@ -1026,15 +1034,20 @@ textarea::placeholder {
   .glass { border-radius: 14px; }
   .page-footer { flex-wrap: wrap; }
 }
+@media (max-width: 480px) {
+  .navigation-inner > a > [data-icon] {display:none}
+  .navigation-inner .project-control {flex:0 1 auto;min-width:0}
+  .navigation-inner .project-trigger {max-width:min(28vw,128px)}
+}
 @media (max-width: 380px) {
   body { min-width: 0; }
   main { padding-inline: 12px; }
-  .navigation-inner { padding-inline: 12px; gap: 10px; }
-  .navigation-inner > a { font-size: 11px; }
+  .navigation-inner { padding-inline: 12px; gap: 6px; }
+  :is(.navigation-inner,.global-navigation) > a { font-size: 11px; }
 }
 @media (max-width: 560px) {
-  .navigation-inner > a { gap: 5px; }
-  .navigation-inner svg { width: 14px; height: 14px; }
+  :is(.navigation-inner,.global-navigation) > a { gap: 5px; }
+  :is(.navigation-inner,.global-navigation) svg { width: 14px; height: 14px; }
 }
 
 /* The quick adder stays above page dialogs without disturbing their drafts. */
