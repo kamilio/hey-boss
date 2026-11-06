@@ -18,13 +18,13 @@ final class OverlayTests: XCTestCase {
             XCTAssertTrue(surface.accessibilityLabel()?.contains(message) == true)
             XCTAssertFalse(surface.accessibilityLabel()?.contains("dictation") == true)
             let label = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { !$0.isHidden && $0.stringValue == message })
-            if message == "Voice off" {
+            if message == "Voice off" || message == "Listening" {
                 try await Task.sleep(for: .milliseconds(350))
                 let icon = try XCTUnwrap(all.first { String(describing: type(of: $0)) == "IdentityView" })
                 let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
                 XCTAssertEqual(capCenter, icon.frame.midY, accuracy: 0.5)
-                XCTAssertEqual((label.frame.minX + label.intrinsicContentSize.width + icon.frame.minX) / 2,
-                               surface.bounds.midX, accuracy: 1)
+                XCTAssertEqual(label.frame.midX, surface.bounds.midX, accuracy: 0.5)
+                XCTAssertLessThan(icon.frame.maxX, label.frame.minX)
             }
             XCTAssertTrue(surface.layer?.sublayers?.first { $0.name == "ai-disabled" }?.isHidden == true)
             XCTAssertFalse(panel.canBecomeKey)

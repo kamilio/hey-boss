@@ -642,12 +642,13 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let labelX: CGFloat = expanded ? 102 : 40
+        let minimumLabelX: CGFloat = expanded ? 102 : 40
         let labelSize = connecting.intrinsicContentSize
-        let labelWidth = min(ceil(labelSize.width), statusWidth - labelX - 8)
-        let voiceInset = conversation != nil && showConnecting ? (statusWidth - labelX - labelWidth - 9) / 2 : 0
-        let contentOrigin = voiceInset + leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (size.width - 22) / 2
+        let labelWidth = min(ceil(labelSize.width), statusWidth - minimumLabelX - 8)
+        let compactVoice = conversation != nil && showConnecting && !expanded
+        let labelX = compactVoice ? max(minimumLabelX, (statusWidth - labelWidth) / 2) : minimumLabelX
+        let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
+        let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (size.width - 22) / 2
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
