@@ -118,6 +118,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .toggleAuto: self.toggleAutoMode()
             case .toggleSpeech: self.speech.toggle()
             case .toggleSpeechMode: self.speech.toggleEnabled()
+            case .startConversation: self.startConversation()
             case .chatWithContext: self.chatWithContext()
             case .cancel:
                 if self.conversation != nil { self.controlConversation("stop") }
@@ -161,7 +162,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Chat with Context · Hyper+M", #selector(chatWithContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Start Conversation · Hyper+C", #selector(startConversation)), ("Chat with Context · Hyper+M", #selector(chatWithContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -226,9 +227,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         history.refresh()
         historyWindow.show(keepingFocus: session.phase == .recording)
     }
-    @objc private func chatWithContext() {
+    @objc private func startConversation() { openConversation(withContext: false) }
+    @objc private func chatWithContext() { openConversation(withContext: true) }
+    private func openConversation(withContext: Bool) {
         guard !openingConversation else { return }
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let app = withContext ? NSWorkspace.shared.frontmostApplication : nil
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
             showOverlay(true); overlay?.error("Finish dictating before opening chat."); return
@@ -238,13 +241,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         openingConversation = true
         showOverlay(true)
         applyConversation(["active": true, "phase": "starting", "message": "Opening chat…", "action": "Cancel opening chat"])
-        let source = app.bundleIdentifier == "local.hey-boss.desktop" ? nil : (app.localizedName ?? app.executableURL?.lastPathComponent ?? "Current app")
+        let source = app.flatMap { $0.bundleIdentifier == "local.hey-boss.desktop" ? nil : $0.localizedName ?? "Current app" }
         let revision = conversationRevision
         contextQueue.async {
             do {
-                let text = source.flatMap { _ in AppContext.capture(pid: app.processIdentifier) }
+                let text = source != nil ? app.flatMap { AppContext.capture(pid: $0.processIdentifier) } : nil
                 guard DispatchQueue.main.sync(execute: { self.openingConversation && self.conversationRevision == revision }) else { return }
-                var request: [String: Any] = ["command": "conversation_context", "sync": false]
+                var request: [String: Any] = ["command": withContext ? "conversation_context" : "conversation_start", "sync": false]
                 request["title"] = source; request["description"] = text
                 guard try self.chatRequest(request)?["status"] as? String == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
                 DispatchQueue.main.async {
@@ -311,6 +314,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if next == nil { overlay?.update(session.phase) }
         }
         if next == nil, previous {
+            if let detail = state?["detail"] as? String, state?["phase"] as? String == "idle",
+               !["Ready", "Voice off", "Microphone off"].contains(detail) { overlay?.error(detail) }
             focusTrigger.reset()
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.conversation == nil else { return }
@@ -365,6 +370,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
             view.onEditVocabulary = { [weak self] term in self?.editVocabulary(term) }
             view.onShowHistory = { [weak self] in self?.showHistory() }
+            view.onStartConversation = { [weak self] in self?.startConversation() }
+            view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
             view.onChatWithContext = { [weak self] in self?.chatWithContext() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }
             view.onStopConversation = { [weak self] in self?.controlConversation("stop") }
@@ -526,7 +533,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
-            "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "context": "Control+Command+Option+Shift+M"],
+            "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "conversation": "Control+Command+Option+Shift+C", "context": "Control+Command+Option+Shift+M"],
             "enter_exceptions": enterExceptions.bundleIDs, "enter_exception_sites": enterExceptions.sites,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,

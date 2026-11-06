@@ -78,7 +78,7 @@ public enum DictationShortcut: Int, CaseIterable {
     public static let help = "Hyper+E: toggle Auto Submit for this app or website · Hyper+R: start / stop dictation"
 }
 
-public enum HotkeyAction: Equatable { case none, toggle(DictationShortcut), toggleAuto, toggleSpeech, toggleSpeechMode, chatWithContext, cancel }
+public enum HotkeyAction: Equatable { case none, toggle(DictationShortcut), toggleAuto, toggleSpeech, toggleSpeechMode, startConversation, chatWithContext, cancel }
 public struct HotkeyState {
     private var held: Int?
     public init() {}
@@ -88,6 +88,7 @@ public struct HotkeyState {
         if code == 9 { held = code; return .toggleAuto }
         if code == 1 { held = code; return .toggleSpeech }
         if code == 17 { held = code; return .toggleSpeechMode }
+        if code == 8 { held = code; return .startConversation }
         if code == 46 { held = code; return .chatWithContext }
         guard let shortcut = DictationShortcut(rawValue: code) else { return .none }
         held = code

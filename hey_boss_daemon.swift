@@ -5282,7 +5282,8 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     func controlConversation(_ action: String?) -> Bool {
         guard let chat = conversationWindow as? VoiceConversation, chat.voiceStatus["active"] as? Bool == true else { return false }
         if chat.window.attachedSheet != nil, action != "stop" { chat.show(); return true }
-        if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
+        if action == "show" { chat.show() }
+        else if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
         else if action == "stop" { chat.stop("Microphone off") }
         else if action == "interrupt" { chat.listenForNextTurn() }
         else { chat.toggle() }
@@ -7481,6 +7482,50 @@ final class ConversationText: NSTextField {
 }
 
 @available(macOS 26, *)
+final class ConversationCaption: NSPanel {
+    let line = NSTextField(labelWithString: "")
+    private let font = NSFont.systemFont(ofSize: 20, weight: .medium)
+    private var passage = "", typesetter: CTTypesetter?, page = NSRange()
+    init() {
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 464, height: 54), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        title = "Spoken reply"; level = .floating; hidesOnDeactivate = false
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        ignoresMouseEvents = true; isOpaque = false; backgroundColor = .clear
+        sharingType = .none
+        let glass = NSGlassEffectView(); glass.style = .regular; glass.cornerRadius = 24
+        let face = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        line.font = font; line.alignment = .center; line.maximumNumberOfLines = 1
+        line.frame = NSRect(x: 18, y: 14, width: frame.width - 36, height: 26)
+        face.addSubview(line); glass.contentView = face; contentView = glass
+    }
+    func display(_ text: String, word: NSRange) {
+        guard word.length > 0, NSMaxRange(word) <= text.utf16.count else { return }
+        if passage != text || typesetter == nil {
+            passage = text; page = NSRange()
+            typesetter = CTTypesetterCreateWithAttributedString(NSAttributedString(string: text, attributes: [.font: font]))
+        }
+        guard let typesetter else { return }
+        if word.location < page.location { page = NSRange() }
+        while NSMaxRange(page) <= word.location {
+            let start = NSMaxRange(page)
+            page = NSRange(location: start, length: max(1, CTTypesetterSuggestLineBreak(typesetter, start, line.bounds.width - 6)))
+        }
+        let style = NSMutableParagraphStyle(); style.alignment = .center
+        let styled = NSMutableAttributedString(string: (text as NSString).substring(with: page).trimmingCharacters(in: .newlines),
+            attributes: [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+        let local = NSIntersectionRange(word, page)
+        let relative = NSRange(location: local.location - page.location, length: local.length)
+        if NSMaxRange(relative) <= styled.length {
+            styled.addAttributes([.backgroundColor: NSColor.systemIndigo.withAlphaComponent(0.26), .underlineStyle: NSUnderlineStyle.single.rawValue], range: relative)
+        }
+        line.attributedStringValue = styled
+        if !isVisible, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
+            setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - frame.width / 2, y: screen.visibleFrame.minY + 80))
+            orderFrontRegardless()
+        }
+    }
+}
+@available(macOS 26, *)
 final class ConversationWindow: NSWindow {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .keyDown, [36, 76].contains(event.keyCode),
@@ -7504,6 +7549,7 @@ final class ConversationWindow: NSWindow {
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    lazy var caption = ConversationCaption()
     let historyList = NSTableView()
     private let split = NSSplitViewController()
     private let emptyHistory = NSTextField(wrappingLabelWithString: "Your conversations appear here.")
@@ -7697,6 +7743,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if !rows.isEmpty { revealLatest() }
         generateTitle()
+    }
+    func startFromPill() {
+        guard selectDirectory(nil) else { show(); return }
+        window.orderOut(nil)
+        toggle()
     }
     func openWithContext(source: String?, text: String?) {
         show()
@@ -7894,6 +7945,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if phase != next {
             ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): \(String(describing: self.phase), privacy: .public) → \(String(describing: next), privacy: .public)")
         }
+        if next != .speaking || playbackPaused { caption.orderOut(nil) }
         if next == .idle { sessionLock = nil }
         phase = next; status.stringValue = micMuted && next == .listening && message == "Listening" ? "Microphone muted" : message
         meter.show(next)
@@ -7917,7 +7969,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case .thinking: label = "Thinking…"
         case .speaking: label = playbackPaused ? "Paused" : "Speaking"
         }
-        return ["active": window.isVisible && (window.isKeyWindow || phase != .idle), "phase": phase.rawValue,
+        return ["active": window.isKeyWindow || phase != .idle, "phase": phase.rawValue,
                 "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
@@ -8414,11 +8466,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let speaksCount = part.text.utf16.count != part.span.length
             audio.speak(part.text, following: speech.prefix(3).map(\.text), highlight: { [weak self] word in
                 guard let self, NSMaxRange(word) <= part.text.utf16.count else { return }
+                if self.phase == .speaking, !self.playbackPaused { self.caption.display(part.text, word: word) }
                 self.playingThrough = NSMaxRange(word)
                 let span = speaksCount ? part.span : NSRange(location: part.span.location + word.location, length: word.length)
                 if self.lit?.0 !== part.label || self.lit?.1 != span { self.highlight(part.label, span) }
             }, finished: { [weak self] in
                 guard let self else { return }
+                self.caption.orderOut(nil)
                 self.playedPassages.append(part.text); self.playingPassage = ""; self.playingThrough = 0
                 self.highlight(part.label, nil); self.reading = false; self.playNext()
             })
@@ -10329,7 +10383,7 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_context", "conversation_toggle", "conversation_status", "conversation_control"].contains(request.command) {
+                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
@@ -10342,6 +10396,10 @@ struct Daemon {
                                 if request.command == "conversation_toggle" {
                                     reply.send(["status": overview.toggleFocusedConversation() ? "ok" : "unhandled"])
                                     return
+                                }
+                                if request.command == "conversation_start" {
+                                    overview.currentConversation().startFromPill()
+                                    reply.send(["status": "ok"]); return
                                 }
                                 overview.currentConversation().openWithContext(source: request.title, text: request.description)
                                 reply.send(["status": "ok"])
