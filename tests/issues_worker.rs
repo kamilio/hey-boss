@@ -599,10 +599,9 @@ fn codex_protocol_goal_completion_and_prompt_variables() {
         .iter()
         .filter(|v| v["method"] == "thread/goal/set")
         .collect();
-    assert_eq!(goals.len(), 2);
+    assert_eq!(goals.len(), 1);
+    assert!(!transcript.iter().any(|v| v["method"] == "thread/goal/get"));
     assert_eq!(goals[0]["params"]["status"], "active");
-    assert_eq!(goals[1]["params"]["status"], "complete");
-    assert!(goals[1]["params"].get("objective").is_none());
     let turn = transcript
         .iter()
         .find(|v| v["method"] == "turn/start")
@@ -2199,7 +2198,11 @@ fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     f.control("stop", id);
     let s = f.wait(|s| s["runs"][0]["finished_at"].is_number());
     assert_eq!(s["runs"][0]["state"], "cancelled");
-    assert_eq!(s["runs"][0]["goal"]["status"], "paused");
+    assert!(
+        !f.transcript()
+            .iter()
+            .any(|v| v["method"] == "thread/goal/set" && v["params"]["status"] != "active")
+    );
     assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
     assert!(f.cli(&["view", "1"])["issue"]["assignee"].is_null());
     f.control("retry", id);
@@ -2213,7 +2216,11 @@ fn stop_and_shutdown_reap_codex_before_releasing_claim() {
     let s = f.cli(&["worker", "status"]);
     assert_eq!(s["active"], 0);
     assert_eq!(s["runs"][0]["state"], "cancelled");
-    assert_eq!(s["runs"][0]["goal"]["status"], "paused");
+    assert!(
+        !f.transcript()
+            .iter()
+            .any(|v| v["method"] == "thread/goal/set" && v["params"]["status"] != "active")
+    );
 }
 #[test]
 fn orphan_recovery_stops_old_process_and_starts_fresh() {
@@ -2701,7 +2708,7 @@ fn parallel_worker_refreshes_subtask_readiness_before_reserving_parents() {
     assert_eq!(
         transcript
             .iter()
-            .filter(|v| v["method"] == "thread/goal/set" && v["params"]["status"] == "complete")
+            .filter(|v| v["method"] == "thread/goal/set" && v["params"]["status"] == "active")
             .count(),
         5
     );

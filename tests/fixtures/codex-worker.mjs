@@ -6,7 +6,7 @@ import {randomUUID} from 'node:crypto';
 import {spawnSync} from 'node:child_process';
 import {createInterface} from 'node:readline';
 
-let session = randomUUID(), goal = null, startedTurn = false;
+let session = randomUUID(), startedTurn = false;
 const mode = existsSync('mode.txt') ? readFileSync('mode.txt', 'utf8').trim() : 'completed';
 const send = value => process.stdout.write(JSON.stringify(value) + '\n');
 const cli = args => {
@@ -36,11 +36,9 @@ for await (const line of createInterface({input: process.stdin})) {
       result = {thread: {id: session}}; break;
     }
     case 'thread/goal/set':
-      if (params.status === 'active') assert(startedTurn);
-      goal = {...goal, ...params}; result = {goal}; break;
-    case 'thread/goal/get':
-      if (mode === 'partial-goal') goal = {...goal, status: 'complete'};
-      result = {goal}; break;
+      assert(startedTurn); assert.equal(params.status, 'active');
+      result = {goal: params}; break;
+    case 'thread/goal/get': throw Error('Workers must not poll goal status');
     case 'turn/start': {
       startedTurn = true;
       const text = params.input[0].text;
@@ -78,7 +76,6 @@ for await (const line of createInterface({input: process.stdin})) {
       continue;
     }
     if (mode === 'stale-turn-success') send({method:'turn/completed',params:{threadId:session,turn:{id:eventTurn,status:'completed'}}});
-    if (mode === 'malformed-completion') goal = {...goal,status:'complete'};
     send({method:'turn/completed',params:{threadId:session,turn:{id:turn,status:mode==='malformed-completion'?'completed':'failed',error:{message:'actual active turn failed'}}}});
     continue;
   }

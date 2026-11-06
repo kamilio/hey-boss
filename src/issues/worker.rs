@@ -753,7 +753,6 @@ struct Codex {
     pending: VecDeque<Value>,
     next_id: u64,
     session: Option<String>,
-    native_goal: bool,
     approvals: super::worker_approvals::Approvals,
     approval_items: VecDeque<(String, Value)>,
     infrastructure_outage: Option<String>,
@@ -799,29 +798,10 @@ impl Codex {
             pending: VecDeque::new(),
             next_id: 0,
             session: None,
-            native_goal: false,
             approvals: Default::default(),
             approval_items: VecDeque::new(),
             infrastructure_outage: None,
         })
-    }
-    fn suspend_goal(&mut self, state: &str) -> Result<Option<Value>> {
-        let Some(session) = self.session.clone().filter(|_| self.native_goal) else {
-            return Ok(None);
-        };
-        self.next_id += 1;
-        let id = self.next_id;
-        self.send(json!({"id":id,"method":"thread/goal/set","params":{"threadId":session,"status":state}}))?;
-        let deadline = Instant::now() + Duration::from_millis(800);
-        while Instant::now() < deadline {
-            if let Some(value) = self.receive()?
-                && value.get("id") == Some(&json!(id))
-                && value.get("method").is_none()
-            {
-                return Ok(value.get("result").and_then(|r| r.get("goal")).cloned());
-            }
-        }
-        Ok(None)
     }
     fn send(&mut self, value: Value) -> Result<()> {
         self.process.send(&value).map_err(Error::from)
@@ -1337,47 +1317,25 @@ pub(crate) fn preview(
 }
 fn prompt(job: &Job) -> (String, bool, String) {
     let config = &job.config;
-    let (task, goal) = task_prompt(job, config);
-    let artifact = artifact_task(&job.issue).is_some();
-    let dependencies = job.issue["dependency_context"].as_array();
-    let has_dependency_prs = dependencies.is_some_and(|deps| {
-        deps.iter().any(|d| {
-            d["pull_requests"]
-                .as_array()
-                .is_some_and(|prs| !prs.is_empty())
-        })
-    });
-    let section = |key: &str, enabled: bool| {
-        if enabled {
-            template(config.prompt_overrides.get(key), job)
-        } else {
-            String::new()
-        }
-    };
-    let sections = [
-        task,
-        section(
+    let (mut instructions, goal) = task_prompt(job, config);
+    if artifact_task(&job.issue).is_none() {
+        for key in [
             if config.worktree_enabled {
                 "worktree"
             } else {
                 "checkout"
             },
-            !artifact,
-        ),
-        section(if config.prs_enabled { "prs" } else { "main" }, !artifact),
-        section(
-            "handoff",
-            !artifact
-                && (config.prs_enabled || has_dependency_prs)
-                && (job.issue["dependency_ready_state"] != "closed" || has_dependency_prs),
-        ),
-    ];
-    let mut instructions = sections
-        .iter()
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+            if config.prs_enabled { "prs" } else { "main" },
+        ] {
+            let section = template(config.prompt_overrides.get(key), job);
+            if !section.is_empty() {
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str(&section);
+            }
+        }
+    }
     if job.issue["github_status"]["monitoring"] == true
         && job.issue["github_status"]["event"].is_string()
     {
@@ -1385,7 +1343,11 @@ fn prompt(job: &Job) -> (String, bool, String) {
         instructions.push_str(include_str!("prompts/github_status_changed.md").trim_end());
     }
     let objective = instructions.chars().take(4000).collect();
-    (instructions, goal, objective)
+    (
+        instructions,
+        goal && config.provider == crate::agent_runtime::Provider::Codex,
+        objective,
+    )
 }
 fn task_prompt(job: &Job, config: &ProjectConfig) -> (String, bool) {
     let rendered = template(&base_prompt(&config.prompt), job);
@@ -1462,7 +1424,7 @@ fn run_codex(
     let outcome = run_thread(&mut c, store, job, stop);
     // Let the agent recover within its current turn. Only an unfinished result
     // becomes a hold; a successful repair/completion remains successful.
-    let outcome = match (outcome, c.infrastructure_outage.as_deref()) {
+    match (outcome, c.infrastructure_outage.as_deref()) {
         (Ok((state, summary)), Some(detail)) if state == "blocked" => Ok((
             super::worker_infrastructure::STATE.into(),
             format!("{summary}\n\n{detail}"),
@@ -1474,18 +1436,7 @@ fn run_codex(
             ))
         }
         (outcome, _) => outcome,
-    };
-    if let Err(error) = &outcome {
-        let state = if matches!(error.code.as_str(), "cancelled" | "claim_timeout") {
-            "paused"
-        } else {
-            "blocked"
-        };
-        if let Ok(Some(goal)) = c.suspend_goal(state) {
-            let _ = store.worker_event(&job.id, &format!("Goal: {state}"), Some(&goal));
-        }
     }
-    outcome
 }
 fn run_thread(
     c: &mut Codex,
@@ -1517,7 +1468,6 @@ fn run_thread(
         .ok_or_else(|| Error::new("worker_error", "Codex did not return a turn ID"))?
         .to_owned();
     if goal_enabled {
-        c.native_goal = true;
         let result = c.rpc(
             "thread/goal/set",
             json!({"threadId":session,"objective":objective,"status":"active"}),
@@ -1525,12 +1475,6 @@ fn run_thread(
             job,
             stop,
         )?;
-        if result["goal"]["status"] != "active" {
-            return Err(Error::new(
-                "worker_error",
-                "Codex did not activate the goal",
-            ));
-        }
         store.worker_event(&job.id, "/goal activated", Some(&result["goal"]))?;
     }
     let mut final_text = String::new();
@@ -1738,88 +1682,17 @@ fn run_thread(
                             && v["summary"].as_str().is_some_and(|s| !s.trim().is_empty())
                     });
                 if let Some(report) = report {
-                    if goal_enabled {
-                        let state = if report["status"] == "completed" {
-                            "complete"
-                        } else {
-                            "blocked"
-                        };
-                        let goal = c.rpc(
-                            "thread/goal/set",
-                            json!({"threadId":session,"status":state}),
-                            store,
-                            job,
-                            stop,
-                        )?;
-                        store.worker_event(
-                            &job.id,
-                            &format!("Goal: {state}"),
-                            Some(&goal["goal"]),
-                        )?;
-                    }
                     return Ok((
                         report["status"].as_str().unwrap().into(),
                         report["summary"].as_str().unwrap().into(),
                     ));
                 }
-                if goal_enabled {
-                    let result = c.rpc(
-                        "thread/goal/get",
-                        json!({"threadId":session}),
-                        store,
-                        job,
-                        stop,
-                    )?;
-                    store.worker_event(&job.id, "Checking goal progress", Some(&result["goal"]))?;
-                    match result["goal"]["status"].as_str() {
-                        Some("complete") => {
-                            return Err(Error::new(
-                                "worker_error",
-                                format!(
-                                    "Codex completed its goal without a valid completion report.\n\n{final_text}"
-                                ),
-                            ));
-                        }
-                        Some("active") => {
-                            let result = c.rpc(
-                                "turn/start",
-                                turn_params(
-                                    &session,
-                                    &template(
-                                        job.config.prompt_overrides.get("goal_continue"),
-                                        job,
-                                    ),
-                                ),
-                                store,
-                                job,
-                                stop,
-                            )?;
-                            turn = result["turn"]["id"]
-                                .as_str()
-                                .ok_or_else(|| {
-                                    Error::new("worker_error", "Missing continuation turn")
-                                })?
-                                .into();
-                            final_text.clear();
-                        }
-                        _ => {
-                            return Err(Error::new(
-                                "blocked",
-                                format!(
-                                    "Codex goal stopped with status {}. {final_text}",
-                                    result["goal"]["status"]
-                                ),
-                            ));
-                        }
-                    }
-                } else {
-                    return Err(Error::new(
-                        "worker_error",
-                        format!(
-                            "Codex ended without a completion report. Review the saved session.\n\n{final_text}"
-                        ),
-                    ));
-                }
+                return Err(Error::new(
+                    "worker_error",
+                    format!(
+                        "Codex ended without a completion report. Review the saved session.\n\n{final_text}"
+                    ),
+                ));
             }
             _ => {}
         }
@@ -2521,26 +2394,19 @@ mod tests {
         }
     }
     #[test]
-    fn contextual_prompts_are_overridable_with_single_pass_variables() {
-        let config: ProjectConfig = serde_json::from_value(json!({
-            "prs_enabled":true,
-            "prompt_overrides":{
-                "handoff":"Handoff {{number}}: {{project_arg}}"
-            }
-        }))
-        .unwrap();
-        let mut task = issue();
-        task["plan"] = json!({"path":"/tmp/{{number}}.md"});
-        task["github_status"] = json!({"prs":{}});
-        task["dependency_context"] = json!([{"number":3,"title":"Dependency {{number}}","state":"ready","pull_requests":[]}]);
-        let text = preview(&config, &project(), task).0;
-        assert!(
-            text.contains("Handoff 7: 'named:a'\\''b $(touch nope)'"),
-            "{text}"
-        );
-
-        assert!(!text.contains("Dependencies unblock at Ready"), "{text}");
-        assert!(!text.contains("Plan document:"), "{text}");
+    fn newly_eligible_tasks_receive_the_regular_prompt() {
+        for prs in [false, true] {
+            let config: ProjectConfig = serde_json::from_value(json!({
+                "prs_enabled":prs, "prompt_overrides":{"handoff":"Retired instructions."}
+            }))
+            .unwrap();
+            let ordinary = preview(&config, &project(), issue()).0;
+            assert!(!ordinary.contains("Retired instructions."));
+            let mut task = issue();
+            task["dependency_ready_state"] = json!("ready");
+            task["dependency_context"] = json!([{"state":"ready","pull_requests":[{"url":"https://github.com/example/repo/pull/1"}]}]);
+            assert_eq!(preview(&config, &project(), task).0, ordinary);
+        }
     }
     #[test]
     fn legacy_layout_cannot_reorder_sections_or_expand_inserted_variables() {
@@ -2555,7 +2421,7 @@ mod tests {
             ..Default::default()
         };
         let (text, _, objective) = preview(&config, &project(), issue());
-        assert!(text.contains("\n\nShip 7\n\n"));
+        assert!(text.ends_with("\n\nShip 7"));
         assert_eq!(objective, text);
         config.prompt_overrides.layout = None;
         assert_eq!(text, preview(&config, &project(), issue()).0);
@@ -2563,10 +2429,9 @@ mod tests {
             text.starts_with("Task Literal {{body}}\n\nWork in"),
             "{text}"
         );
-        assert!(text.contains("Dependencies unblock at Ready"));
     }
     #[test]
-    fn configured_prompts_keep_their_instructions_and_add_pr_handoff_context() {
+    fn configured_prompts_include_only_the_selected_workspace_and_delivery() {
         for prs_enabled in [false, true] {
             for worktree_enabled in [false, true] {
                 let config = ProjectConfig {
@@ -2592,16 +2457,7 @@ mod tests {
                     },
                     if prs_enabled { "PR" } else { "Main" }
                 );
-                assert!(text.starts_with(&base));
-                if prs_enabled {
-                    assert!(text.contains("stacked PRs"));
-                    assert!(text.contains("Dependencies unblock at Ready, before merge.\n\n- "));
-                    assert!(text.contains(
-                        "hey-boss issue ready 7 --project 'named:a'\\''b $(touch nope)'"
-                    ));
-                } else {
-                    assert_eq!(text, base);
-                }
+                assert_eq!(text, base);
                 assert!(!goal);
                 assert_eq!(objective, text);
             }

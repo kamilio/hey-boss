@@ -131,6 +131,9 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
 
     assert_eq!(f.pickup_ready(), vec![1]);
 
+    let ordinary =
+        f.run(json!({"action":"worker_preview","number":2,"config":{}}))["prompt"].clone();
+
     // Attach PR #101 to Step 1 and mark Step 1 Ready (without pre-configuring prs_enabled).
     f.run(json!({
         "action": "add_pull_request",
@@ -159,7 +162,7 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
         "https://github.com/example/repo/pull/101"
     );
 
-    // Claiming retains structured context and generic stacked-PR guidance.
+    // Claiming retains structured context and uses the ordinary worker instructions.
     let claim2 = f.run(json!({"action": "claim", "number": 2, "force": false}));
     assert_eq!(
         claim2["issue"]["dependency_context"],
@@ -179,10 +182,7 @@ fn atomic_then_chain_creates_entire_sequence_and_unblocks_step_by_step_on_ready_
         !instructions.contains("https://github.com/example/repo/pull/101"),
         "Prerequisite PR context should be fetched, not injected into instructions: {instructions}"
     );
-    assert!(
-        instructions.contains("dependency branch as your branch start and PR base"),
-        "Expected stacked PR branch/base guidance in instructions: {instructions}"
-    );
+    assert_eq!(instructions, ordinary.as_str().unwrap());
 
     // Closing Step 2 unblocks Step 3 automatically.
     f.run(json!({"action": "close", "number": 2, "force": false}));

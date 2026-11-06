@@ -122,14 +122,11 @@ Pi settled retries and extension cancellation, malformed streams, and existing
 Codex worker lifecycle behavior. The fixture never calls a model.
 
 `cargo test --test worker_providers` covers provider selection, claims, steering,
-conversation history, goal continuation, stopping and exact-session retry.
+conversation history, stopping, and missing task reports.
 Its opt-in `real_provider_workers_complete_their_claimed_issue` test runs Claude
 and Pi against isolated Git checkouts and verifies their proof files, commits,
 and issue closure. It passed with Claude 2.1.286 and Pi 0.87.1. The real resume
 and live-control suites also passed again with those versions and Codex 0.159.3.
-`real_claude_and_pi_goals_verify_tool_effects` verifies their goal proof
-files separately; the older all-provider goal test assumes dedicated read/write
-tools that the tested Codex session did not expose.
 
 `tools/provider_workers_browser_checks.js` exercises saving/reopening provider
 settings through the real configuration API, conversation labels, tool details,
@@ -169,40 +166,19 @@ in the live deadline check. The adapter now lists and terminates the owned
 thread's terminal handles and requires confirmation before returning success.
 It does not guess operating-system PIDs. Codex stop/drop have separate live checks.
 
-Additional manual checks use real goals and sustained idle connections:
+Additional manual checks use sustained idle connections:
 
 ```sh
-cargo test --locked --test agent_goals real_managed_goals_verify_tool_effects -- --ignored --nocapture
 cargo test --locked --test agent_soak -- --ignored --nocapture
 cargo test --locked --lib retained_stopped_sessions_keep_resource_usage_bounded -- --ignored --nocapture
 ```
 
-The goal check writes and reads a scratch proof file with each provider. The
-one-hour connection soak makes only six model requests and checks session identity,
+The one-hour connection soak makes only six model requests and checks session identity,
 idle activity, transport inspection, memory samples, and replies after the hour.
 The 1,000-session transport soak retains stopped objects and checks reader cleanup
 and descriptor counts; it passed locally with descriptors unchanged at four.
 
-## Provider-neutral goals
-
-`ManagedGoal` supplies continuation without requiring a native goal service.
-Create it with the full objective, call `start`, then feed each ordered session
-event to `observe`. A completed turn containing a valid JSON `status`/`summary`
-report completes or blocks the goal. Ordinary turn completion sends a continuation
-in the same session; failed/interrupted turns block it. Approvals/input still go
-to the embedding application's explicit decision handler. This controller does
-not also activate Codex's automatic native goals, avoiding duplicate continuation.
-Queued successor guards preserve the goal's scope even when several completed
-turns are buffered. Pi deferred/pending assistant work is not successful completion.
-
-`pause` records paused intent before interrupting, so late events cannot reactivate
-it. `start` explicitly re-enables a paused/blocked goal; complete goals reject
-restart. Serialize the controller with serde and persist it alongside the entire
-session reference. On process recovery, launch the exact reference and call
-`resume`; the old turn guard is discarded while the objective and completed-turn
-accounting are retained. A goal attached to one owned process cannot control a
-second process. `last_usage` retains the provider's last usage payload; it does
-not invent a cumulative token count across differing provider accounting formats.
+## Model selection
 
 Explicit logical models use `Launch.model: Option<ModelSelection>`. Persist the
 whole `SessionRef`, including its model. Omitting the launch model inherits a

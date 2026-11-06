@@ -185,25 +185,24 @@ fn claude_and_pi_workers_claim_steer_save_history_and_complete() {
     }
 }
 #[test]
-fn claude_and_pi_goals_continue_in_the_same_session() {
+fn claude_and_pi_do_not_send_a_continuation_for_a_missing_task_report() {
     for provider in ["claude", "pi"] {
         let f = Fixture::new(provider, true);
         assert_eq!(
             f.wait("SELECT state FROM worker_runs WHERE finished_at IS NOT NULL"),
-            "completed",
+            "failed",
             "{}",
             f.wait("SELECT summary FROM worker_runs WHERE finished_at IS NOT NULL")
         );
         let inputs = fs::read_to_string(f.root.join("inputs.jsonl")).unwrap();
-        assert_eq!(inputs.lines().count(), 2);
+        assert_eq!(inputs.lines().count(), 1);
         assert_eq!(
             f.wait("SELECT CAST(count(*) AS TEXT) FROM issue_agent_launches"),
             "1"
         );
-        assert!(inputs.contains("Continue the saved goal"));
-        assert_eq!(
-            f.wait("SELECT json_extract(goal,'$.status') FROM worker_runs LIMIT 1"),
-            "complete"
+        assert!(
+            f.wait("SELECT summary FROM worker_runs WHERE finished_at IS NOT NULL")
+                .contains("without a completion report")
         );
     }
 }

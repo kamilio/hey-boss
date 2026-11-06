@@ -159,26 +159,11 @@ fn reopening_ready_dependencies_blocks_future_pickup_but_preserves_running_claim
     );
 }
 #[test]
-fn ready_requires_pr_project_and_pr_attachment_and_is_not_a_worker_pickup_state() {
+fn ready_assigns_boss_without_a_pr_and_is_not_picked_up_while_assigned() {
     let mut f = Fixture::new("ready-guards");
     f.create(None);
-    assert!(
-        f.store
-            .execute(&Fixture::request(
-                json!({"action":"ready","number":1,"force":false})
-            ))
-            .is_err()
-    );
-    enable_prs(&mut f);
-    assert!(
-        f.store
-            .execute(&Fixture::request(
-                json!({"action":"ready","number":1,"force":false})
-            ))
-            .is_err()
-    );
-    attach_pr(&mut f, 1);
     f.run(json!({"action":"ready","number":1,"force":false}));
+    assert_eq!(f.view(1)["assignee"], "human:boss");
     assert!(f.ready().is_empty());
     f.run(json!({"action":"close","number":1,"force":true}));
     assert_eq!(f.view(1)["state"], "closed");

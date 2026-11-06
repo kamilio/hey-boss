@@ -150,7 +150,14 @@ fn prompt_rename_preserves_local_edits_and_archives_retired_files() {
     let dir = f.root.join(".hey-boss/prompts");
     fs::remove_file(dir.join("delivery-main.md")).unwrap();
     fs::write(dir.join("main.md"), "Unsynced delivery").unwrap();
-    for file in ["layout.md", "resume.md", "prs.md"] {
+    let archived = [
+        "layout.md",
+        "resume.md",
+        "handoff.md",
+        "goal_continue.md",
+        "prs.md",
+    ];
+    for file in archived {
         fs::write(dir.join(file), "Old custom text").unwrap();
     }
     f.sync().unwrap();
@@ -163,7 +170,7 @@ fn prompt_rename_preserves_local_edits_and_archives_retired_files() {
         f.call(json!({"action":"project_settings"}))["prompt_overrides"],
         json!({"main":"Unsynced delivery"})
     );
-    for file in ["layout.md", "resume.md", "prs.md"] {
+    for file in archived {
         assert!(!dir.join(file).exists());
         assert_eq!(
             fs::read_to_string(dir.parent().unwrap().join("retired-prompts").join(file)).unwrap(),

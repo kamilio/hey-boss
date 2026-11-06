@@ -76,7 +76,7 @@ places fixed arguments after the caller's arguments.
 
 The Rust [agent runtime](docs/agent-runtime.md) controls owned Codex, Claude Code,
 and Pi sessions through one API, including resume, activity, steering, interruption,
-explicit approvals/input, and provider-neutral goal continuation. Choose Codex,
+and explicit approvals/input. Choose Codex,
 Claude Code or Pi in **Worker settings → Agent**, or pass `--provider claude|pi`
 to `workers add`. Existing workers default to Codex; changes
 apply to newly picked issues. Each provider must be installed and authenticated

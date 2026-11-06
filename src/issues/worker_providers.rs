@@ -67,7 +67,7 @@ pub(super) fn run(
     };
     store.worker_process(&job.id, owned.agent.pid())?;
     store.worker_event(&job.id, &format!("Launching {}", provider.name()), None)?;
-    let (applied, goal, objective) = prompt(job);
+    let (applied, _, _) = prompt(job);
     let text = if provider == Provider::Pi {
         format!(
             "{}\n\n{}",
@@ -93,13 +93,6 @@ pub(super) fn run(
     let mut activity = String::new();
     let mut model_started = false;
     let mut last_check = Instant::now() - Duration::from_secs(1);
-    if goal {
-        store.worker_event(
-            &job.id,
-            "Goal: active",
-            Some(&json!({"status":"active","objective":objective})),
-        )?;
-    }
     let outcome = (|| -> Result<(String, String)> {
         loop {
             if last_check.elapsed() >= Duration::from_millis(200) {
@@ -328,49 +321,22 @@ pub(super) fn run(
                                 && v["summary"].as_str().is_some_and(|s| !s.trim().is_empty())
                         });
                     if let Some(report) = report {
-                        if goal {
-                            store.worker_event(&job.id, "Goal finished", Some(&json!({"status":if report["status"] == "completed" {"complete"} else {"blocked"},"objective":objective})))?;
-                        }
                         return Ok((
                             report["status"].as_str().unwrap().into(),
                             report["summary"].as_str().unwrap().into(),
                         ));
                     }
-                    if !goal {
-                        return Err(Error::new(
-                            "worker_error",
-                            format!(
-                                "Agent ended without a completion report. Review the saved session.\n\n{output}"
-                            ),
-                        ));
-                    }
-                    let text = template(job.config.prompt_overrides.get("goal_continue"), job);
-                    turn = owned.agent.prompt(&text, None)?;
-                    record(
-                        &mut transcript,
-                        &Event::Message {
-                            role: "user".into(),
-                            text,
-                        },
-                    )?;
-                    store.worker_event(&job.id, "Continuing the saved goal", None)?;
+                    return Err(Error::new(
+                        "worker_error",
+                        format!(
+                            "Agent ended without a completion report. Review the saved session.\n\n{output}"
+                        ),
+                    ));
                 }
                 _ => {}
             }
         }
     })();
-    if goal && let Err(error) = &outcome {
-        let status = if error.code == "cancelled" {
-            "paused"
-        } else {
-            "blocked"
-        };
-        let _ = store.worker_event(
-            &job.id,
-            &format!("Goal: {status}"),
-            Some(&json!({"status":status,"objective":objective})),
-        );
-    }
     // Drop the process before dismissing unanswered requests.
     drop(owned);
     drop(approvals);

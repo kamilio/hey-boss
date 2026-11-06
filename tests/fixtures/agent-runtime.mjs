@@ -33,7 +33,6 @@ const checkModel = model => { if (expectedModel && model !== expectedModel) thro
 let turn = 'fixture-turn';
 let streaming = false;
 let turnNumber = 0;
-let goalTurns = 0;
 let output = '';
 let preflight;
 let nativeTool;
@@ -73,10 +72,6 @@ function prompt(text) {
   streaming = true;
   output = text;
   if (text === 'owned identity') output = process.env.HEY_BOSS_AGENT_ID ?? 'missing';
-  if (text.includes('goal fixture')) {
-    goalTurns += 1;
-    if (goalTurns === 2) output = JSON.stringify({status:'completed',summary:'Goal fixture verified'});
-  }
   if (provider === 'claude' && modelFailure !== 'missing') send({type:'system',subtype:'init',session_id:session,model:modelFailure ? 'default-model' : selectedModel});
   if (provider === 'pi') send({type:'agent_start'});
   if (provider === 'codex') send({method:'item/agentMessage/delta',params:{threadId:session,delta:text}});
@@ -159,7 +154,6 @@ function prompt(text) {
   }
   if (text.startsWith('hold')) return;
   if (text === 'missing session acknowledgement') return;
-  if (text.startsWith('queued goal')) { output = JSON.stringify({status:'completed',summary:'Initial turn verified'}); setTimeout(() => complete(), 300); return; }
   if (text === 'queued turns') { setTimeout(() => complete(), 300); return; }
   if (text === 'retry' && provider === 'pi') {
     send({type:'agent_end',messages:[],willRetry:true});
