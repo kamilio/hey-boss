@@ -149,6 +149,7 @@ final class Overlay {
     private var dockTimer: Timer?
     private let dockQueue = DispatchQueue(label: "hey-talk.dock-geometry", qos: .utility)
     private var dockReadPending = false
+    private var panelAnchorX: CGFloat = 100
     private var layoutRevision = 0
     private var dockList: AXUIElement?
     private var dockRestY: CGFloat?
@@ -161,6 +162,7 @@ final class Overlay {
     var onCancelPaste: (() -> Void)?
     private var notice: OverlayNotice?
     private var status: OverlayNotice?
+    private var closingStatus = false
     private var statusDismiss: DispatchWorkItem?
     private var noticeDismiss: DispatchWorkItem?
     private let noticeRecordButton = NSButton()
@@ -290,7 +292,7 @@ final class Overlay {
         guard let screen else { return }
         let visible = screen.visibleFrame
         dockMotion?.stop(); dockMotion = nil; dockRestY = nil
-        panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 12))
+        panel.setFrameOrigin(NSPoint(x: visible.midX - panelAnchorX, y: visible.minY + 12))
     }
     deinit {
         timer?.invalidate(); dockTimer?.invalidate(); connectingDelay?.cancel(); completionDismiss?.cancel(); dockMotion?.stop()
@@ -584,20 +586,23 @@ final class Overlay {
         let showConnecting = !connecting.isHidden
         let statusWidth: CGFloat = conversation != nil && !expanded ? 144 : 200
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26
-        let rightExtension = status?.frame.width ?? 0
+        let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
-        let target = NSSize(width: max(200, size.width + 96, size.width + 2 * max(leftExtension, rightExtension) + 16), height: size.height + 48)
+        // Status messages grow only the right edge of the window, keeping the recording control still.
+        let baseWidth = max(200, size.width + 96, size.width + 2 * leftExtension + 16)
+        let anchorX = baseWidth / 2
+        let target = NSSize(width: max(baseWidth, anchorX + size.width / 2 + rightExtension + 8), height: size.height + 48)
         layoutRevision += 1
         let revision = layoutRevision
         let shrinking = animated && panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion &&
             (target.width < panel.frame.width || target.height < panel.frame.height)
         if shrinking {
             // Keep closing glass inside the transparent window until its last frame.
-            resizePanel(to: NSSize(width: max(target.width, panel.frame.width), height: max(target.height, panel.frame.height)))
-        } else { resizePanel(to: target) }
+            resizePanel(to: NSSize(width: max(target.width, panel.frame.width), height: max(target.height, panel.frame.height)), anchorX: max(panelAnchorX, anchorX))
+        } else { resizePanel(to: target, anchorX: anchorX) }
         let width = size.width + leftExtension + rightExtension, height = size.height
-        let center = root.bounds.midX + (rightExtension - leftExtension) / 2
+        let center = panelAnchorX + (rightExtension - leftExtension) / 2
         let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
         // Clockwise from the top center, just outside the existing glass edge.
         let rim = CGMutablePath()
@@ -643,15 +648,17 @@ final class Overlay {
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
+            pillContent.animator().frame = NSRect(origin: .zero, size: frame.size)
+            status?.animator().alphaValue = closingStatus ? 0 : 1
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
             let labelX: CGFloat = expanded ? 102 : 40
             connecting.frame = NSRect(x: contentOrigin + labelX, y: 10, width: statusWidth - labelX - 8, height: 17)
         } completionHandler: { [weak self] in
-            guard shrinking, self?.layoutRevision == revision else { return }
-            self?.layout(animated: false)
+            guard let self, layoutRevision == revision else { return }
+            if closingStatus { clearStatus(); layout(animated: false) }
+            else if shrinking { layout(animated: false) }
         }
-        pillContent.frame = NSRect(origin: .zero, size: frame.size)
         CATransaction.begin(); CATransaction.setDisableActions(true)
         correctionIndicator.position = CGPoint(x: markX + 23, y: 26)
         submitIndicator.position = CGPoint(x: markX + 23, y: 10)
@@ -663,16 +670,19 @@ final class Overlay {
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(conversation?["action"] as? String ?? (phase == .recording ? "Stop dictation" : "Start dictation"))
     }
-    private func resizePanel(to windowSize: NSSize) {
-        guard panel.frame.size != windowSize else { return }
-        let delta = (windowSize.width - root.bounds.width) / 2
-        var frame = NSRect(x: panel.frame.midX - windowSize.width / 2, y: panel.frame.minY, width: windowSize.width, height: windowSize.height)
+    private func resizePanel(to windowSize: NSSize, anchorX: CGFloat) {
+        guard panel.frame.size != windowSize || panelAnchorX != anchorX else { return }
+        let oldX = panel.frame.minX
+        var frame = NSRect(x: oldX + panelAnchorX - anchorX, y: panel.frame.minY, width: windowSize.width, height: windowSize.height)
         if let screen = panel.screen {
             let visible = screen.visibleFrame
             frame.origin.x = min(max(frame.minX, visible.minX), visible.maxX - frame.width)
             frame.origin.y = min(max(frame.minY, visible.minY), visible.maxY - frame.height)
         }
         panel.setFrame(frame, display: false)
+        panelAnchorX = anchorX
+        let delta = oldX - panel.frame.minX
+        guard delta != 0 else { return }
         pill.frame.origin.x += delta
         var transform = CGAffineTransform(translationX: delta, y: 0)
         depth.removeAllAnimations()
@@ -726,10 +736,14 @@ final class Overlay {
         guard enabled, pasteWait == nil, notice == nil else { return }
         clearStatus()
         let dismiss = { [weak self] in
-            self?.clearStatus()
-            self?.layout(animated: true)
+            guard let self, !closingStatus else { return }
+            if panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                closingStatus = true
+            } else { clearStatus() }
+            layout(animated: true)
         }
         let content = OverlayNotice(message: message, dismiss: dismiss, compact: true)
+        if panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion { content.alphaValue = 0 }
         status = content; pillContent.addSubview(content)
         layout(animated: true)
         let timer = DispatchWorkItem(block: dismiss)
@@ -738,7 +752,7 @@ final class Overlay {
     }
     private func clearStatus() {
         statusDismiss?.cancel(); statusDismiss = nil
-        status?.removeFromSuperview(); status = nil
+        status?.removeFromSuperview(); status = nil; closingStatus = false
     }
     func confirmAction(_ action: CorrectionAction, failed: Bool = false) {
         guard enabled, pasteWait == nil, notice == nil else { return }

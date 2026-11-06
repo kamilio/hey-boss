@@ -384,6 +384,49 @@ final class OverlayTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(glow.path).boundingBox.width, try XCTUnwrap(outline).width)
     }
 
+    @MainActor func testRightStatusOpensAndClosesWithoutMovingThePill() async throws {
+        guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("Requires motion") }
+        let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        overlay.show(true)
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        let compact = panel.frame
+        overlay.setCorrection(false)
+        overlay.showStatus("AI correction off")
+        func status(in view: NSView) -> OverlayNotice? {
+            view as? OverlayNotice ?? view.subviews.lazy.compactMap(status(in:)).first
+        }
+        let root = try XCTUnwrap(panel.contentView)
+        let first = try XCTUnwrap(status(in: root))
+        XCTAssertEqual(panel.frame.minX, compact.minX, accuracy: 1, "Opening to the right should keep the window origin stable")
+        let face = try XCTUnwrap(first.superview?.layer)
+        func checkTransition() async throws {
+            for _ in 0..<15 {
+                try await Task.sleep(for: .milliseconds(10))
+                if let opacity = first.layer?.presentation()?.opacity, opacity > 0, opacity < 1,
+                   let width = face.presentation()?.bounds.width, width > TalkDesign.idleSize.width + 1,
+                   width < TalkDesign.idleSize.width + first.frame.width - 1 { return }
+            }
+            XCTFail("The text and pill should pass through intermediate frames together")
+        }
+        try await checkTransition()
+        try await Task.sleep(for: .milliseconds(350))
+        let close = try XCTUnwrap(first.subviews.compactMap { $0 as? NSButton }.first)
+        close.performClick(nil)
+        XCTAssertNotNil(first.superview, "Keep the message visible while the pill closes")
+        try await checkTransition()
+        overlay.showStatus("AI correction on")
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(status(in: root)?.accessibilityLabel(), "AI correction on")
+        let next = try XCTUnwrap(status(in: root))
+        try XCTUnwrap(next.subviews.compactMap { $0 as? NSButton }.first).performClick(nil)
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertNil(status(in: root))
+        XCTAssertEqual(panel.frame.minX, compact.minX, accuracy: 1)
+        XCTAssertEqual(panel.frame.size, compact.size)
+    }
+
     @MainActor func testVisibleDrawerHasRoomToAnimateClosed() async throws {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("Requires motion") }
         let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
