@@ -760,6 +760,7 @@ final class Overlay {
         guard enabled, pasteWait == nil, notice == nil else { return }
         let message: String
         switch action {
+        case .addVocabularyTerm(let term): message = "Added \(term)"
         case .slack(.users): message = "People"
         case .slack(.chat): message = "Chat opened"
         case .slack(.channel): message = "Channel opened"
@@ -779,6 +780,8 @@ final class Overlay {
         clearNotice()
         confirmation.stringValue = message
         confirmation.sizeToFit()
+        confirmation.lineBreakMode = .byTruncatingTail
+        confirmation.frame.size.width = min(confirmation.frame.width, 300)
         resultIcon.image = NSImage(systemSymbolName: failed ? "xmark" : "checkmark", accessibilityDescription: nil)
         resultIcon.symbolConfiguration = .init(pointSize: 11, weight: .semibold)
         resultIcon.contentTintColor = failed ? TalkDesign.failure : TalkDesign.success

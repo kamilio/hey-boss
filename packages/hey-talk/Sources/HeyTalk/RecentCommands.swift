@@ -14,6 +14,7 @@ struct RecentCommands {
     func executed(_ action: CorrectionAction) {
         let name: String
         switch action {
+        case .addVocabularyTerm: name = "add_dictation_vocabulary_term"
         case .paste: return
         case .nextThread: name = "t3_next_thread"
         case .switchThread(let position): name = "t3_switch_thread \(position)"

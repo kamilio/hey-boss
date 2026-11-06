@@ -21,14 +21,14 @@ struct CorrectionSettings {
 }
 
 enum CorrectionAction: Equatable {
-    case slack(SlackAction)
+    case addVocabularyTerm(String), slack(SlackAction)
     case paste(String), rename(String), clearInput, newThread(project: String?, text: String)
     case listThreads, nextThread, switchThread(Int), settleThread, pinThread(Bool)
 
     var text: String {
         switch self {
         case .slack(let action): return action.description
-        case .paste(let text), .rename(let text): return text
+        case .paste(let text), .rename(let text), .addVocabularyTerm(let text): return text
         case .clearInput: return "Clear input"
         case .nextThread: return "Go to the next T3 chat"
         case .listThreads: return "List T3 threads"
@@ -59,7 +59,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [], history: [[String: Any]] = [], settings: CorrectionSettings = CorrectionSettings()) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, canAddVocabularyTerm: Bool = true, recent: [[String]] = [], history: [[String: Any]] = [], settings: CorrectionSettings = CorrectionSettings()) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -75,6 +75,7 @@ final class Correction {
                             "required": arguments, "additionalProperties": false]]
         }
         var tools = [try tool("paste", "text")]
+        if canAddVocabularyTerm { tools.append(try tool("add_dictation_vocabulary_term", "term")) }
         if canClear { tools.append(try tool("clear_input")) }
         if let package { tools += try package.definitions(prompt: prompt) }
         let profile = settings.bedrockProfile
@@ -105,7 +106,7 @@ final class Correction {
         return request
     }
 
-    private static func action(_ bytes: URLSession.AsyncBytes, package: ToolPackage?, canClear: Bool) async throws -> (CorrectionAction?, [[String: Any]]) {
+    private static func action(_ bytes: URLSession.AsyncBytes, package: ToolPackage?, canClear: Bool, canAddVocabularyTerm: Bool) async throws -> (CorrectionAction?, [[String: Any]]) {
         var items: [[String: Any]] = []
         var action: CorrectionAction?
         for try await line in bytes.lines where line.hasPrefix("data:") {
@@ -124,6 +125,9 @@ final class Correction {
                       let values = try JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any] else { throw TalkError("Invalid correction tool call.") }
                 switch item["name"] as? String {
                 case "clear_input" where canClear && values.isEmpty: action = .clearInput
+                case "add_dictation_vocabulary_term" where canAddVocabularyTerm && values.count == 1:
+                    guard let term = values["term"] as? String else { throw TalkError("Missing vocabulary term.") }
+                    action = .addVocabularyTerm(try Vocabulary.term(term))
                 case "paste" where values.count == 1:
                     guard let text = (values["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
                     else { throw TalkError("Correction returned no text.") }
@@ -143,21 +147,21 @@ final class Correction {
         throw TalkError("Correction did not finish.")
     }
 
-    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [],
+    func correct(_ text: String, vocabulary: [String], appContext: String? = nil, app: (() -> [String: String]?)? = nil, package: ToolPackage? = nil, canClear: Bool = false, canAddVocabularyTerm: Bool = true, recent: [[String]] = [],
                  perform: ((CorrectionAction, @escaping (String) -> Void) -> Void)? = nil,
                  completion: @escaping (Result<CorrectionAction, Error>) -> Void) {
         func turn(_ history: [[String: Any]], last: CorrectionAction?, count: Int) {
             task = Task { @MainActor in
                 do {
                     let request = try Self.request(text: text, vocabulary: vocabulary, appContext: appContext, app: app?(),
-                                                   package: package, canClear: canClear, recent: recent, history: history)
+                                                   package: package, canClear: canClear, canAddVocabularyTerm: canAddVocabularyTerm, recent: recent, history: history)
                     let (bytes, response) = try await self.session.bytes(for: request)
                     guard let response = response as? HTTPURLResponse else { throw TalkError("Correction is unavailable.") }
                     if [408, 504].contains(response.statusCode) { throw URLError(.timedOut) }
                     guard (200..<300).contains(response.statusCode) else {
                         throw TalkError("Correction proxy returned HTTP \(response.statusCode).")
                     }
-                    let (action, items) = try await Self.action(bytes, package: package, canClear: canClear)
+                    let (action, items) = try await Self.action(bytes, package: package, canClear: canClear, canAddVocabularyTerm: canAddVocabularyTerm)
                     try Task.checkCancellation()
                     guard let action else {
                         guard let last else { throw TalkError("Correction returned no tool call.") }
@@ -171,6 +175,7 @@ final class Correction {
                           !history.contains(where: { $0["call_id"] as? String == id }) else { throw TalkError("Invalid tool call ID.") }
                     perform(action) { output in
                         if action == .nextThread { completion(.success(action)); return }
+                        if case .addVocabularyTerm = action { completion(.success(action)); return }
                         if case .slack = action { completion(.success(action)); return }
                         if case .paste = action { completion(.success(action)); return }
                         turn(history + items + [["type": "function_call_output", "call_id": id, "output": output]],

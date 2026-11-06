@@ -26,7 +26,40 @@ final class CorrectionTests: XCTestCase {
             XCTAssertEqual(values["app"] as? [String: String], app)
             let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
             XCTAssertEqual(tools.compactMap { $0["name"] as? String }, allowed
-                ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
+                ? ["paste", "add_dictation_vocabulary_term", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste", "add_dictation_vocabulary_term"])
+        }
+    }
+
+    func testVocabularyToolKeepsPhrasesIntactAndRejectsInvalidOrDisabledCalls() throws {
+        for (enabled, arguments, expected): (Bool, [String: String], CorrectionAction?) in [
+            (true, ["term": "Kunal Tum"], .addVocabularyTerm("Kunal Tum")),
+            (false, ["term": "Kunal Tum"], nil),
+            (true, ["term": "   "], nil),
+            (true, ["term": "Kunal", "extra": "Tum"], nil)
+        ] {
+            let correction = client()
+            let request = try Correction.request(text: "speech", vocabulary: [], canAddVocabularyTerm: enabled)
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            let names = (body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String }
+            XCTAssertEqual(names?.contains("add_dictation_vocabulary_term"), enabled)
+            let args = try JSONSerialization.data(withJSONObject: arguments)
+            let item = ["type": "function_call", "name": "add_dictation_vocabulary_term", "arguments": String(decoding: args, as: UTF8.self), "call_id": "vocab"]
+            let event = try JSONSerialization.data(withJSONObject: ["type": "response.output_item.done", "item": item])
+            var calls = 0
+            CorrectionProtocol.handle = { stub in
+                calls += 1
+                stub.respond(status: 200, body: "data: " + String(decoding: event, as: UTF8.self) + "\n\ndata: {\"type\":\"response.completed\"}\n\n")
+            }
+            let done = expectation(description: "vocabulary")
+            correction.correct("Add word: Kunal Tum", vocabulary: [], canAddVocabularyTerm: enabled, perform: { action, next in
+                XCTAssertEqual(action, expected)
+                next("vocabulary_added")
+            }) { result in
+                XCTAssertEqual(try? result.get(), expected)
+                done.fulfill()
+            }
+            wait(for: [done], timeout: 2)
+            XCTAssertEqual(calls, 1)
         }
     }
 
@@ -313,7 +346,7 @@ final class CorrectionTests: XCTestCase {
             let request = try Correction.request(text: "speech", vocabulary: [], package: allowed ? .t3 : nil)
             let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
             XCTAssertEqual((body["tools"] as? [[String: Any]])?.compactMap { $0["name"] as? String },
-                           allowed ? ["paste", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste"])
+                           allowed ? ["paste", "add_dictation_vocabulary_term", "t3_rename_thread", "t3_new_thread", "t3_list_threads", "t3_switch_thread", "t3_next_thread", "t3_settle_thread", "t3_pin_thread", "t3_unpin_thread"] : ["paste", "add_dictation_vocabulary_term"])
         }
     }
 
