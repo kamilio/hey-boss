@@ -111,6 +111,12 @@ enum PasteBlockReason: String {
 enum Paste {
     static let log = Logger(subsystem: "local.hey-talk", category: "paste")
     static let eventTag: Int64 = 0x48544C4B
+    static func recoverTranscript(_ original: String, to board: NSPasteboard?) -> (delivery: String, reason: PasteBlockReason?) {
+        guard let board else { return ("stdout", nil) }
+        board.clearContents()
+        return board.setString(original, forType: .string) ? ("clipboard", nil) : ("history", .clipboardUnavailable)
+    }
+
     static func copyAndStopWaiting(_ text: String, retry: Timer, to board: NSPasteboard) -> Bool {
         board.clearContents()
         guard board.setString(text, forType: .string) else { return false }

@@ -3,6 +3,21 @@ import XCTest
 @testable import HeyTalk
 
 final class PasteTests: XCTestCase {
+    func testCorrectionFailureRecoversExactTranscriptWithoutPasting() {
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        board.setString("Previous clipboard", forType: .string)
+        let original = "raw dictation…\nsecond line"
+
+        XCTAssertEqual(Paste.recoverTranscript(original, to: nil).delivery, "stdout")
+        XCTAssertEqual(board.string(forType: .string), "Previous clipboard")
+
+        let result = Paste.recoverTranscript(original, to: board)
+        XCTAssertEqual(result.delivery, "clipboard")
+        XCTAssertNil(result.reason)
+        XCTAssertEqual(board.string(forType: .string), original)
+    }
+
     func testClosingPendingPasteCopiesExactTranscriptAndStopsRetrying() {
         let board = NSPasteboard.withUniqueName()
         defer { board.releaseGlobally() }

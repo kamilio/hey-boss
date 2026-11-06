@@ -880,6 +880,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
 
         var response: [String: Any] = [:]
+        var copiedOriginal = false
         var info: [String: Any] = ["status": correctionEnabled ? "applied" : "off",
                                    "context_ms": context?.milliseconds ?? 0, "context_characters": context?.text?.count ?? 0]
         func report(_ delivery: String, _ reason: PasteBlockReason? = nil) {
@@ -897,13 +898,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             waitingPaste = nil; self.automatic = nil; hotkey?.reset()
             overlay?.finishProcessing(); scheduleRelease()
             lastPasteBlock = reason
-            if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
+            if response["history_saved"] as? Bool == false { overlay?.error(copiedOriginal ? "Raw transcript copied. History couldn’t be saved." : "Not saved. Copy from History before quitting.") }
             else if reason == .slackUnavailable { overlay?.showActivity(info["error"] as? String ?? "Slack unavailable", failed: true) }
             else if let action, reason == .t3Unavailable || reason == .newThreadUnavailable {
                 overlay?.confirmAction(action, failed: true)
             }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
-            else if let error = info["error"] as? String { overlay?.error(error) }
+            else if let error = info["error"] as? String { overlay?.error(copiedOriginal ? "Raw transcript copied. " + error : error) }
             if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated"].contains(delivery) {
                 restartAutomatic(id: id)
             }
@@ -1004,8 +1005,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .failure(let error):
                 info["error"] = error.localizedDescription
                 info["status"] = lastDelivery == nil ? "fallback" : "partial"
-                if let delivery = lastDelivery { finish(delivery) }
-                else { save(.paste(original)) { finish(self.paste ? "history" : "stdout") } }
+                func recover() {
+                    let result = Paste.recoverTranscript(original, to: self.paste ? .general : nil)
+                    copiedOriginal = result.delivery == "clipboard"
+                    finish(lastDelivery ?? result.delivery, result.reason)
+                }
+                if lastDelivery != nil { recover() }
+                else { save(.paste(original), then: recover) }
             }
         }
     }
