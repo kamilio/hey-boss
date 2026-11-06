@@ -42,6 +42,30 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn correcting_a_spelling_requires_the_original_and_preserves_other_terms() {
+    let mut f = Fixture::new();
+    f.run(json!({"action":"initialize","words":["Koonal Tum", "Atlas"]}))
+        .unwrap();
+    let result = f
+        .run(json!({"action":"rename","old":"Koonal Tum","new":"Kunal Tum"}))
+        .unwrap();
+    assert_eq!(result["vocabulary"], json!(["Atlas", "Kunal Tum"]));
+    assert!(
+        f.run(json!({"action":"rename","old":"Koonal Tum","new":"Stale"}))
+            .is_err()
+    );
+    assert!(
+        f.run(json!({"action":"rename","old":"Kunal Tum","new":"bad/term"}))
+            .is_err()
+    );
+    let result = f
+        .run(json!({"action":"rename","old":"Kunal Tum","new":"KUNAL Tum"}))
+        .unwrap();
+    assert_eq!(result["vocabulary"], json!(["Atlas", "KUNAL Tum"]));
+}
+
+#[test]
+
 fn vocabulary_is_global_persistent_and_case_insensitive() {
     let mut f = Fixture::new();
     assert_eq!(

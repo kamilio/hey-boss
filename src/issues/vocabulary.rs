@@ -22,6 +22,7 @@ pub enum Operation {
     Initialize { words: Vec<String> },
     Add { words: Vec<String> },
     Remove { words: Vec<String> },
+    Rename { old: String, new: String },
 }
 
 fn term(value: &str) -> Result<String> {
@@ -73,6 +74,14 @@ fn words(db: &Connection) -> Result<Vec<String>> {
     Ok(words)
 }
 
+fn write_term(db: &Connection, source: i64, word: &str, active: bool) -> Result<()> {
+    db.execute("INSERT INTO dictation_vocabulary(source,term,spelling,active) VALUES(?1,?2,?3,?4)
+                ON CONFLICT(source,term) DO UPDATE SET spelling=excluded.spelling,active=excluded.active
+                WHERE dictation_vocabulary.spelling IS NOT excluded.spelling OR dictation_vocabulary.active IS NOT excluded.active",
+                params![source,word.to_lowercase(),word,active])?;
+    Ok(())
+}
+
 pub(crate) fn execute(db: &Connection, operation: &Operation) -> Result<Value> {
     let initialized: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM dictation_vocabulary WHERE source=0 AND term='')",
@@ -80,6 +89,29 @@ pub(crate) fn execute(db: &Connection, operation: &Operation) -> Result<Value> {
         |r| r.get(0),
     )?;
     let (input, source, active) = match operation {
+        Operation::Rename { old, new } => {
+            let old = term(old)?;
+            let new = term(new)?;
+            let current = words(db)?;
+            if !current.contains(&old) {
+                return Err(Error::conflict(
+                    "This spelling has changed. Reopen Vocabulary to refresh it.",
+                ));
+            }
+            if old.to_lowercase() != new.to_lowercase() {
+                if current
+                    .iter()
+                    .any(|w| w.to_lowercase() == new.to_lowercase())
+                {
+                    return Err(Error::conflict(
+                        "That spelling is already in your vocabulary.",
+                    ));
+                }
+                write_term(db, 1, &old, false)?;
+            }
+            write_term(db, 1, &new, true)?;
+            (None, 0, false)
+        }
         Operation::Show => (None, 0, false),
         Operation::Initialize { words } if !initialized => (Some(words), 0, true),
         Operation::Initialize { .. } => (None, 0, false),
@@ -96,10 +128,7 @@ pub(crate) fn execute(db: &Connection, operation: &Operation) -> Result<Value> {
             .map(|word| term(word))
             .collect::<Result<Vec<_>>>()?;
         for word in normalized {
-            db.execute("INSERT INTO dictation_vocabulary(source,term,spelling,active) VALUES(?1,?2,?3,?4)
-                ON CONFLICT(source,term) DO UPDATE SET spelling=excluded.spelling,active=excluded.active
-                WHERE dictation_vocabulary.spelling IS NOT excluded.spelling OR dictation_vocabulary.active IS NOT excluded.active",
-                params![source,word.to_lowercase(),word,active])?;
+            write_term(db, source, &word, active)?;
         }
         if source == 0 {
             db.execute(
