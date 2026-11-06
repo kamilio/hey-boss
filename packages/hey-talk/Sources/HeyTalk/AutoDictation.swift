@@ -82,11 +82,16 @@ struct FocusedInput: Equatable {
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        guard lhs.app.processIdentifier == rhs.app.processIdentifier,
-              equal(lhs.window, rhs.window), lhs.document == rhs.document else { return false }
-        if CFEqual(lhs.element, rhs.element) { return lhs.composerLabel == rhs.composerLabel }
-        // T3 and Slack remount their message editors when returning to a conversation.
-        return lhs.window != nil && lhs.document != nil && lhs.composerLabel != nil && lhs.composerLabel == rhs.composerLabel
+        lhs.mismatch(rhs) == nil
+    }
+    func mismatch(_ other: Self?) -> String? {
+        guard let other else { return "no_editable_field" }
+        guard app.processIdentifier == other.app.processIdentifier else { return "app_changed" }
+        guard Self.equal(window, other.window) else { return "window_changed" }
+        guard document == other.document else { return "document_changed" }
+        guard composerLabel == other.composerLabel else { return "composer_changed" }
+        // T3 and Slack remount editors when returning to a conversation.
+        return CFEqual(element, other.element) || (window != nil && document != nil && composerLabel != nil) ? nil : "element_changed"
     }
     private static func equal(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
         if let lhs, let rhs { return CFEqual(lhs, rhs) }
@@ -167,18 +172,32 @@ struct FocusedInput: Equatable {
         guard ids.count == 2, ids.allSatisfy({ $0.count == 36 && UUID(uuidString: String($0)) != nil }) else { return nil }
         return URL(string: "t3code://threads/" + route)
     }
+    static func composerLink(_ document: String) -> URL? {
+        let prefix = "t3code://app/#/draft/"
+        guard document.hasPrefix(prefix) else { return threadLink(document) }
+        let id = document.dropFirst(prefix.count)
+        guard id.count == 36, UUID(uuidString: String(id)) != nil else { return nil }
+        return URL(string: "t3code://threads/draft/" + id)
+    }
     func restoreFocus() {
-        guard let window, Self.value(window, kAXRoleAttribute) as? String == kAXWindowRole else { return }
+        guard let window, Self.value(window, kAXRoleAttribute) as? String == kAXWindowRole else {
+            Paste.log.notice("Return: original window unavailable")
+            return
+        }
         if !app.isActive && !app.activate(options: []), let bundle = app.bundleURL {
             NSWorkspace.shared.openApplication(at: bundle, configuration: .init())
         }
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         if cmuxTab.map({ Self.value($0, kAXSelectedAttribute) as? Bool == true }) ?? true, Self.identify(element, app: app) == self,
-           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return }
+           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success, isFocused() { return }
         guard composerLabel != nil, let document, let bundle = app.bundleURL else { return }
         let link = app.bundleIdentifier == "com.tinyspeck.slackmacgap" && document.hasPrefix("slack://channel?")
-            ? URL(string: document) : Self.threadLink(document)
-        if let link { NSWorkspace.shared.open([link], withApplicationAt: bundle, configuration: .init(), completionHandler: nil) }
+            ? URL(string: document) : Self.composerLink(document)
+        guard let link else { Paste.log.notice("Return: no link for original composer"); return }
+        Paste.log.notice("Return: requesting original composer")
+        NSWorkspace.shared.open([link], withApplicationAt: bundle, configuration: .init()) { _, error in
+            if let error { Paste.log.notice("Return: composer open failed (code \((error as NSError).code))") }
+        }
     }
 
     // Search native containers only. Chromium can return its editors directly without reading chat history.
@@ -235,15 +254,15 @@ struct FocusedInput: Equatable {
         return tabs[(current + step + tabs.count) % tabs.count]
     }
 
-    func focusReturnedField() -> Bool {
+    func focusReturnedField() {
         guard app.isActive, let window,
-              Self.equal(Self.axElement(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute), window) else { return false }
-        if let cmuxTab, Self.value(cmuxTab, kAXSelectedAttribute) as? Bool != true { return false }
+              Self.equal(Self.axElement(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute), window) else { return }
+        if let cmuxTab, Self.value(cmuxTab, kAXSelectedAttribute) as? Bool != true { return }
         if Self.identify(element, app: app) == self,
-           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return true }
-        guard composerLabel != nil else { return false }
-        guard let editor = remountedEditor() else { return false }
-        return AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success
+           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return }
+        guard composerLabel != nil else { return }
+        guard let editor = remountedEditor() else { return }
+        AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
     }
 
     func remountedEditor() -> AXUIElement? {

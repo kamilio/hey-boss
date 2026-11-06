@@ -17,7 +17,7 @@ final class T3NewThreadTests: XCTestCase {
         guard case .newThread(nil, let text) = action, text.localizedCaseInsensitiveContains("publishing") else { return XCTFail("Did not route the dictated task") }
         let done = expectation(description: "pasted in draft")
         Paste.deliver(action, target: field.app, originalField: field, shouldPressEnter: { false }, returnToField: nil,
-                      targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
+                      needsField: true, onWait: nil, isCurrent: { true }) { delivery, reason in
             XCTAssertEqual(delivery, "pasted"); XCTAssertNil(reason); done.fulfill()
         }
         await fulfillment(of: [done], timeout: 5)
@@ -50,7 +50,7 @@ final class T3NewThreadTests: XCTestCase {
         let board = NSPasteboard.general.changeCount
         let done = expectation(description: "opened")
         Paste.deliver(action, target: field.app, originalField: field, shouldPressEnter: { XCTFail("Unexpected submit"); return true },
-                      returnToField: nil, targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
+                      returnToField: nil, needsField: true, onWait: nil, isCurrent: { true }) { delivery, reason in
             XCTAssertEqual(delivery, "new_thread"); XCTAssertNil(reason); done.fulfill()
         }
         await fulfillment(of: [done], timeout: 5)

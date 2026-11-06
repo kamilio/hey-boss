@@ -20,6 +20,9 @@ the same workspace. After two seconds it stops trying to move focus. While a
 paste is pending, it only checks whether you’ve returned; Esc cancels the wait.
 Turn it off in the waveform menu or the pill’s right-click menu to return manually.
 
+To inspect a missed paste, run `/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "local.hey-talk" AND category == "paste"'`.
+It records the target app, what stopped focus from matching, and whether Hey Talk posted ⌘V. It omits transcript text, clipboard contents, field labels, and URLs.
+
 **Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to listen. Speaking starts a recording; pausing for about

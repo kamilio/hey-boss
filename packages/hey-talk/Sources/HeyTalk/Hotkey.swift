@@ -1,5 +1,6 @@
 import AppKit
 import Carbon
+import os
 import TalkCore
 
 final class Hotkey {
@@ -108,6 +109,7 @@ enum PasteBlockReason: String {
 }
 
 enum Paste {
+    static let log = Logger(subsystem: "local.hey-talk", category: "paste")
     static let eventTag: Int64 = 0x48544C4B
     static func copyAndStopWaiting(_ text: String, retry: Timer, to board: NSPasteboard) -> Bool {
         board.clearContents()
@@ -116,14 +118,31 @@ enum Paste {
         return true
     }
     static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
-                        targetStillFocused: @escaping () -> Bool, onWait: ((Timer) -> Void)?,
+                        needsField: Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil, listedThreads: [T3ThreadRow]? = nil,
                         completion: @escaping (String, PasteBlockReason?) -> Void) {
+        var previousState: String?
         func check() -> PasteBlockReason? {
-            PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
-                targetIsSelf: target?.processIdentifier == getpid(),
-                targetIsFrontmost: target != nil && NSWorkspace.shared.frontmostApplication?.processIdentifier == target?.processIdentifier)
-                ?? (targetStillFocused() ? nil : onWait == nil ? .unidentifiedField : .focusChanged)
+            let front = NSWorkspace.shared.frontmostApplication
+            var reason = PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
+                targetIsSelf: target?.processIdentifier == getpid(), targetIsFrontmost: target != nil && front?.processIdentifier == target?.processIdentifier)
+            var state = reason?.rawValue ?? "ready"
+            if reason == nil {
+                var mismatch: String?
+                if let field = originalField {
+                    mismatch = field.mismatch(FocusedInput.read(app: field.app, forAuto: false))
+                    if let tab = field.cmuxTab, SpeechAX.value(tab, kAXSelectedAttribute) as? Bool != true { mismatch = "cmux_tab_changed" }
+                } else if needsField { mismatch = "no_captured_field" }
+                if let mismatch {
+                    state = mismatch
+                    reason = onWait == nil ? .unidentifiedField : .focusChanged
+                }
+            }
+            if state != previousState {
+                log.notice("Check: \(state, privacy: .public), target=\(target?.bundleIdentifier ?? "none", privacy: .public), front=\(front?.bundleIdentifier ?? "none", privacy: .public)")
+                previousState = state
+            }
+            return reason
         }
         if action == .clearInput {
             Task { @MainActor in
@@ -209,7 +228,7 @@ enum Paste {
                           SpeechAX.string(draft.element, "AXValue").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     else { completion("history", .newThreadUnavailable); return }
                     deliver(.paste(text), target: draft.app, originalField: draft, shouldPressEnter: shouldPressEnter,
-                            returnToField: nil, targetStillFocused: draft.isFocused, onWait: nil, isCurrent: isCurrent, completion: completion)
+                            returnToField: nil, needsField: true, onWait: nil, isCurrent: isCurrent, completion: completion)
                 }
                 return
             }
@@ -231,14 +250,17 @@ enum Paste {
         func retry(_ onWait: (Timer) -> Void, restoring field: FocusedInput? = nil) {
             let deadline = ProcessInfo.processInfo.systemUptime + 2
             var expectedTab: AXUIElement?
-            var focusedEditor = false
+            var reportedDeadline = false
             let timer = Timer(timeInterval: 0.35, repeats: true) { timer in
                 guard isCurrent() else { timer.invalidate(); return }
                 if check() == .focusChanged {
-                    if let field, !focusedEditor, ProcessInfo.processInfo.systemUptime < deadline {
+                    if let field, ProcessInfo.processInfo.systemUptime < deadline {
                         if let expectedTab, SpeechAX.value(expectedTab, kAXSelectedAttribute) as? Bool != true { return }
                         if let next = field.stepTowardCmuxTab() { expectedTab = next }
-                        else { focusedEditor = field.focusReturnedField() }
+                        else { field.focusReturnedField() }
+                    } else if field != nil && !reportedDeadline {
+                        log.notice("Return: two seconds elapsed; waiting for manual focus")
+                        reportedDeadline = true
                     }
                     return
                 }
@@ -278,6 +300,7 @@ enum Paste {
         down.setIntegerValueField(.eventSourceUserData, value: eventTag)
         up.setIntegerValueField(.eventSourceUserData, value: eventTag)
         down.postToPid(pid); up.postToPid(pid)
+        if key == 9 && flags == .maskCommand { log.notice("Posted Command-V to target pid=\(pid)") }
         return true
     }
 }

@@ -16,7 +16,7 @@ final class T3RenameTests: XCTestCase {
         let draft = SpeechAX.string(field.element, "AXValue")
         let done = expectation(description: "title confirmed")
         Paste.deliver(.rename(title), target: field.app, originalField: field, shouldPressEnter: { false }, returnToField: nil,
-                      targetStillFocused: field.isFocused, onWait: nil, isCurrent: { true }) { delivery, reason in
+                      needsField: true, onWait: nil, isCurrent: { true }) { delivery, reason in
             XCTAssertEqual(delivery, "renamed"); XCTAssertNil(reason)
             done.fulfill()
         }
