@@ -102,6 +102,22 @@ Remaining percentages and reset times are account-wide, including usage outside 
 
 The Rust SDK is available as `hey_proxy::usage::Client`, with typed provider/account readings and `accounts()`, `usage(provider, account)`, and `recommend()` methods. [CLI, SDK, and API details](docs/claude-subscription.md#cli-and-rust-sdk).
 
+## Connect Amazon Bedrock
+
+Add the provider to the config on the machine that owns the AWS identity:
+
+```yaml
+providers:
+  bedrock:
+    region: YOUR_AWS_REGION
+```
+
+The provider signs requests using the AWS credential chain. Grant the identity Bedrock profile listing and inference permissions. Use `/bedrock/v1` as the OpenAI base URL for Responses or `/bedrock` as the Anthropic base URL for Messages. Both support streaming. Ordinary endpoints, worker recommendations and fallback routes never select Bedrock.
+
+`GET /bedrock/v1/models` returns the active OpenAI and Anthropic system inference profiles in the configured region. Use an entry’s exact `id` as the model; `foundation_models` lists its underlying models. The catalog refreshes in the background every six hours and retains its last successful result beside the config in `*.bedrock-models.json`. An empty cache returns 503 until the first refresh succeeds. Inference does not wait for discovery.
+
+To use an existing remote proxy over SSH, forward a private local Unix socket to its loopback listener and set `providers.bedrock.relay_socket` to the socket’s absolute path instead of setting `region`. AWS credentials stay on the remote host. For managed rollout, set `ssh_hosts[].bedrock` on each host that should offer the provider.
+
 ## Connect OpenAI
 
 Set your API key in the shell where you will run the proxy:

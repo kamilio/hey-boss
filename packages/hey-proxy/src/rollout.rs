@@ -689,6 +689,8 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
     remote.logging.database = None;
     // A local egress tunnel belongs to the machine that configured it.
     remote.proxy_url = None;
+    // An ambient AWS identity or private relay belongs to the selected host.
+    remote.bedrock = settings.and_then(|s| s.bedrock.clone());
     if settings.is_some_and(|s| s.gemini_via_controller) {
         if mode != Mode::Standalone || config.mode != Mode::Standalone {
             bail!("gemini_via_controller requires standalone controller and remote modes");
@@ -735,6 +737,7 @@ fn remote_config_with_key(config: &Config, host: &SshHost, key: Option<&str>) ->
         remote.accounts.clear();
         remote.api_keys.clear();
         remote.gemini = None;
+        remote.bedrock = None;
         remote.claude = None;
         remote.codex = None;
         remote.aliases.clear();

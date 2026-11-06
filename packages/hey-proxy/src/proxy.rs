@@ -1,5 +1,6 @@
 mod accounts;
 mod approvals;
+pub(crate) mod bedrock;
 mod capacity;
 mod chat;
 pub(crate) mod claude;
@@ -55,6 +56,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Process-wide state shared by every request.
 struct Service {
+    bedrock_catalog: RwLock<Option<(bedrock::Provider, Bytes)>>,
     accounts: accounts::Registry,
     credentials: hey_proxy::credentials::CredentialResolver,
     federation: crate::claude_auth::wif::Manager,
@@ -163,6 +165,7 @@ pub(crate) fn local_snapshot(config: Config, source: Option<PathBuf>) -> Result<
     let accounts = accounts::Registry::default();
     let (claude, codex) = accounts.defaults(&config, source.as_deref());
     let service = Arc::new(Service {
+        bedrock_catalog: Default::default(),
         accounts,
         credentials: Default::default(),
         federation: Default::default(),
@@ -198,6 +201,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
     let accounts = accounts::Registry::default();
     let (claude, codex) = accounts.defaults(&config, source.as_deref());
     let service = Arc::new(Service {
+        bedrock_catalog: Default::default(),
         accounts,
         credentials: Default::default(),
         federation: Default::default(),
@@ -231,6 +235,7 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         connectivity_probes: options.connectivity_probes,
     });
     Service::watch(&service)?;
+    bedrock::catalog::start(&service);
     Ok(Router::new()
         .route("/", axum::routing::get(logs::page))
         .route("/providers/v1", axum::routing::get(accounts::catalog))
@@ -298,7 +303,9 @@ fn token(request: &Request) -> Option<&str> {
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .or_else(|| {
-            (messages::is_path(request.uri().path()) || claude::is_path(request.uri().path()))
+            (messages::is_path(request.uri().path())
+                || claude::is_path(request.uri().path())
+                || request.uri().path() == "/bedrock/v1/messages")
                 .then(|| {
                     request
                         .headers()
@@ -1231,6 +1238,18 @@ fn intercept_backend_api(proxy: &Proxy, mut request: Request) -> Result<Request,
 }
 
 async fn forward_api(proxy: Arc<Proxy>, request: Request) -> Response {
+    if request.uri().path().split('/').nth(1) == Some("bedrock") {
+        if proxy.binding.is_some() {
+            return error(
+                StatusCode::CONFLICT,
+                "Bedrock cannot use a different pinned provider",
+            );
+        }
+        if proxy.config.mode == Mode::Client {
+            return forward_request(proxy, request).await;
+        }
+        return bedrock::forward(proxy, request).await;
+    }
     routes::forward(proxy, request).await
 }
 
