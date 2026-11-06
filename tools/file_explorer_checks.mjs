@@ -19,7 +19,7 @@ export async function checkExplorer(page, root, run, origin) {
   assert.equal(await dialog.locator('h3').innerText(),'delivery-pr.md');
   const rows = await dialog.locator('.fx-row').allTextContents();
   for (const name of expectedFiles) assert.ok(rows.includes(name),name);
-  assert.equal(rows.includes('resume.md') || rows.includes('layout.md'),false);
+  assert.equal(['goal_continue.md','handoff.md','resume.md','layout.md'].some(name => rows.includes(name)),false);
   const legacy = new URL(page.url());
   const route = new URLSearchParams(legacy.hash.slice(1)); route.set('file','main.md'); legacy.hash = route;
   await page.goto(legacy.href); await dialog.getByRole('heading',{name:'delivery-main.md',exact:true}).waitFor();
@@ -33,18 +33,18 @@ export async function checkExplorer(page, root, run, origin) {
   await page.locator('#nav-prompts').click();
   await edit.waitFor();
   assert.equal(await dialog.locator('h3').innerText(),'worker.md');
-  await open('handoff.md');
+  await open('delivery-pr.md');
   const saved=await run(['issue','settings','show','--json']);
-  const initial=saved.prompt_defaults.handoff;
+  const initial=saved.prompt_defaults.prs;
   await edit.fill(initial+'!');
   page.once('dialog',d=>d.dismiss());
-  await open('plan.md'); assert.equal(await dialog.locator('h3').innerText(),'handoff.md');
+  await open('plan.md'); assert.equal(await dialog.locator('h3').innerText(),'delivery-pr.md');
   await open('Save'); await dialog.getByText('Saved',{exact:true}).waitFor();
-  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.handoff, initial+'!');
+  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.prs, initial+'!');
   await page.reload(); await edit.waitFor(); assert.equal((await edit.locator('.cm-line').allTextContents()).join('\n'),initial+'!');
   page.once('dialog',d=>d.accept());
   await open('Restore default…'); await dialog.getByText('Default restored').waitFor();
-  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.handoff,undefined);
+  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.prs,undefined);
   if (process.platform==='darwin') {
     const token=await page.evaluate(async()=>(await (await fetch('/api/bootstrap')).json()).csrf);
     const refused=await page.request.post(new URL('/api/prompts/open',origin).href,{
@@ -67,11 +67,11 @@ export async function checkExplorer(page, root, run, origin) {
       assert.equal(readFileSync(launch.file,'utf8'),saved.prompt_defaults.worktree);
     } finally {await new Promise(ok=>socket.close(ok));}
   }
-  await find.fill('handoff');await open('handoff.md');await edit.fill(initial+'?');
+  await find.fill('delivery-pr');await open('delivery-pr.md');await edit.fill(initial+'?');
   await run(['issue','settings','set','--no-prs','--json']);
   await open('Save');await dialog.locator('.fx-error').waitFor();
   assert.equal((await edit.locator('.cm-line').allTextContents()).join('\n'),initial+'?');
-  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.handoff,undefined);
+  assert.equal((await run(['issue','settings','show','--json'])).prompt_overrides.prs,undefined);
   page.once('dialog',d=>d.accept()); await open('prompts'); await find.fill(''); await open('worker.md'); await edit.waitFor();
   for(const width of [1280,390]){
     await page.setViewportSize({width,height:800}); await page.emulateMedia({colorScheme:width===390?'dark':'light'});

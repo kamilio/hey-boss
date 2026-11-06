@@ -206,7 +206,16 @@ fn working_path(dir: &Path, key: &str) -> PathBuf {
 }
 fn migrate_prompt_names(dir: &Path) -> Result<()> {
     let prompts = dir.join("prompts");
-    for key in ["worktree", "checkout", "prs", "main", "layout", "resume"] {
+    for key in [
+        "worktree",
+        "checkout",
+        "prs",
+        "main",
+        "layout",
+        "resume",
+        "handoff",
+        "goal_continue",
+    ] {
         let old = prompts.join(format!("{key}.md"));
         match fs::symlink_metadata(&old) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

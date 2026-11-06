@@ -355,8 +355,7 @@ the preview, claims, and worker sessions use the same composition.
 
 Worker completion still respects delivery mode: a completed PR-mode run keeps an
 owned issue open and assigns it to Boss, preserving links and history. Boss-owned
-open issues are excluded from worker pickup. Completing a worker run or its native
-goal records successful delivery; it does not resolve an issue. For non-PR and
+open issues are excluded from worker pickup. A completed worker report records delivery; it does not resolve an issue. For non-PR and
 artifact tasks, the owning agent must explicitly run `hey-boss issue close NUMBER`
 after verifying every issue requirement. The default Main and Plan prompts explain
 this decision; custom workflow prompts should do the same. A partial delivery stays

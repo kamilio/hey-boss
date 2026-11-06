@@ -1,12 +1,10 @@
 //! Owned agent sessions, independent of issue pickup and task routing.
 //! Codex uses app-server JSON-RPC, Claude uses the SDK control stream, and Pi
 //! uses RPC mode. All controls apply only to the child started by this client.
-mod goal;
 mod models;
 pub use models::{ModelCatalog, ModelChoice, ModelSelection};
 mod protocol;
 use crate::agent_process::Process;
-pub use goal::{GoalStatus, ManagedGoal};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
@@ -722,7 +720,7 @@ impl AgentSession {
             Ok(())
         } else {
             Err(io::Error::other(
-                "Provider does not have native goals; the caller must manage continuation",
+                "Provider does not have native goals",
             ))
         }
     }

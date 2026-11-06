@@ -1744,16 +1744,7 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
                 }
             );
             let text = preview["prompt"].as_str().unwrap();
-            if prs {
-                let (workflow, handoff) = text
-                    .split_once("\n\nDependencies unblock at Ready, before merge.")
-                    .expect("PR workflows explain their Ready handoff");
-                assert_eq!(workflow, expected);
-                assert!(handoff.contains("stacked PRs"));
-                assert!(handoff.contains("hey-boss issue ready 1"));
-            } else {
-                assert_eq!(text, expected);
-            }
+            assert_eq!(text, expected);
             assert_eq!(preview["use_goal"], true);
             web.ok(json!({"action":"configure_project","prompt":"/goal Implement {{issue_command}}.","worktree_enabled":worktree,"prs_enabled":prs,"prompt_overrides":overrides}));
             let settings = web.ok(json!({"action":"project_settings"}));
@@ -1791,26 +1782,18 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
 fn retired_prompt_overrides_do_not_change_the_workflow() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"Prompt layout fixture","body":"","labels":[]}));
-    let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "prs":"Publish {{number}}."});
+    let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "goal_continue":"Retired", "prs":"Publish {{number}}."});
     web.ok(json!({"action":"configure_project","prompt":"Implement {{number}}.","prs_enabled":true,"prompt_overrides":overrides}));
     let settings = web.ok(json!({"action":"project_settings"}));
     assert_eq!(
         settings["prompt_overrides"],
-        json!({"handoff":"Review task {{number}}.","prs":"Publish {{number}}."})
+        json!({"prs":"Publish {{number}}."})
     );
-    for key in ["handoff", "goal_continue"] {
-        assert!(settings["prompt_defaults"][key].is_string(), "{key}");
-        assert!(
-            settings["prompt_sections"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|section| section["key"] == key)
-        );
-    }
     for key in [
         "dependencies",
         "plan_document",
+        "handoff",
+        "goal_continue",
         "subtask",
         "github",
         "steering",
@@ -1832,7 +1815,7 @@ fn retired_prompt_overrides_do_not_change_the_workflow() {
         web.ok(json!({"action":"preview_worker","config":{"projects":[web.project]},"number":1}));
     assert_eq!(
         preview["prompt"],
-        "Implement 1.\n\nWork in the project's existing checkout.\n\nPublish 1.\n\nReview task 1."
+        "Implement 1.\n\nWork in the project's existing checkout.\n\nPublish 1."
     );
     web.ok(json!({"action":"configure_project","prompt_overrides":{"layout":null,"handoff":null}}));
     let reset =
@@ -1844,7 +1827,7 @@ fn retired_prompt_overrides_do_not_change_the_workflow() {
             .starts_with("Implement 1.")
     );
     assert!(
-        reset["prompt"]
+        !reset["prompt"]
             .as_str()
             .unwrap()
             .contains("Dependencies unblock at Ready")

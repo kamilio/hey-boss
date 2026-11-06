@@ -31,7 +31,6 @@ function prompt(text){
   if(provider==='claude')send({type:'stream_event',session_id:session,event:{delta:{type:'text_delta',text:'Working'}}});
   else send({type:'message_update',assistantMessageEvent:{type:'text_delta',delta:'Working'}});
   if(text.includes('goal fixture')&&turns===1){setTimeout(()=>complete('More work remains'),100);return;}
-  if(text.includes('Continue the saved goal')){complete(report());return;}
   if(text.includes('STEER')){complete(report());return;}
   timer=setInterval(()=>{if(existsSync('finish')){clearInterval(timer);complete(report());}},50);
 }
