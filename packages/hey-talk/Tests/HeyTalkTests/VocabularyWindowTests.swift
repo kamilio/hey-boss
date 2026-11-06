@@ -3,6 +3,41 @@ import XCTest
 @testable import HeyTalk
 
 final class VocabularyWindowTests: XCTestCase {
+    @MainActor func testDeleteRequiresConfirmationAndOnlyRemovesChosenWord() async throws {
+        let app = NSApplication.shared, editor = VocabularyWindow()
+        var words = ["Atlas", "Koonal Tum"]
+        var removes = 0
+        editor.show(term: nil) { args, reply in
+            if !args.isEmpty {
+                XCTAssertEqual(args, ["remove", "Koonal Tum"])
+                removes += 1; words.removeLast()
+            }
+            reply(["ok": true, "vocabulary": words])
+        }
+        let window = try XCTUnwrap(app.windows.first { $0.title == "Hey Talk — Vocabulary" && $0.isVisible })
+        defer { window.close() }
+        for choice in ["Cancel", "Delete"] {
+            try await Task.sleep(for: .milliseconds(400))
+            let root = try XCTUnwrap(window.contentView)
+            func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+            let scroll = try XCTUnwrap(views(root).compactMap { $0 as? NSScrollView }.first { $0.documentView != nil && $0.frame.width > 400 })
+            let frame = scroll.convert(scroll.bounds, to: nil)
+            // Click the trailing trash button in the second row of this two-entry fixture.
+            let point = NSPoint(x: frame.maxX - 42, y: frame.maxY - 92)
+            for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+                window.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1)))
+            }
+            try await Task.sleep(for: .milliseconds(300))
+            let sheet = try XCTUnwrap(window.attachedSheet)
+            let choiceButton = try XCTUnwrap(views(try XCTUnwrap(sheet.contentView)).compactMap { $0 as? NSButton }.first { $0.title == choice })
+            XCTAssertEqual(removes, 0)
+            choiceButton.performClick(nil)
+            try await Task.sleep(for: .milliseconds(250))
+        }
+        XCTAssertEqual(removes, 1)
+        XCTAssertEqual(words, ["Atlas"])
+    }
+
     @MainActor func testPencilOpensSavedSpellingAndReturnSubmitsTheCorrection() async throws {
         let app = NSApplication.shared
         let overlay = Overlay(), editor = VocabularyWindow()
