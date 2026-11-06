@@ -1,5 +1,6 @@
 import os
 import AVFoundation
+import CoreAudio
 import Speech
 #if canImport(FoundationModels)
 import FoundationModels
@@ -6939,11 +6940,56 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         return converter
     }
 
+    private let reference = OSAllocatedUnfairLock(initialState: (headphones: false, pcm: [Int16]()))
+    private var outputChanged: AudioObjectPropertyListenerBlock?
+    private var defaultOutput = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+
+    @objc private func engineRouteChanged(_ notification: Notification) { updatePlaybackRoute() }
+    private func updatePlaybackRoute() {
+        func values(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> [UInt32] {
+            var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain), size: UInt32 = 0
+            guard AudioObjectGetPropertyDataSize(object, &address, 0, nil, &size) == noErr, size >= 4 else { return [] }
+            var result = [UInt32](repeating: 0, count: Int(size) / 4)
+            guard AudioObjectGetPropertyData(object, &address, 0, nil, &size, &result) == noErr else { return [] }
+            return Array(result.prefix(Int(size) / 4))
+        }
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let device = values(system, kAudioHardwarePropertyDefaultOutputDevice).first
+        let streams = device.map { values($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput) } ?? []
+        let headphones = !streams.isEmpty && streams.allSatisfy { values($0, kAudioStreamPropertyTerminalType).first == kAudioStreamTerminalTypeHeadphones }
+        setHeadphoneOutput(headphones)
+    }
+    func setHeadphoneOutput(_ headphones: Bool) {
+        reference.withLock {
+            if $0.headphones != headphones { $0.pcm.removeAll(); $0.headphones = headphones }
+        }
+    }
+    func bufferPlayback(_ samples: UnsafeBufferPointer<Int16>) {
+        reference.withLockUnchecked { ref in
+            // Headphones don't play into the room. Treating their output as mic echo suppresses short interruptions.
+            guard !ref.headphones else { return }
+            ref.pcm.append(contentsOf: samples)
+            if ref.pcm.count > 3200 { ref.pcm.removeFirst(ref.pcm.count - 3200) }
+        }
+    }
+    func microphoneFrame(_ mic: UnsafeBufferPointer<Int16>) -> [Int16] {
+        var stereo = [Int16](repeating: 0, count: 2 * mic.count)
+        for i in mic.indices { stereo[2*i] = mic[i] }
+        reference.withLockUnchecked { ref in
+            let used = min(mic.count, ref.pcm.count)
+            for i in 0..<used { stereo[2*i+1] = ref.pcm[i] }
+            ref.pcm.removeFirst(used)
+        }
+        return stereo
+    }
     func start(cli: String, ready: @escaping () -> Void) throws {
         let lastInput = OSAllocatedUnfairLock(initialState: TimeInterval.zero)
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
         let writer = try listen(cli: cli, duplex: true)
+        let changed: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.updatePlaybackRoute() }
+        if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, changed) == noErr { outputChanged = changed }
+        NotificationCenter.default.addObserver(self, selector: #selector(engineRouteChanged(_:)), name: .AVAudioEngineConfigurationChange, object: engine)
         try openMicrophone(writer, lastInput)
         var attempted = ProcessInfo.processInfo.systemUptime, waiting = true, recovering = false
         micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
@@ -6992,26 +7038,18 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
             return error == nil ? pcm : nil
         }
-        let reference = OSAllocatedUnfairLock(initialState: [Int16]())
-        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 960, format: renderFormat) { buffer, _ in
+        updatePlaybackRoute()
+        engine.mainMixerNode.installTap(onBus: 0, bufferSize: 960, format: renderFormat) { [weak self] buffer, _ in
             guard let pcm = mono(buffer, renderConverter) else { return }
-            reference.withLock { ring in
-                ring.append(contentsOf: UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: Int(pcm.frameLength)))
-                if ring.count > 3200 { ring.removeFirst(ring.count - 3200) }
-            }
+            self?.bufferPlayback(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: Int(pcm.frameLength)))
         }
         mic.installTap(onBus: 0, bufferSize: 960, format: source) { [weak self] buffer, _ in
             guard let pcm = mono(buffer, converter) else { return }
             let n = Int(pcm.frameLength)
             guard n > 0 else { return }
             lastInput.withLock { $0 = ProcessInfo.processInfo.systemUptime }
-            var stereo = [Int16](repeating: 0, count: 2*n)
-            for i in 0..<n { stereo[2*i] = pcm.int16ChannelData![0][i] }
-            reference.withLock { ring in
-                let used = min(n, ring.count)
-                for i in 0..<used { stereo[2*i+1] = ring[i] }
-                ring.removeFirst(used)
-            }
+            guard let self else { return }
+            let stereo = self.microphoneFrame(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: n))
             if stereo.withUnsafeBytes({ Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) != $0.count }) {
                 onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Start again.") }
             }
@@ -7148,6 +7186,11 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
     func stop() {
         guard !stopped else { return }; stopped = true
+        if let outputChanged {
+            AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, outputChanged)
+            self.outputChanged = nil
+        }
+        NotificationCenter.default.removeObserver(self, name: .AVAudioEngineConfigurationChange, object: engine)
         stopPlayback(); readerVoice?.stop(); readerVoice = nil; micWatch?.invalidate()
         engine.stop()
         removeTaps()
@@ -7864,6 +7907,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard audio != nil else { return }
         switch event {
         case .candidate where phase == .speaking && resumePlayback == nil:
+            ReviewAudio.log.notice("Voice onset during reply; pausing playback")
             // Quiet the speaker at onset. A short noise never confirms a turn.
             audio?.pause()
             resumePlayback = Timer.scheduledTimer(withTimeInterval: 0.32, repeats: false) { [weak self] _ in

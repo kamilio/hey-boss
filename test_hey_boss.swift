@@ -81,6 +81,7 @@ func audit() {
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SOL"] { auditSolChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_WORKSPACE_CHAT"] { auditWorkspaceChat(root); return }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT"] { auditHeadphoneInterrupt(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_INTERRUPTED_CHAT"] { auditInterruptedChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
@@ -4555,6 +4556,43 @@ func auditChatPolish(_ root: String) {
         NSApp.setActivationPolicy(.regular); chat.show(); chat.state(.listening, "Listening")
         withExtendedLifetime(chat) { NSApp.run() }
     }
+}
+
+@available(macOS 26, *)
+func auditHeadphoneInterrupt(_ root: String) {
+    let dir = URL(fileURLWithPath: root), cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
+    let chat = VoiceConversation(cli: cli, saveURL: dir.appendingPathComponent(UUID().uuidString).appendingPathComponent("current.json"))
+    let audio = ReviewAudio(); audio.conversation = true
+    let writer = try! audio.listen(cli: cli, duplex: true)
+    audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0; try! audio.engine.start()
+    chat.connect(audio); chat.state(.thinking, "Thinking…")
+    chat.event(["Message": ["text": "Here is more of the conversation. The next example needs a longer explanation."]])
+    let deadline = Date().addingTimeInterval(12)
+    while !audio.player.isPlaying && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(audio.player.isPlaying)
+    let render = try! Data(contentsOf: dir.appendingPathComponent("reply.pcm")).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+    let user = try! Data(contentsOf: dir.appendingPathComponent("blue.pcm")).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
+    audio.setHeadphoneOutput(true)
+    for frame in 0..<160 {
+        let mic: [Int16] = (0..<320).map { let i = (frame - 100) * 320 + $0; return user.indices.contains(i) ? user[i] / 20 : 0 }
+        let playback = (0..<320).map { render[(frame * 320 + $0) % render.count] }
+        playback.withUnsafeBufferPointer { audio.bufferPlayback($0) }
+        let bytes = mic.withUnsafeBufferPointer { audio.microphoneFrame($0) }.withUnsafeBytes { Data($0) }
+        try! writer.write(contentsOf: bytes)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.005))
+        if frame < 100 { precondition(chat.phase != .recording, "Headphone playback alone interrupted the chat") }
+        if chat.phase == .recording { break }
+    }
+    let end = Date().addingTimeInterval(1)
+    while chat.phase != .recording && Date() < end { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(chat.phase == .recording && !audio.player.isPlaying, "A quiet 'blue' must stop a playing reply on headphones")
+    audio.setHeadphoneOutput(false)
+    let ref: [Int16] = [10, 20], mic: [Int16] = [1, 2]
+    ref.withUnsafeBufferPointer { audio.bufferPlayback($0) }
+    precondition(mic.withUnsafeBufferPointer { audio.microphoneFrame($0) } == [1, 10, 2, 20], "Speaker echo reference must return on a route change")
+    chat.stop("Done")
+    print("PASS: quiet headset speech interrupted playback; speaker echo reference restored")
 }
 
 @available(macOS 26, *)
