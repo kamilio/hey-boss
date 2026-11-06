@@ -1,4 +1,6 @@
 //! Private static sites with publication-scoped, reclaimable fleet storage.
+mod files;
+pub(crate) use files::{FileChange, edit_file, file_list};
 pub mod publishing;
 mod storage;
 use crate::{
@@ -332,6 +334,16 @@ fn publish_local(database: &Path, source: &Path, name: &str) -> Result<Page> {
         }
         manifest.insert(name, asset);
     }
+    commit_manifest(&db, name, manifest, chunks, None)
+}
+
+fn commit_manifest(
+    db: &Connection,
+    name: &str,
+    manifest: Manifest,
+    chunks: BTreeMap<String, usize>,
+    base: Option<(&str, i64)>,
+) -> Result<Page> {
     validate_manifest(&manifest)?;
     let manifest = serde_json::to_string(&manifest)?;
     let deployment = hey_boss_sync::digest(manifest.as_bytes());
@@ -348,6 +360,15 @@ fn publish_local(database: &Path, source: &Path, name: &str) -> Result<Page> {
             &serde_json::json!({"name":name,"deployment":id,"updated_at":at,"generation":generation,"machine":machine}),
         );
         *deleted |= retired(&tx, &scope)?;
+    }
+    if let Some((base, time)) = base
+        && !current
+            .as_ref()
+            .is_some_and(|(id, at, deleted, _, _)| !deleted && id == base && *at == time)
+    {
+        return Err(Error::conflict(
+            "This page changed. Reopen Files to see the current version.",
+        ));
     }
     if current
         .as_ref()
