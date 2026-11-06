@@ -49,6 +49,7 @@ try {
   assert.ok(serialized.includes('Be concise, humane, and speak simply.'));
   assert.ok(serialized.includes('Preserve existing notes.') && serialized.includes('Organize notes'));
   assert.ok(!serialized.includes('Private skill body.'));
+  assert.equal(requests[0].reasoning?.effort, 'low');
   assert.equal(requests[0].store, false);
   assert.deepEqual(requests[0].tools.map(t => t.name), ['shell', 'batch']);
   assert.ok(JSON.stringify(requests[1]).includes('function_call_output'));
