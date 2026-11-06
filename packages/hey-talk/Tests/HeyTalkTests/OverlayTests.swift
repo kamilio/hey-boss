@@ -4,7 +4,7 @@ import XCTest
 @testable import HeyTalk
 
 final class OverlayTests: XCTestCase {
-    @MainActor func testChatOwnsPillUntilReleasedAndStartupIsImmediate() throws {
+    @MainActor func testChatOwnsPillUntilReleasedAndStartupIsImmediate() async throws {
         let app = NSApplication.shared, windows = Set(app.windows.map(\.windowNumber))
         let overlay = Overlay()
         defer { overlay.show(false) }
@@ -17,7 +17,15 @@ final class OverlayTests: XCTestCase {
             overlay.showConversation(["phase": phase, "message": message, "action": "Stop voice"])
             XCTAssertTrue(surface.accessibilityLabel()?.contains(message) == true)
             XCTAssertFalse(surface.accessibilityLabel()?.contains("dictation") == true)
-            XCTAssertTrue(all.compactMap { $0 as? NSTextField }.contains { !$0.isHidden && $0.stringValue == message })
+            let label = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { !$0.isHidden && $0.stringValue == message })
+            if message == "Voice off" {
+                try await Task.sleep(for: .milliseconds(350))
+                let icon = try XCTUnwrap(all.first { String(describing: type(of: $0)) == "IdentityView" })
+                let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
+                XCTAssertEqual(capCenter, icon.frame.midY, accuracy: 0.5)
+                XCTAssertEqual((label.frame.minX + label.intrinsicContentSize.width + icon.frame.minX) / 2,
+                               surface.bounds.midX, accuracy: 1)
+            }
             XCTAssertTrue(surface.layer?.sublayers?.first { $0.name == "ai-disabled" }?.isHidden == true)
             XCTAssertFalse(panel.canBecomeKey)
         }
@@ -328,7 +336,12 @@ final class OverlayTests: XCTestCase {
         var retried = false
         overlay.error("AI correction timed out.", retry: { retried = true })
         let retryNotice = try XCTUnwrap(notices(try XCTUnwrap(panel.contentView)).first)
-        let retry = try XCTUnwrap(retryNotice.subviews.compactMap { $0 as? NSButton }.first { $0.title == "Retry" })
+        let retry = try XCTUnwrap(retryNotice.subviews.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Retry" })
+        let closeRetry = try XCTUnwrap(retryNotice.subviews.compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Dismiss notice" })
+        XCTAssertEqual(retry.frame.size, closeRetry.frame.size)
+        XCTAssertEqual(retry.frame.midY, closeRetry.frame.midY)
+        XCTAssertLessThanOrEqual(retry.frame.maxX, closeRetry.frame.minX)
+        XCTAssertLessThanOrEqual(retryNotice.frame.height, shortHeight)
         retry.performClick(nil)
         XCTAssertTrue(retried)
         XCTAssertNil(retryNotice.superview)

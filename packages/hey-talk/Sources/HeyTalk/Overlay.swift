@@ -642,7 +642,11 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
+        let labelX: CGFloat = expanded ? 102 : 40
+        let labelSize = connecting.intrinsicContentSize
+        let labelWidth = min(ceil(labelSize.width), statusWidth - labelX - 8)
+        let voiceInset = conversation != nil && showConnecting ? (statusWidth - labelX - labelWidth - 9) / 2 : 0
+        let contentOrigin = voiceInset + leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
         let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (size.width - 22) / 2
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
@@ -652,8 +656,8 @@ final class Overlay {
             status?.animator().alphaValue = closingStatus ? 0 : 1
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
-            let labelX: CGFloat = expanded ? 102 : 40
-            connecting.frame = NSRect(x: contentOrigin + labelX, y: 10, width: statusWidth - labelX - 8, height: 17)
+            let labelY = (18 + connecting.firstBaselineOffsetFromTop - labelSize.height - connecting.font!.capHeight / 2).rounded()
+            connecting.animator().frame = NSRect(x: contentOrigin + labelX, y: labelY, width: labelWidth, height: labelSize.height)
         } completionHandler: { [weak self] in
             guard let self, layoutRevision == revision else { return }
             if closingStatus { clearStatus(); layout(animated: false) }
@@ -802,10 +806,9 @@ final class Overlay {
         clearNotice()
         clearStatus()
         let action: (String, () -> Void)?
-        if let retry { action = ("Retry", retry) }
-        else if accessibilityAction { action = ("Enable Accessibility", { [weak self] in self?.onOpenAccessibility?() }) }
+        if accessibilityAction && retry == nil { action = ("Enable Accessibility", { [weak self] in self?.onOpenAccessibility?() }) }
         else { action = nil }
-        let content = OverlayNotice(message: message, action: action, dismiss: { [weak self] in self?.dismissNotice() })
+        let content = OverlayNotice(message: message, action: action, retry: retry, dismiss: { [weak self] in self?.dismissNotice() })
         notice = content
         pillContent.addSubview(content)
         noticeRecordButton.isHidden = false
@@ -818,7 +821,7 @@ final class Overlay {
             content.animator().alphaValue = 1
         }
         // Keep the repair link available until clicked, dismissed, or recording resumes.
-        if action == nil {
+        if action == nil && retry == nil {
             let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
             noticeDismiss = dismiss
             DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)
