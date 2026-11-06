@@ -516,7 +516,7 @@ fn private_pages_stream_sandboxed_content_require_a_capability_and_honor_deletio
     let page: Value = client.get(format!("{base}/api/pages?name=report")).send().unwrap().json().unwrap();
     assert!(page["page"]["stored_size"].as_u64().unwrap()>0);
     assert_eq!(page["page"]["publications"], json!([]));
-    for action in ["share", "sync"] {
+    for action in ["share", "sync", "files"] {
         assert_eq!(client.post(format!("{base}/api/pages/{action}")).json(&json!({"name":"report"})).send().unwrap().status(),403);
         assert_eq!(client.post(format!("{base}/api/pages/{action}")).header("X-Hey-Boss-CSRF",&fixture.app.token).header("Origin","https://untrusted.example").json(&json!({"name":"report"})).send().unwrap().status(),403);
     }

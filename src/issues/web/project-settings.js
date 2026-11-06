@@ -477,3 +477,31 @@ $('#config-history-more').onclick = () => loadConfigHistory(true);
 window.addEventListener('resize', () => {
   if ($('#project-settings-dialog').open) $('.project-settings-tabs [aria-selected="true"]').scrollIntoView({block:'nearest',inline:'nearest'});
 });
+
+$('#prompt-files').onclick = async event => {
+  const trigger = event.currentTarget, {id: project, name} = model.project, host = model.route.host || null;
+  trigger.disabled = true;
+  try {
+    let settings = await api({action:'project_settings'},project,null,host);
+    if (project !== model.project.id || host !== (model.route.host || null)) return;
+    const files = [{key:'worker',title:'Implementation'}, ...settings.prompt_sections].map(section=>({
+      path:section.key+'.md',key:section.key,title:section.title,help:section.help,editable:true
+    }));
+    function describe(f) {
+      f.custom = f.key==='worker' ? settings.prompt !== settings.worker_prompt_default : settings.prompt_overrides[f.key] != null;
+      f.detail = [f.title, f.custom ? 'Project override' : 'Built-in default', f.help].filter(Boolean).join(' · ');
+    }
+    files.forEach(describe);
+    async function save(f,text) {
+      const patch=f.key==='worker'?{prompt:text ?? settings.worker_prompt_default}:{prompt_overrides:{...settings.prompt_overrides,[f.key]:text}};
+      settings=await mutate({action:'configure_project',if_version:settings.version,...patch},project,host);
+      describe(f);
+    }
+    HeyBossFiles.open({scope:name,title:'Prompt files',root:'prompts',files,initial:'worker.md',
+      read:f=>f.key==='worker'?settings.prompt:(settings.prompt_overrides[f.key] ?? settings.prompt_defaults[f.key]),
+      save,reset:f=>save(f,null),
+      native:!host&&!model.defaultHost&&['127.0.0.1','localhost','hey-boss.test'].includes(location.hostname)&&/Mac/.test(navigator.platform)
+        ? f=>post('/api/prompts/open',{project,key:f.key}) : null
+    });
+  } catch(e) {toast(e.message,true);} finally {trigger.disabled=false;}
+};

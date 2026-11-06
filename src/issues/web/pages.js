@@ -85,6 +85,7 @@
       if (busy) return; busy = true;
       try {
         const {page, content_url} = await api(`/api/pages?name=${encodeURIComponent(name)}`);
+        $('page-files').disabled = page.syncing;
         $('page-sharing').replaceChildren(publishing(page, load));
         document.querySelector('.page-bar>.private-badge').hidden = (page.publications || []).length > 0;
         $('pages-error').hidden = true;
@@ -99,6 +100,32 @@
       } catch(e) { error(e); $('page-status').hidden = true; $('page-frame').hidden = true; $('page-frame').removeAttribute('src'); contentURL = ''; }
       finally { busy = false; }
     }
+    $('page-files').onclick = async () => {
+      try {
+        const snapshot = await api('/api/pages?files=1&name='+encodeURIComponent(name));
+        let version = snapshot.page, baseURL = snapshot.content_url;
+        const files = snapshot.files.map(([path,bytes])=>({path,bytes}));
+        function describe(f) {
+          f.editable = f.bytes <= 1048576 && /\.(md|markdown|html?|css|js|json|txt|svg)$/i.test(f.path);
+          f.detail = (f.bytes < 1024 ? f.bytes+' B' : Math.ceil(f.bytes/1024)+' KiB') + (f.editable ? ' · Published source' : ' · Original asset');
+        }
+        files.forEach(describe);
+        const url = f => baseURL.slice(0,-10)+f.path.split('/').map(encodeURIComponent).join('/');
+        const change = async (f,operation) => {
+          const result = await post('/api/pages/files',{name,deployment:version.deployment,updated_at:version.updated_at,path:f.path,change:operation});
+          version=result.page; baseURL=result.content_url; await load();
+        };
+        HeyBossFiles.open({scope:'Published Pages',title:name,root:'Files',files,initial:'index.html',saveLabel:'Save & publish',url,
+          read:async f=>{
+            const response=await fetch(url(f)); if(!response.ok)throw Error('Could not read '+f.path);
+            try{return new TextDecoder('utf-8',{fatal:true}).decode(await response.arrayBuffer());}catch{throw Error('This file is not UTF-8 text.');}
+          },
+          save:async(f,text)=>{await change(f,{action:'save',text}); f.bytes=new TextEncoder().encode(text).length;describe(f);},
+          move:async(f,destination)=>{await change(f,{action:'move',destination});f.path=destination;describe(f);},
+          remove:async f=>{await change(f,{action:'delete'});files.splice(files.indexOf(f),1);}
+        });
+      } catch(e) {error(e);}
+    };
     $('page-copy').onclick = async () => {
       try { await navigator.clipboard.writeText(location.href); $('page-copy').lastElementChild.textContent = 'Copied'; setTimeout(() => $('page-copy').lastElementChild.textContent = 'Copy link', 1800); }
       catch { error(new Error('Copy the page URL from your address bar.')); }

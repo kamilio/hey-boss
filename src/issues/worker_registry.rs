@@ -162,7 +162,7 @@ pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Resul
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"worker_prompt_default":worker::DEFAULT_PROMPT,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for

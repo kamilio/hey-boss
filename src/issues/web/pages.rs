@@ -12,19 +12,28 @@ fn database(app: &App) -> Result<PathBuf> {
 fn content_key(app: &App, name: &str, revision: &str) -> String {
     hey_boss_sync::digest(format!("{}:{name}:{revision}", app.token).as_bytes())
 }
+fn content_url(app: &App, page: &pages::Page) -> Option<String> {
+    let name = &page.name;
+    (!page.deployment.is_empty()).then(|| {
+        format!(
+            "/page-content/{}/{}/{}/index.html",
+            content_key(app, name, &page.deployment),
+            name,
+            page.deployment
+        )
+    })
+}
 pub(super) fn api(app: &App, url: &str) -> Result<Value> {
     let query = parse_query(url)?;
     let database = database(app)?;
     if let Some(name) = query.get("name") {
         let page = pages::view(&database, name)?;
-        let content_url = (!page.deployment.is_empty()).then(|| {
-            format!(
-                "/page-content/{}/{}/{}/index.html",
-                content_key(app, name, &page.deployment),
-                name,
-                page.deployment
-            )
-        });
+        let content_url = content_url(app, &page);
+        if query.contains_key("files") {
+            return Ok(
+                json!({"ok":true,"files":pages::file_list(&database,&page)?,"page":page,"content_url":content_url}),
+            );
+        }
         return Ok(json!({"ok":true,"page":page,"content_url":content_url}));
     }
     let offset = query
@@ -38,6 +47,28 @@ pub(super) fn api(app: &App, url: &str) -> Result<Value> {
     let entries = pages::list(&database, offset)?;
     Ok(json!({"ok":true,"pages":entries,"next_offset":(entries.len()==100).then_some(offset+100)}))
 }
+pub(super) fn edit(app: &App, bytes: &[u8]) -> Result<Value> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Edit {
+        name: String,
+        deployment: String,
+        updated_at: i64,
+        path: String,
+        change: pages::FileChange,
+    }
+    let edit: Edit = serde_json::from_slice(bytes)?;
+    let page = pages::edit_file(
+        &database(app)?,
+        &edit.name,
+        &edit.deployment,
+        edit.updated_at,
+        &edit.path,
+        edit.change,
+    )?;
+    Ok(json!({"ok":true,"content_url":content_url(app,&page),"page":page}))
+}
+
 pub(super) fn delete(app: &App, bytes: &[u8]) -> Result<Value> {
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]

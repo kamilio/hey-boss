@@ -17,7 +17,7 @@ const server = createServer((req, res) => {
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.end(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="stylesheet" href="/components.css"><link rel="stylesheet" href="/app.css"><link rel="stylesheet" href="/project-settings.css">
-    <button id="project-settings-trigger">Project settings</button>${dialog}
+    ${readFileSync(new URL('issue-header-actions.html',source),'utf8')}${dialog}
     <script>
       const $ = selector => document.querySelector(selector);
       const model = {project:{id:'fixture',name:'Settings fixture'}};
