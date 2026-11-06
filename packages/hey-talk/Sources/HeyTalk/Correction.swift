@@ -5,7 +5,9 @@ struct CorrectionSettings {
     private let defaults: UserDefaults
     init(defaults: UserDefaults = .standard) { self.defaults = defaults }
     var enabled: Bool { defaults.object(forKey: "correctionEnabled") as? Bool ?? true }
-    var json: [String: Any] { ["enabled": enabled, "model": "gpt-6-luna"] }
+    var bedrockProfile: String? { defaults.string(forKey: "correctionBedrockProfile") }
+    var model: String { bedrockProfile ?? "gpt-6-luna" }
+    var json: [String: Any] { ["enabled": enabled, "model": model] }
     static func validate(_ args: [String]) throws {
         guard args.isEmpty || (args.count == 1 && ["on", "off", "toggle"].contains(args[0])) else {
             throw TalkError("Use correction [on|off|toggle]")
@@ -57,7 +59,7 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [], history: [[String: Any]] = []) throws -> URLRequest {
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, recent: [[String]] = [], history: [[String: Any]] = [], settings: CorrectionSettings = CorrectionSettings()) throws -> URLRequest {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         func prompt(_ name: String) throws -> String {
             guard let url = bundle.url(forResource: name, withExtension: "md") else {
@@ -75,7 +77,9 @@ final class Correction {
         var tools = [try tool("paste", "text")]
         if canClear { tools.append(try tool("clear_input")) }
         if let package { tools += try package.definitions(prompt: prompt) }
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080/v1/responses")!)
+        let profile = settings.bedrockProfile
+        let path = profile == nil ? "/v1/responses" : "/bedrock/v1/responses"
+        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080" + path)!)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
@@ -91,11 +95,13 @@ final class Correction {
         let input = try JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])
         let message = String(decoding: input, as: UTF8.self)
         let conversation: Any = history.isEmpty ? message as Any : [["role": "user", "content": message]] + history
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": "gpt-6-luna", "service_tier": "priority", "reasoning": ["effort": "none"], "store": false, "stream": true,
+        var body: [String: Any] = [
+            "model": settings.model, "reasoning": ["effort": "none"], "store": false, "stream": true,
             "instructions": try prompt("correction"), "tools": tools, "tool_choice": history.isEmpty ? "required" : "auto", "parallel_tool_calls": false,
             "include": ["reasoning.encrypted_content"], "input": conversation
-        ])
+        ]
+        if profile == nil { body["service_tier"] = "priority" }
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }
 

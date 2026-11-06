@@ -165,7 +165,7 @@ enum CLI {
             print(String(decoding: data, as: UTF8.self))
         } else if let text = response["text"] as? String { print(text) }
         else if let settings = response["correction"] as? [String: Any], response.count == 2 {
-            print("AI correction: \(settings["enabled"] as? Bool == true ? "on" : "off") · GPT-6 Luna")
+            print("AI correction: \(settings["enabled"] as? Bool == true ? "on" : "off") · \(settings["model"] as? String ?? "unknown")")
         }
         else if let settings = response["speech"] as? [String: Any], response.count == 2 {
             print("Read aloud: \(settings["enabled"] as? Bool == true ? "on" : "off") · Hyper+T to toggle · Hyper+S to play/pause")
