@@ -19,6 +19,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var speechWasActive = false
     private let history = DictationHistory()
     private let enterExceptions = EnterExceptions()
+    private lazy var vocabularyWindow = VocabularyWindow()
     private let vocabulary = SharedVocabulary()
     private let vocabularyQueue = DispatchQueue(label: "hey-talk.vocabulary", qos: .utility)
     private var vocabularyTimer: DispatchSourceTimer?
@@ -160,7 +161,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Chat with Context · Hyper+M", #selector(chatWithContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Chat with Context · Hyper+M", #selector(chatWithContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -217,6 +218,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
         showOverlay(true); showHistory(); return true
     }
     @objc private func showAccessibilitySetup() { accessibilitySetup.show() }
+    @objc private func openVocabulary() { editVocabulary(nil) }
+    private func editVocabulary(_ term: String?) {
+        vocabularyWindow.show(term: term) { [weak self] args, reply in self?.refreshVocabulary(args, reply: reply) }
+    }
     @objc private func showHistory() {
         history.refresh()
         historyWindow.show(keepingFocus: session.phase == .recording)
@@ -358,6 +363,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onToggleReturnToField = { [weak self] in self?.toggleReturnToField() }
             view.returnToFieldEnabled = { [weak self] in self?.returnToField ?? false }
             view.onToggleCorrection = { [weak self] in self?.toggleCorrection() }
+            view.onEditVocabulary = { [weak self] term in self?.editVocabulary(term) }
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onChatWithContext = { [weak self] in self?.chatWithContext() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }

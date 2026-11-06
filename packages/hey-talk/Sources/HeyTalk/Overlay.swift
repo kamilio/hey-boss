@@ -129,6 +129,8 @@ final class Overlay {
     private let identity = IdentityView()
     private let wave = WaveView()
     private let resultIcon = NSImageView()
+    private let editSpelling = NSButton()
+    private var addedTerm: String?
     private let confirmation = NSTextField(labelWithString: "")
     private let connecting = NSTextField(labelWithString: "Connecting…")
     private var waitingForAudio = false
@@ -174,6 +176,7 @@ final class Overlay {
     var onToggleReturnToField: (() -> Void)?
     var returnToFieldEnabled: () -> Bool = { false }
     var onToggleCorrection: (() -> Void)?
+    var onEditVocabulary: ((String?) -> Void)?
     var onShowHistory: (() -> Void)?
     var onChatWithContext: (() -> Void)?
     var onInterruptConversation: (() -> Void)?
@@ -263,6 +266,14 @@ final class Overlay {
         confirmation.textColor = .labelColor
         confirmation.isHidden = true
         pillContent.addSubview(confirmation)
+        editSpelling.title = ""
+        editSpelling.image = NSImage(systemSymbolName: "pencil", accessibilityDescription: nil)
+        editSpelling.isBordered = false
+        editSpelling.toolTip = "Edit vocabulary"
+        editSpelling.setAccessibilityLabel("Edit vocabulary")
+        editSpelling.target = self; editSpelling.action = #selector(editAddedTerm)
+        editSpelling.isHidden = true
+        pillContent.addSubview(editSpelling)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -498,6 +509,7 @@ final class Overlay {
         }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
         history.target = self
+        menu.addItem(withTitle: "Vocabulary…", action: #selector(openVocabulary), keyEquivalent: "").target = self
         for (section, items) in [
             ("Dictation", [
                 ("AI Correction", #selector(toggleCorrection), correctionEnabled, ""),
@@ -530,6 +542,12 @@ final class Overlay {
     @objc private func toggleAutoSubmit() { onToggleAutoSubmit?() }
     @objc private func toggleReturnToField() { onToggleReturnToField?() }
     @objc private func toggleCorrection() { onToggleCorrection?() }
+    @objc private func openVocabulary() { onEditVocabulary?(nil) }
+    @objc private func editAddedTerm() {
+        guard let addedTerm else { return }
+        dismissNotice()
+        onEditVocabulary?(addedTerm)
+    }
     @objc private func showHistory() { onShowHistory?() }
     @objc private func chatWithContext() { onChatWithContext?() }
     @objc private func interruptConversation() { onInterruptConversation?() }
@@ -585,7 +603,7 @@ final class Overlay {
         let labelX: CGFloat = expanded ? 102 : 40
         if showConnecting { connecting.sizeToFit() }
         let statusWidth = labelX + connecting.frame.width + (compactVoice ? labelX : 12)
-        let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26
+        let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26 + (editSpelling.isHidden ? 0 : 26)
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
@@ -720,6 +738,7 @@ final class Overlay {
     @objc private func recordFromNotice() { onToggle?() }
     private func clearNotice() {
         noticeDismiss?.cancel(); noticeDismiss = nil
+        addedTerm = nil; editSpelling.isHidden = true
         if !confirmation.isHidden {
             confirmation.isHidden = true; resultIcon.isHidden = true
             updateModeAppearance()
@@ -760,7 +779,7 @@ final class Overlay {
         guard enabled, pasteWait == nil, notice == nil else { return }
         let message: String
         switch action {
-        case .addVocabularyTerm(let term): message = "Added \(term)"
+        case .addVocabularyTerm(let term): showActivity("Added \(term)", failed: false, term: term); return
         case .slack(.users): message = "People"
         case .slack(.chat): message = "Chat opened"
         case .slack(.channel): message = "Channel opened"
@@ -775,7 +794,7 @@ final class Overlay {
         }
         showActivity(message, failed: failed)
     }
-    func showActivity(_ message: String, failed: Bool) {
+    func showActivity(_ message: String, failed: Bool, term: String? = nil) {
         guard enabled, pasteWait == nil, notice == nil else { return }
         clearNotice()
         confirmation.stringValue = message
@@ -791,6 +810,13 @@ final class Overlay {
         resultIcon.isHidden = false
         confirmation.setFrameOrigin(NSPoint(x: 29, y: (18 + confirmation.firstBaselineOffsetFromTop - confirmation.frame.height - confirmation.font!.capHeight / 2).rounded()))
         confirmation.isHidden = false
+        if let term {
+            addedTerm = term
+            editSpelling.frame = NSRect(x: confirmation.frame.maxX + 2, y: 5, width: 25, height: 26)
+            editSpelling.isHidden = false
+            pillContent.setAccessibilityRole(.group)
+            confirmation.toolTip = term
+        } else { confirmation.toolTip = nil }
         updateModeAppearance()
         NSAnimationContext.runAnimationGroup { context in
             context.duration = fade ? 0.24 : 0
@@ -800,7 +826,7 @@ final class Overlay {
         layout(animated: true)
         let dismiss = DispatchWorkItem { [weak self] in self?.dismissNotice() }
         noticeDismiss = dismiss
-        DispatchQueue.main.asyncAfter(deadline: .now() + (failed ? 5 : 3), execute: dismiss)
+        DispatchQueue.main.asyncAfter(deadline: .now() + (term != nil ? 12 : failed ? 5 : 3), execute: dismiss)
     }
     func error(_ message: String, accessibilityAction: Bool = false, retry: (() -> Void)? = nil) {
         guard enabled, pasteWait == nil else { return }
