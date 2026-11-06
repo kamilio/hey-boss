@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {mkdtemp, mkdir, readFile, writeFile, rm, stat, symlink} from 'node:fs/promises';
 import {resolve, join} from 'node:path';
 import {pathToFileURL} from 'node:url';
+import {createServer} from 'node:net';
 import {spawn} from 'node:child_process';
 import {setTimeout as delay} from 'node:timers/promises';
 import {createInterface} from 'node:readline';
@@ -51,7 +52,7 @@ try {
   assert.ok(!serialized.includes('Private skill body.'));
   assert.equal(requests[0].reasoning?.effort, 'low');
   assert.equal(requests[0].store, false);
-  assert.deepEqual(requests[0].tools.map(t => t.name), ['shell', 'batch']);
+  assert.deepEqual(requests[0].tools.map(t => t.name), ['shell', 'batch', 'inspect_window']);
   assert.ok(JSON.stringify(requests[1]).includes('function_call_output'));
   assert.equal((await stat(statePath)).mode & 0o777, 0o600);
   const restored = await createConversation({home: root, statePath, emit: event => events.push(event), fetchImpl: fakeFetch});
@@ -62,6 +63,27 @@ try {
   console.log('PASS real Poe loop: regular shell, batch failure isolation, root config, AGENTS.md, lazy skills, history/resume, file permissions');
   const tool = (name, args) => [{type: 'function_call', id: 'fc_test', call_id: 'call_test', name, arguments: JSON.stringify(args)}];
   const reply = text => [{type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{type: 'output_text', text, annotations: []}]}];
+  const socketDir = 'out/window-' + process.pid;
+  const fakeHome = socketDir;
+  const endpoint = join(fakeHome, 'Library/Application Support/hey-talk');
+  await mkdir(endpoint, {recursive: true});
+  await mkdir(join(fakeHome, '.hey-boss'), {recursive: true});
+  await writeFile(join(fakeHome, '.hey-boss/config.yaml'), JSON.stringify({conversation: {root: join(root, 'work')}}));
+  const server = createServer(socket => socket.once('data', bytes => {
+    assert.deepEqual(JSON.parse(bytes), {command: 'inspect_window', target: 'Gmail', mode: 'both'});
+    socket.end(JSON.stringify({ok: true, source: 'Gmail', text: 'AXButton: Compose', jpeg: 'YWJj'}));
+  }));
+  try {
+    await new Promise((ok, fail) => server.once('error', fail).listen(join(endpoint, 'control.sock'), ok));
+    const inspect = await createConversation({home: fakeHome, statePath: join(root, 'window.json'), emit: e => events.push(e), fetchImpl: fakeFetch});
+    planned = [tool('inspect_window', {target: 'Gmail', mode: 'both'}), reply('The Compose button is visible.')];
+    await inspect({turn: 'Look at my Gmail.'}, new AbortController().signal);
+    const output = requests.at(-1).input.find(i => i.type === 'function_call_output').output;
+    assert.match(output[0].text, /AXButton: Compose/);
+    assert.equal(output[1].image_url, 'data:image/jpeg;base64,YWJj');
+    assert.ok(!JSON.stringify(events).includes('YWJj'), 'Image bytes stay out of the transcript and narration');
+  } finally { server.close(); await rm(socketDir, {recursive: true, force: true}); }
+  console.log('PASS window capture: socket request, accessibility and image sent together to the model');
   // A GUI launch has a sparse PATH. Login and interactive startup files must
   // supply the same commands and functions as the user's terminal.
   const shellHome = join(root, 'shell-home');

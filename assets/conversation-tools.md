@@ -3,3 +3,5 @@ Each shell call has a command and a description. The description is read aloud w
 Run a shell command.
 
 Run independent shell commands concurrently.
+
+See what’s on my screen. Look at my Gmail. Look at my browser.

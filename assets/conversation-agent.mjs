@@ -3,6 +3,7 @@ import {homedir, userInfo} from 'node:os';
 import {dirname, isAbsolute, join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
+import {createConnection} from 'node:net';
 import {randomUUID} from 'node:crypto';
 import {agent, shellPlugin, memoryPlugin, skillsPlugin, compactionPlugin, openaiResponsesPlugin, parseYaml} from './poe-agent.mjs';
 
@@ -47,7 +48,7 @@ export async function createConversation({home = homedir(), statePath, emit, fet
   await mkdir(cwd, {recursive: true});
   await mkdir(dirname(statePath), {recursive: true, mode: 0o700});
   const base = (await readFile(new URL('./conversation.md', import.meta.url), 'utf8')).trim();
-  const [guidance, shellDescription, batchDescription] = (await readFile(new URL('./conversation-tools.md', import.meta.url), 'utf8')).trim().split('\n\n');
+  const [guidance, shellDescription, batchDescription, windowDescription] = (await readFile(new URL('./conversation-tools.md', import.meta.url), 'utf8')).trim().split('\n\n');
   const stored = await optionalFile(statePath);
   let history = stored === undefined ? undefined : interruptedHistory(JSON.parse(stored).messages);
   async function checkpoint(messages) {
@@ -119,6 +120,34 @@ export async function createConversation({home = homedir(), statePath, emit, fet
           const results = await Promise.allSettled(args.commands.map(args => command(args, ctx)));
           ctx.signal.throwIfAborted();
           return JSON.stringify(results.map((result, i) => ({...args.commands[i], ...(result.status === 'fulfilled' ? {output: result.value} : {error: result.reason.message})})));
+        }},
+        {name: 'inspect_window', description: windowDescription, inputSchema: {type: 'object', properties: {
+          target: {type: 'string', examples: ['active', 'browser', 'Gmail', 'Finder']},
+          mode: {type: 'string', enum: ['accessibility', 'screenshot', 'both']}},
+          required: ['target', 'mode'], additionalProperties: false},
+        async call({target, mode}, ctx) {
+          ctx.signal.throwIfAborted();
+          const id = randomUUID(), input = {command: mode + ': ' + target, description: 'Looking at ' + (target === 'active' ? 'the current window' : target) + '.'};
+          emit({ToolStarted: {id, input}});
+          const socket = createConnection({path: join(home, 'Library/Application Support/hey-talk/control.sock'), signal: ctx.signal});
+          try {
+            socket.setTimeout(15000, () => socket.destroy(new Error('Hey Talk did not answer.')));
+            socket.write(JSON.stringify({command: 'inspect_window', target, mode}) + '\n');
+            let size = 0; const chunks = [];
+            for await (const chunk of socket) {
+              size += chunk.length; if (size > 8 * 1024 * 1024) throw new Error('Window capture is too large.');
+              chunks.push(chunk);
+            }
+            const result = JSON.parse(Buffer.concat(chunks).toString());
+            if (!result.ok) throw new Error(result.error);
+            const text = result.source + (result.text ? '\n' + result.text : '');
+            emit({ToolCompleted: {id, output: {...input, aggregatedOutput: text + (result.jpeg ? '\nScreenshot attached.' : '')}, failed: false}});
+            return [{type: 'text', text}, ...(result.jpeg ? [{type: 'image', mimeType: 'image/jpeg', data: result.jpeg}] : [])];
+          } catch (error) {
+            const message = ['ENOENT', 'ECONNREFUSED'].includes(error.code) ? 'Start Hey Talk on this Mac to inspect a window.' : error.message;
+            emit({ToolCompleted: {id, output: {...input, aggregatedOutput: message}, failed: true}});
+            throw new Error(message);
+          } finally { socket.destroy(); }
         }});
     try {
       for await (const event of runner.stream(turn, {signal, baseSystemPrompt: base, resume: {messages: interruptedHistory(history ?? legacy)},
