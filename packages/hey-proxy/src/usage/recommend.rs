@@ -538,6 +538,7 @@ mod tests {
                 state: State::Ok,
                 updated_at: Some(1_790_800_000),
                 data: Some(UsageData {
+                    monthly_on_demand_credits: None,
                     availability_unknown: false,
                     windows: vec![
                         Window {

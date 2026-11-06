@@ -70,6 +70,50 @@ fn wham_usage_normalizes_session_weekly_spark_and_spend_limits() {
     assert_eq!(data["extra_usage"]["spend"]["remaining"], 75.0);
 }
 
+#[test]
+fn codex_spend_requires_a_provider_amount() {
+    for fields in [
+        json!({"credits":{"balance":"12.5"}}),
+        json!({"spend_control":{"individual_limit":{"limit":"100","remaining_percent":75}}}),
+    ] {
+        let data = usage::normalize(&fields).unwrap();
+        assert!(data["extra_usage"]["spend"]["used"].is_null());
+    }
+}
+
+#[test]
+fn monthly_on_demand_requires_complete_daily_credit_readings() {
+    let day = |date: &str, paid: Value| {
+        json!({"date":date,"premium_usage_values":{
+            "credit_usage_credits":{"cli":paid,"web":0},"total_usage_credits":{"cli":450}
+        }})
+    };
+    let total =
+        |days| usage::on_demand_total(&json!({"units":"credits","data":days}), "2026-11-02");
+    assert_eq!(
+        total(json!([
+            day("2026-11-02", json!(2.5)),
+            day("2026-11-01", json!(0.0))
+        ])),
+        Some(2.5)
+    );
+    assert_eq!(total(json!([day("2026-11-02", json!(2.5))])), None);
+    assert_eq!(
+        total(json!([
+            day("2026-11-02", json!(2.5)),
+            day("2026-11-02", json!(2.5))
+        ])),
+        None
+    );
+    assert_eq!(
+        total(json!([
+            day("2026-11-02", json!(2.5)),
+            day("2026-11-01", Value::Null)
+        ])),
+        None
+    );
+}
+
 #[tokio::test]
 async fn codex_usage_and_recommender_work_without_affecting_proxy_routing() {
     let now = crate::codex_auth::now();
@@ -95,6 +139,7 @@ async fn codex_usage_and_recommender_work_without_affecting_proxy_routing() {
                         "acct_synthetic_123"
                     );
                     axum::Json(json!({
+                        "spend_control":{"individual_limit":{"unit":"credit","limit":"100","used":"75"}},
                         "rate_limit": {
                             "primary_window": {
                                 "used_percent": 40,
@@ -108,6 +153,18 @@ async fn codex_usage_and_recommender_work_without_affecting_proxy_routing() {
                             }
                         }
                     }))
+                }
+                "/backend-api/wham/usage/daily-workspace-user-token-usage-breakdown" => {
+                    assert_eq!(request.headers()["ChatGPT-Account-Id"], "acct_synthetic_123");
+                    assert_eq!(request.headers()["authorization"], "Bearer codex-oat-synthetic-old");
+                    let iso = hey_proxy::usage::format_unix_iso8601(now);
+                    let month = &iso[..7];
+                    assert_eq!(request.uri().query(), Some(format!("start_date={month}-01&end_date={}&group_by=day", &iso[..10]).as_str()));
+                    let days: Vec<_> = (1..=iso[8..10].parse::<u32>().unwrap()).map(|day| json!({
+                        "date":format!("{month}-{day:02}"),
+                        "premium_usage_values":{"credit_usage_credits":{"cli":if day == 1 {2.5} else {0.0}}}
+                    })).collect();
+                    axum::Json(json!({"units":"credits","data":days}))
                 }
                 "/api/oauth/usage" => {
                     claude_counter.fetch_add(1, Ordering::SeqCst);
@@ -186,6 +243,15 @@ async fn codex_usage_and_recommender_work_without_affecting_proxy_routing() {
 
     let codex_usage = sdk.usage("codex", "default").await.unwrap();
     assert_eq!(codex_usage.reading.state, UsageState::Ok);
+    assert_eq!(
+        codex_usage
+            .reading
+            .data
+            .as_ref()
+            .unwrap()
+            .monthly_on_demand_credits,
+        Some(2.5)
+    );
     assert_eq!(
         codex_usage.reading.data.as_ref().unwrap().windows[0].remaining_percent,
         Some(60.0)
