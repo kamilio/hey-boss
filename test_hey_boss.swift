@@ -4566,6 +4566,13 @@ func auditChatPolish(_ root: String) {
         while !check() && Date() < until { try? await Task.sleep(for: .milliseconds(20)) }
         precondition(check(), "key=\(chat.window.isKeyWindow), active=\(NSApp.isActive), microphone permission=\(AVCaptureDevice.authorizationStatus(for: .audio).rawValue), standby=\(chat.standby != nil)")
     }
+    let start = ProcessInfo.processInfo.systemUptime
+    chat.openWithContext(source: nil, text: nil)
+    await wait { chat.phase == .listening || chat.phase == .recording }
+    print("Cold conversation microphone: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000)) ms")
+    let cold = chat.audio!
+    precondition(cold.engine.inputNode.isVoiceProcessingEnabled != cold.headphoneOutput, "Only speaker playback needs echo cancellation")
+    chat.window.close()
     chat.show()
     await wait { chat.window.isKeyWindow && chat.standby?.engine.isRunning == true }
     let first = chat.standby!
