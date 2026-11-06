@@ -9,7 +9,7 @@ async (page) => {
     for (const name of names) {
       await page.evaluate(name => { model.project.name = name; }, name);
       await page.locator('#project-settings-trigger').click();
-      await page.locator('#project-prompt').waitFor({state: 'visible'});
+      await page.locator('#project-prs').waitFor({state: 'visible'});
       const heading = page.locator('#project-settings-title');
       check((await heading.innerText()).includes(name), 'Headline includes the full project name');
       check(await page.locator('#project-settings-name').getAttribute('title') === name, 'Truncated name has a full-name tooltip');
@@ -25,7 +25,7 @@ async (page) => {
         const r = el.getBoundingClientRect();
         return r.left >= 0 && r.right <= innerWidth && r.top >= 0;
       }), 'Close remains visible');
-      await page.getByRole('tab', {name: 'Workflow', exact: true}).click();
+      await page.getByRole('tab', {name: 'Activity', exact: true}).click();
       check(await heading.isVisible(), 'Headline remains visible across tabs');
       await page.locator('#project-settings-close').click();
       check(await page.locator('#project-settings-trigger').evaluate(el => el === document.activeElement), 'Closing restores focus');

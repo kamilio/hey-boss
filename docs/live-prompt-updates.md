@@ -1,9 +1,8 @@
 # Updating instructions during a task
 
-Project settings → Instructions starts with the **Implementation prompt**. Edit
-section wording under **Task context sections** or the Workflow tab.
+Open **Prompts** to edit **worker.md** (implementation), **plan.md** (planning), or a workflow or context file. Project settings links each workflow switch to its files.
 Defaults live in `src/issues/prompts/*.md`.
-**Use default** removes an override. Sections without applicable context are
+**Restore default** removes an override. Sections without applicable context are
 omitted. Preview and worker launches use the same layout. Existing saved layouts
 are preserved when editing settings; the sequence has no editor.
 
@@ -11,7 +10,7 @@ Variables expand once: task text containing `{{number}}` is kept literal when
 inserted into another section. GitHub evidence is retrieved with `hey-gh`; it
 is not copied into previews, launches, or live update messages.
 
-Save edits in Project settings to send updated instructions to running issue
+Save edits in Prompts to send updated instructions to running issue
 agents. Workers check for changes every two seconds. Connected fleet devices
 receive the same behavior once the settings reach their local replica; offline
 devices apply the latest instructions after reconnecting.

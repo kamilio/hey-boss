@@ -1,46 +1,8 @@
 "use strict";
-const workflowPromptKeys = ["plan", "worktree", "checkout", "prs", "main"];
-let projectPromptDefaults = {};
-let projectPromptLayout = null;
-function addPromptEditors(sections) {
-  workflowPromptKeys.splice(5);
-  for (const id of ["context", "runtime"]) $("#project-" + id + "-prompts").replaceChildren();
-  for (const section of sections || []) {
-    const key = section.key;
-    if (key === "layout" || workflowPromptKeys.includes(key)) continue;
-    workflowPromptKeys.push(key);
-    const group = ["steering", "dependency_update", "prompt_update", "goal_continue"].includes(key) ? "runtime" : "context";
-    const branch = document.createElement("section");
-    branch.className = "workflow-branch settings-section";
-    branch.dataset.branch = key;
-    const heading = document.createElement("div"); heading.className = "branch-heading";
-    const label = document.createElement("label"); label.htmlFor = "project-prompt-" + key;
-    const title = document.createElement("strong"); title.textContent = section.title; label.append(title);
-    const state = document.createElement("span"); state.className = "branch-state";
-    heading.append(label, state);
-    const help = document.createElement("p"); help.className = "field-help"; help.textContent = section.help;
-    const input = document.createElement("textarea"); input.className = "text-input workflow-prompt";
-    input.id = "project-prompt-" + key; input.rows = 4; input.maxLength = 32000;
-    input.setAttribute("aria-describedby", "project-source-" + key);
-    input.addEventListener("input", () => { projectSettingsChanged(); previewProjectInstructions(); });
-    const footer = document.createElement("div"); footer.className = "branch-footer";
-    const source = document.createElement("span"); source.id = "project-source-" + key;
-    const reset = document.createElement("button"); reset.type = "button"; reset.className = "button link-button";
-    reset.dataset.resetPrompt = key; reset.textContent = "Use default";
-    reset.onclick = () => { input.value = ""; projectSettingsChanged(); previewProjectInstructions(); };
-    footer.append(source, reset);
-    branch.append(heading, help, input, footer);
-    $("#project-" + group + "-prompts").append(branch);
-  }
-}
-let projectSettingsTab = "configuration";
 let projectSettingsProject = null,
   projectSettingsFocus = null,
   projectSettingsOriginal = null,
   projectSettingsSaving = false,
-  projectPreviewFailed = false,
-  projectPreviewTimer,
-  projectPreviewSequence = 0,
   projectSettingsSequence = 0;
 const projectSettingsTabs = [...document.querySelectorAll('.project-settings-tabs [role="tab"]')];
 function selectProjectSettingsTab(tab, focus = false) {
@@ -51,14 +13,8 @@ function selectProjectSettingsTab(tab, focus = false) {
     document.getElementById(item.getAttribute("aria-controls")).hidden = !selected;
   }
   document.getElementById(tab.getAttribute("aria-controls")).scrollTop = 0;
-  $(".settings-preview").scrollTop = 0;
-  projectSettingsTab = tab.id.replace('settings-tab-', '');
-  $(".project-settings-body").dataset.settingsTab = projectSettingsTab;
-  $(".settings-preview").hidden = ["configuration", "activity"].includes(projectSettingsTab);
-  if (projectSettingsTab === "activity") loadConfigHistory();
+  if (tab.id === "settings-tab-activity") loadConfigHistory();
   $(".project-settings-body").scrollTop = 0;
-  updateWorkflowBranches();
-  if (projectSettingsOriginal) previewProjectInstructions();
   if (focus) tab.focus();
   tab.scrollIntoView({block: "nearest", inline: "nearest"});
 }
@@ -94,10 +50,7 @@ function projectSettingsDraft() {
     worker_permissions: $("#project-worker-permissions").value,
     paused: $("#project-paused").checked,
     pause_reason: $("#project-paused").checked ? $("#project-pause-reason").value.trim() : "",
-    prompt: $("#project-prompt").value,
     worktree_enabled: $("#project-worktree").checked,
-    // The sequence has no editor; retain saved layouts in previews and unrelated edits.
-    prompt_overrides: {layout: projectPromptLayout, ...Object.fromEntries(workflowPromptKeys.map(key => [key, $("#project-prompt-" + key).value.trim() ? $("#project-prompt-" + key).value : null]))},
     prs_enabled: $("#project-prs").checked,
     drafts_enabled: $("#project-drafts").checked,
     artifacts_enabled: $("#project-artifacts").checked,
@@ -113,15 +66,12 @@ function projectSettingsChanged() {
   const changed =
     JSON.stringify(projectSettingsDraft()) !==
     JSON.stringify(projectSettingsOriginal);
-  updateWorkflowBranches();
   $("#project-settings-state").textContent = changed ? "Unsaved changes" : "";
   $("#project-settings-form button[type=submit]").disabled =
     projectSettingsSaving || !projectSettingsOriginal || !changed;
 }
 function closeProjectSettings() {
   if (projectSettingsSaving) return;
-  clearTimeout(projectPreviewTimer);
-  ++projectPreviewSequence;
   ++projectSettingsSequence;
   ++configHistorySequence;
   ++configDetailSequence;
@@ -131,16 +81,23 @@ function closeProjectSettings() {
 $("#project-settings-trigger").onclick = async () => {
   const sequence = ++projectSettingsSequence;
   projectSettingsProject = model.project.id;
+  for (const link of document.querySelectorAll("[data-prompt-file]")) {
+    const params = new URLSearchParams({project:projectSettingsProject, file:link.dataset.promptFile});
+    if (model.route?.host) params.set("host", model.route.host);
+    link.href = "/prompts#" + params;
+    link.onclick = event => {
+      if (projectSettingsSaving || (!event.metaKey && !event.ctrlKey && projectSettingsOriginal &&
+          JSON.stringify(projectSettingsDraft()) !== JSON.stringify(projectSettingsOriginal) &&
+          !confirm("Discard unsaved project settings?"))) event.preventDefault();
+    };
+  }
   projectSettingsFocus = $("#project-settings-trigger");
   projectSettingsOriginal = null;
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-name").title = model.project.name;
   $("#project-settings-error").hidden = true;
-  projectPreviewFailed = false;
   $("#project-settings-state").textContent = "Loading…";
   setProjectSettingsDisabled(true);
-  $("#project-instructions-preview").textContent = "Loading…";
-  $("#project-goal-indicator").hidden = true;
   $("#project-settings-form button[type=submit]").disabled = true;
   $("#project-settings-dialog").showModal();
   selectProjectSettingsTab(projectSettingsTabs[0]);
@@ -155,23 +112,12 @@ $("#project-settings-trigger").onclick = async () => {
     $("#project-worker-permissions").value = value.worker_permissions ?? "auto";
     $("#project-paused").checked = value.paused === true;
     $("#project-pause-reason").value = value.pause_reason || "";
-    $("#project-prompt").value = value.prompt;
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
-    $("#project-preview-workspace").value = "checkout";
-    projectPromptDefaults = value.prompt_defaults;
-    projectPromptLayout = value.prompt_overrides.layout ?? null;
-    addPromptEditors(value.prompt_sections);
-    for (const key of workflowPromptKeys) {
-      const input = $("#project-prompt-" + key);
-      input.value = value.prompt_overrides[key] ?? "";
-      input.placeholder = projectPromptDefaults[key];
-    }
     for (const resource of ["drafts", "artifacts"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
     projectSettingsOriginal = projectSettingsDraft();
     setProjectSettingsDisabled(false);
     projectSettingsChanged();
-    previewProjectInstructions();
   } catch (error) {
     if (sequence !== projectSettingsSequence) return;
     $("#project-settings-state").textContent = "";
@@ -197,16 +143,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     const draft = projectSettingsDraft();
     const pauseChanged = draft.paused !== projectSettingsOriginal.paused;
     const executionChanged = ["worker_model", "worker_reasoning", "worker_permissions"].some(key => draft[key] !== projectSettingsOriginal[key]);
-    const promptsChanged = draft.prompt !== projectSettingsOriginal.prompt ||
-      JSON.stringify(draft.prompt_overrides) !== JSON.stringify(projectSettingsOriginal.prompt_overrides);
-    const changes = {};
-    for (const [key, value] of Object.entries(draft)) {
-      if (key === 'prompt_overrides') {
-        for (const section of Object.keys(value)) {
-          if (value[section] !== projectSettingsOriginal.prompt_overrides[section]) changes['prompt_overrides.' + section] = value[section];
-        }
-      } else if (value !== projectSettingsOriginal[key]) changes[key] = value;
-    }
+    const changes = Object.fromEntries(Object.entries(draft).filter(([key, value]) => value !== projectSettingsOriginal[key]));
     await mutate(
       {action: "project_config", operation: {command: "apply", changes}},
       projectSettingsProject,
@@ -219,9 +156,8 @@ $("#project-settings-form").onsubmit = async (event) => {
     await refreshProjects(projectSettingsProject);
     await renderRoute();
     updateHeader();
-    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : promptsChanged ? "Settings saved. Instruction updates queued for running agents." : executionChanged ? "Settings saved. Execution changes apply to the next task or scheduled run." : "Settings saved");
+    toast(pauseChanged ? draft.paused ? "Project paused. Current agents can finish." : "Project resumed. Workers can pick up issues." : executionChanged ? "Settings saved. Execution changes apply to the next task or scheduled run." : "Settings saved");
   } catch (error) {
-    projectPreviewFailed = false;
     $("#project-settings-error").textContent = error.message;
     $("#project-settings-error").hidden = false;
   } finally {
@@ -230,71 +166,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     projectSettingsChanged();
   }
 };
-function previewProjectInstructions() {
-  clearTimeout(projectPreviewTimer);
-  const sequence = ++projectPreviewSequence,
-    project = projectSettingsProject,
-    draft = projectSettingsDraft();
-  if (["configuration", "activity"].includes(projectSettingsTab)) {
-    $("#project-instructions-preview").setAttribute("aria-busy", "false");
-    return;
-  }
-  $("#project-instructions-preview").setAttribute("aria-busy", "true");
-  projectPreviewTimer = setTimeout(async () => {
-    try {
-      const value = await api(
-        {
-          action: "preview_worker",
-          task_kind: projectSettingsTab === "planning" ? "plan" : "implement",
-          worktree_allowed: draft.worktree_enabled,
-          config: {
-            projects: [project],
-            prompt: draft.prompt,
-            prs_enabled: draft.prs_enabled,
-            worktree_enabled: draft.worktree_enabled && $("#project-preview-workspace").value === "worktree",
-            prompt_overrides: draft.prompt_overrides,
-          },
-          number: null,
-        },
-        project,
-      );
-      if (
-        sequence !== projectPreviewSequence ||
-        !$("#project-settings-dialog").open ||
-        project !== projectSettingsProject
-      )
-        return;
-      $("#project-instructions-preview").textContent = value.prompt;
-      $("#project-goal-indicator").hidden = !value.use_goal;
-      if (projectPreviewFailed) {
-        $("#project-settings-error").hidden = true;
-        projectPreviewFailed = false;
-      }
-    } catch (error) {
-      if (
-        sequence !== projectPreviewSequence ||
-        !$("#project-settings-dialog").open
-      )
-        return;
-      if ($("#project-settings-error").hidden || projectPreviewFailed) {
-        $("#project-settings-error").textContent = error.message;
-        $("#project-settings-error").hidden = false;
-        projectPreviewFailed = true;
-      }
-    } finally {
-      if (sequence === projectPreviewSequence)
-        $("#project-instructions-preview").setAttribute("aria-busy", "false");
-    }
-  }, 150);
-}
-for (const selector of ["#project-prompt", "#project-prs", "#project-worktree", ...workflowPromptKeys.map(key => "#project-prompt-" + key)]) {
-  $(selector).addEventListener("input", () => {
-    projectSettingsChanged();
-    previewProjectInstructions();
-  });
-}
-
-for (const resource of ["drafts", "artifacts"]) $("#project-" + resource).onchange = projectSettingsChanged;
+for (const resource of ["prs", "worktree", "drafts", "artifacts"]) $("#project-" + resource).onchange = projectSettingsChanged;
 $("#project-paused").onchange = projectSettingsChanged;
 $("#project-pause-reason").oninput = projectSettingsChanged;
 for (const field of ["model", "reasoning", "permissions"]) $("#project-worker-" + field).addEventListener("input", projectSettingsChanged);
@@ -306,40 +178,7 @@ $("#project-worker-model-inherit").onclick = () => {
 function setProjectSettingsDisabled(disabled) {
   $("#project-settings-close").disabled = projectSettingsSaving;
   $("#project-settings-cancel").disabled = projectSettingsSaving;
-  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, #project-settings-form select, #project-worker-model-inherit, [data-reset-prompt]")) input.disabled = disabled;
-  $("#project-preview-workspace").disabled = disabled;
-}
-function updateWorkflowBranches() {
-  const plan = projectSettingsTab === "planning";
-  $("#project-preview-label").textContent = plan ? "PLAN PREVIEW" : "IMPLEMENTATION PREVIEW";
-  $("#project-preview-help").textContent = plan ? "Plan instructions. Updates as you edit." : "Includes workspace and delivery instructions. Updates as you edit.";
-  $("#project-preview-worker").hidden = plan;
-  const allowed = $("#project-worktree").checked;
-  $("#project-preview-workspace option[value=worktree]").disabled = !allowed;
-  if (!allowed) $("#project-preview-workspace").value = "checkout";
-  const active = plan ? ["plan"] : [$("#project-preview-workspace").value, $("#project-prs").checked ? "prs" : "main"];
-  $("#project-preview-workspace").disabled = plan || projectSettingsSaving || !projectSettingsOriginal;
-  $("#project-preview-workspace-help").textContent = plan ? "Plan tasks use their own prompt without workspace or delivery instructions." : "Preview only. Each worker chooses its own workspace.";
-  for (const key of workflowPromptKeys) {
-    const branch = document.querySelector(`[data-branch="${key}"]`);
-    branch.classList.toggle("active", active.includes(key));
-    branch.querySelector(".branch-state").textContent = active.includes(key) ? "In preview" : key === "worktree" ? (allowed ? "Available" : "Not allowed") : key === "checkout" ? "Available" : workflowPromptKeys.indexOf(key) >= 5 ? "When applicable" : "Inactive";
-    const custom = !!$("#project-prompt-" + key).value.trim();
-    $("#project-source-" + key).textContent = custom ? "Project override" : "Built-in default";
-    branch.querySelector("[data-reset-prompt]").hidden = !custom;
-  }
-  $("#project-preview-choices").textContent = plan ? "Plan · Linked artifacts" : `${active[0] === "worktree" ? "Dedicated worktree" : "Existing checkout"} · ${active[1] === "prs" ? "Pull requests" : "Push to main"}`;
-}
-$("#project-preview-workspace").onchange = () => {
-  updateWorkflowBranches();
-  previewProjectInstructions();
-};
-for (const button of document.querySelectorAll("[data-reset-prompt]")) {
-  button.onclick = () => {
-    $("#project-prompt-" + button.dataset.resetPrompt).value = "";
-    projectSettingsChanged();
-    previewProjectInstructions();
-  };
+  for (const input of document.querySelectorAll("#project-settings-form input, #project-settings-form textarea, #project-settings-form select, #project-worker-model-inherit")) input.disabled = disabled;
 }
 
 let configHistorySequence = 0, configDetailSequence = 0, configHistoryOffset = null, configHistoryBusy = false;
@@ -477,31 +316,3 @@ $('#config-history-more').onclick = () => loadConfigHistory(true);
 window.addEventListener('resize', () => {
   if ($('#project-settings-dialog').open) $('.project-settings-tabs [aria-selected="true"]').scrollIntoView({block:'nearest',inline:'nearest'});
 });
-
-$('#prompt-files').onclick = async event => {
-  const trigger = event.currentTarget, {id: project, name} = model.project, host = model.route.host || null;
-  trigger.disabled = true;
-  try {
-    let settings = await api({action:'project_settings'},project,null,host);
-    if (project !== model.project.id || host !== (model.route.host || null)) return;
-    const files = [{key:'worker',title:'Implementation'}, ...settings.prompt_sections].map(section=>({
-      path:section.key+'.md',key:section.key,title:section.title,help:section.help,editable:true
-    }));
-    function describe(f) {
-      f.custom = f.key==='worker' ? settings.prompt !== settings.worker_prompt_default : settings.prompt_overrides[f.key] != null;
-      f.detail = [f.title, f.custom ? 'Project override' : 'Built-in default', f.help].filter(Boolean).join(' · ');
-    }
-    files.forEach(describe);
-    async function save(f,text) {
-      const patch=f.key==='worker'?{prompt:text ?? settings.worker_prompt_default}:{prompt_overrides:{...settings.prompt_overrides,[f.key]:text}};
-      settings=await mutate({action:'configure_project',if_version:settings.version,...patch},project,host);
-      describe(f);
-    }
-    HeyBossFiles.open({scope:name,title:'Prompt files',root:'prompts',files,initial:'worker.md',
-      read:f=>f.key==='worker'?settings.prompt:(settings.prompt_overrides[f.key] ?? settings.prompt_defaults[f.key]),
-      save,reset:f=>save(f,null),
-      native:!host&&!model.defaultHost&&['127.0.0.1','localhost','hey-boss.test'].includes(location.hostname)&&/Mac/.test(navigator.platform)
-        ? f=>post('/api/prompts/open',{project,key:f.key}) : null
-    });
-  } catch(e) {toast(e.message,true);} finally {trigger.disabled=false;}
-};

@@ -2131,12 +2131,6 @@ details[open] > .activity-summary .activity-chevron { transform: rotate(90deg); 
   }
 }
 
-#project-instructions-preview {
-  margin: 8px 0 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  line-height: 1.7;
-}
 #project-settings-dialog .dialog-footer {
   position: sticky;
   bottom: 0;
@@ -2926,44 +2920,11 @@ button.avatar.self:hover {
   min-width: 0;
 }
 
-.project-settings-body { display:grid; grid-template-columns:minmax(0, 1.35fr) minmax(0, 1fr); gap:28px; padding:20px 24px; }
-.settings-editor, .settings-preview { min-width:0; }
-.settings-project-name { margin:0 0 16px; color:var(--muted); font-size:12px; }
 .settings-section { margin-bottom:20px; }
-.settings-section h3, .settings-preview h3 { margin:0; font-size:15px; font-weight:600; }
+.settings-section h3 { margin:0; font-size:15px; font-weight:600; }
 .settings-section .field-help { margin:6px 0 12px; }
-.settings-section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; }
 .workflow-toggle { display:flex; align-items:center; gap:8px; font-size:12px; cursor:pointer; flex-shrink:0; }
 .workflow-toggle input { accent-color:var(--accent); width:16px; height:16px; }
-.workflow-branches { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
-.workflow-branch { border:1px solid var(--line); border-radius:10px; padding:12px; min-width:0; }
-.workflow-branch.active { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 4%,var(--solid)); }
-.branch-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:6px; margin-bottom:10px; }
-.branch-heading label { display:grid; gap:4px; }
-.branch-heading small { font-size:10px; color:var(--muted); }
-.branch-heading strong { font-size:12px; font-weight:600; }
-.branch-state { font-size:10px; color:var(--muted); padding:3px 5px; border-radius:4px; background:var(--solid); }
-.active .branch-state { color:var(--accent); }
-.workflow-prompt { font-size:12px; line-height:1.5; resize:vertical; min-height:104px; }
-.workflow-prompt::placeholder { color:var(--muted); opacity:1; }
-.branch-footer { display:flex; justify-content:space-between; align-items:center; gap:8px; min-height:26px; margin-top:6px; font-size:10px; color:var(--muted); }
-.branch-footer .button { padding:2px 0; font-size:10px; min-height:24px; }
-.settings-preview { align-self:start; position:sticky; top:64px; border:1px solid var(--line); border-radius:12px; overflow:hidden; background:var(--solid); }
-.preview-heading { padding:18px; border-bottom:1px solid var(--line); }
-.preview-eyebrow { display:block; font-size:10px; letter-spacing:.09em; color:var(--muted); margin-bottom:8px; }
-.preview-choices { font-size:11px; color:var(--accent); margin-top:12px; }
-.preview-heading .field-label { margin-top:16px; }
-.preview-heading .field-help { font-size:11px; margin:8px 0 0; }
-#project-instructions-preview { padding:18px; margin:0; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12px; min-height:220px; }
-.project-settings-body > .form-error { grid-column:1/-1; }
-@media (max-width:600px) {
- #project-prompt-plan { font-size:16px; }
-}
-@media (max-width:800px) {
- .project-settings-body { grid-template-columns:1fr; gap:12px; padding:16px; }
- .settings-preview { position:static; }
- .settings-section-heading { align-items:flex-start; }
-}
 
 /* Drafts are a saved issue state, with an explicit transition to agent pickup. */
 .draft-badge, .state-pill.draft {
@@ -3036,8 +2997,6 @@ button.avatar.self:hover {
   .sidebar .side-section { flex-basis:100%; }
 }
 @media (max-width:480px) {
- .workflow-branches { grid-template-columns:1fr; }
- .settings-section-heading { flex-direction:column; gap:0; margin-bottom:10px; }
  #project-settings-dialog .dialog-heading, #project-settings-dialog .dialog-footer { padding-left:16px; padding-right:16px; }
 }
 

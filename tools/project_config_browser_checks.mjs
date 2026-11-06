@@ -29,7 +29,7 @@ try {
   });
   await run(['project','init','--project',project,'--prs','false','--worktree','false','--yes','--json']);
   await run(['config','sync','--json']);
-  browser=await chromium.launch({channel:'chrome',headless:true});
+  browser=await chromium.launch({channel:'chrome',headless:true,args:['--disable-gpu']});
   const page=await browser.newPage({viewport:{width:1280,height:900}}), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(info.url);

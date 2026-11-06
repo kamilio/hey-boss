@@ -73,7 +73,7 @@
 }
 #project-settings-form .project-settings-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   flex: 1;
   min-height: 0;
@@ -86,33 +86,21 @@
 #project-settings-form .settings-section:last-child {
   margin-bottom: 0;
 }
-#project-settings-form [role="tabpanel"],
-#project-settings-form .settings-preview {
+#project-settings-form [role="tabpanel"] {
   min-width: 0;
   max-height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-#project-settings-form .settings-preview {
-  position: static;
-}
-#project-instructions-preview {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 @media (max-width: 800px) {
   #project-settings-form .project-settings-body {
     grid-template-columns: minmax(0, 1fr);
     overflow-y: auto;
   }
-  #project-settings-form [role="tabpanel"],
-  #project-settings-form .settings-preview {
+  #project-settings-form [role="tabpanel"] {
     max-height: none;
     overflow: visible;
   }
-}
-#project-prompt {
-  min-height: 180px;
 }
 #project-settings-error {
   flex-shrink: 0;
@@ -137,7 +125,6 @@
   .project-settings-tabs [role="tab"] {
     padding: 10px 12px;
   }
-  #project-settings-form .workflow-prompt,
   #project-settings-form .text-input {
     font-size: 16px;
   }
@@ -149,10 +136,8 @@
   }
 }
 
-#project-settings-form .project-settings-body[data-settings-tab="configuration"] {
-  grid-template-columns: minmax(0, 1fr);
-}
-#project-settings-form .settings-preview[hidden] { display: none; }
+.setting-prompt-links { color:var(--muted); font-size:12px; line-height:1.8; margin:8px 0; }
+.setting-prompt-links a { color:var(--accent); text-decoration:underline; text-underline-offset:2px; }
 .project-configuration-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -198,7 +183,6 @@
   #project-settings-form .configuration-card { padding: 16px; }
 }
 
-#project-settings-form .project-settings-body[data-settings-tab="activity"] { grid-template-columns: minmax(0, 1fr); }
 #settings-panel-activity { width: 100%; padding: 24px; box-sizing: border-box; }
 .config-activity-heading, .config-history-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
 .config-activity-heading h3 { margin: 0 0 6px; }
