@@ -4638,10 +4638,9 @@ struct SubscriptionQuotaReading: Codable {
             let currency: String
             let period: String
 
-            var amount: String? {
+            var monthlyUsed: Double? {
                 guard period == "monthly", let used, used.isFinite, used >= 0 else { return nil }
-                if currency == "Credits" { return used.formatted(.number.precision(.fractionLength(0...2))) + " credits" }
-                return used.formatted(.currency(code: currency))
+                return used
             }
         }
         let spend: Spend?
@@ -4851,7 +4850,7 @@ final class SubscriptionQuotaController: NSObject {
             let windows = reading?.data?.windows ?? []
             let paid = reading?.data?.monthly_on_demand_credits
             let showSpend = reading?.data != nil && reading?.state != "disabled"
-            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60 + (showSpend ? 24 : 0) + (paid != nil ? 22 : 0)))
+            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60 + (showSpend ? 24 : 0)))
             body.addSubview(card)
             let accountTitle = row.account.title + (row.account.id == "default" ? "" : " · " + row.account.id)
             let name = label(accountTitle, size: 13, weight: .semibold)
@@ -4863,22 +4862,23 @@ final class SubscriptionQuotaController: NSObject {
             status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
             var rowY: CGFloat = 38
             if showSpend {
-                let title = paid != nil ? "On demand this month" : row.account.provider == "codex" ? "Monthly credit usage" : "Monthly extra usage"
+                let spend = reading?.data?.extra_usage?.spend
+                let codex = row.account.provider == "codex"
+                let credits = codex ? paid ?? (spend?.currency == "Credits" ? spend?.monthlyUsed : nil) : nil
+                let title = paid != nil ? "Est. on demand this month" : codex ? "Est. monthly usage" : "Monthly extra usage"
                 let name = label(title, size: 11, weight: .medium)
                 name.frame = NSRect(x: 12, y: rowY, width: 145, height: 16); card.addSubview(name)
-                let value = paid.map { $0.formatted(.number.precision(.fractionLength(0...2))) + " credits" } ?? reading?.data?.extra_usage?.spend?.amount
+                let value = credits.map { "≈" + ($0 * 0.04).formatted(.currency(code: "USD")) }
+                    ?? spend.flatMap { spend in spend.monthlyUsed.map { $0.formatted(.currency(code: spend.currency)) } }
                 let amount = label(value ?? "Not reported", size: 11, weight: .semibold, color: fresh && value != nil ? .labelColor : .secondaryLabelColor)
                 amount.alignment = .right; amount.frame = NSRect(x: 160, y: rowY, width: cardWidth - 172, height: 16); card.addSubview(amount)
-                rowY += 24
-                if let paid {
-                    let basis = label("Value at 4 US¢/credit", size: 11, color: .secondaryLabelColor)
-                    let estimate = label("≈" + (paid * 0.04).formatted(.currency(code: "USD")), size: 11, color: .secondaryLabelColor)
-                    let explanation = "Reference: GPT-6.1 Sol standard API pricing. Actual workspace charges depend on your agreement."
-                    basis.toolTip = explanation; estimate.toolTip = explanation
-                    basis.frame = NSRect(x: 12, y: rowY, width: 145, height: 16); card.addSubview(basis)
-                    estimate.alignment = .right; estimate.frame = NSRect(x: 160, y: rowY, width: cardWidth - 172, height: 16); card.addSubview(estimate)
-                    rowY += 22
+                if let credits {
+                    let basis = credits.formatted(.number.precision(.fractionLength(0...2))) + " credits at 4 US¢/credit."
+                    let explanation = paid != nil ? "Actual charges depend on your billing terms." : "Includes usage covered by your plan."
+                    name.toolTip = basis + " " + explanation
+                    amount.toolTip = name.toolTip
                 }
+                rowY += 24
             }
             for limit in windows {
                 let name = label(limit.label, size: 11, weight: .medium)

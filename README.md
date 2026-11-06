@@ -356,13 +356,13 @@ background, including while the menu is closed. Failed refreshes retain the last
 reading. Duplicate session aliases appear once. Aliases sharing a
 credential store appear once; distinct subscriptions stay separate. Unavailable
 and stale readings are labeled explicitly. Each account also shows the provider’s
-monthly reading: extra spend in billing currency for Claude, or credits used
-on demand for Codex. The dollar reference uses 4 US cents per on-demand credit:
+monthly reading: extra spend in billing currency for Claude, or the estimated USD value of
+on-demand usage for Codex. The estimate uses 4 US cents per credit:
 [GPT-6.1 Sol](https://developers.openai.com/api/docs/pricing) standard input is $2 per
 million tokens or [50 credits](https://developers.openai.com/codex/pricing/).
 Actual workspace charges depend on purchased credits and billing terms.
-If workspace analytics are unavailable, Codex shows total
-credit usage against the individual limit instead. Missing amounts show “Not reported.”
+If workspace analytics are unavailable, Codex estimates the value of total
+monthly usage against the individual limit, including usage covered by the plan. Missing amounts show “Not reported.”
 
 Notices can optionally link to an issue, with links visible in both directions:
 

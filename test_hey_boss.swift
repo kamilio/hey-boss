@@ -3870,8 +3870,9 @@ func auditSubscriptionQuota() {
     let ui = SubscriptionQuotaController()
     for (provider, currency, used, paid, expected) in [
         ("claude", "USD", "0", "null", 0.0.formatted(.currency(code: "USD"))),
-        ("codex", "Credits", "5943.714", "null", 5943.71.formatted() + " credits"),
-        ("codex", "Credits", "5943.714", "4033.15", 4033.15.formatted() + " credits"),
+        ("codex", "Credits", "5943.87", "null", "≈" + 237.75.formatted(.currency(code: "USD"))),
+        ("codex", "Credits", "5943.714", "4033.15", "≈" + 161.33.formatted(.currency(code: "USD"))),
+        ("codex", "Credits", "5943.87", "0", "≈" + 0.0.formatted(.currency(code: "USD"))),
         ("codex", "Credits", "null", "null", "Not reported")
     ] {
         let fixture = json.replacingOccurrences(of: "codex", with: provider)
@@ -3880,8 +3881,6 @@ func auditSubscriptionQuota() {
         ui.rows = [SubscriptionQuotaRow(account: account.account, reading: account)]
         ui.render()
         let labels = ui.body.subviews.first!.subviews.compactMap { ($0 as? NSTextField)?.stringValue }
-        let estimate = "≈" + 161.33.formatted(.currency(code: "USD"))
-        precondition(labels.contains(estimate) == (paid != "null"), "Only price the on-demand credits")
         precondition(labels.contains(expected), "Missing provider amount: " + expected)
     }
     ui.rows = []
