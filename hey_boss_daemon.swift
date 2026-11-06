@@ -6921,6 +6921,11 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     private var micWatch: Timer?
     let inputSince = OSAllocatedUnfairLock(initialState: UInt64(0))
     func acceptsInput(at hostTime: UInt64) -> Bool { inputSince.withLock { hostTime >= $0 } }
+    func muteInput(_ muted: Bool) {
+        inputSince.withLock { $0 = mach_absolute_time() }
+        reference.withLock { $0.muted = muted }
+        if tapped, engine.inputNode.isVoiceProcessingEnabled { engine.inputNode.isVoiceProcessingInputMuted = muted }
+    }
     static let log = Logger(subsystem: "local.hey-boss.desktop", category: "voice")
     // Audio can be rendered before its turn, but only the playing passage
     // publishes word offsets or advances the document.
@@ -6960,7 +6965,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         return converter
     }
 
-    private let reference = OSAllocatedUnfairLock(initialState: (headphones: false, pcm: [Int16](), archive: Optional<ConversationRecording>.none))
+    private let reference = OSAllocatedUnfairLock(initialState: (headphones: false, muted: false, pcm: [Int16](), archive: Optional<ConversationRecording>.none))
     private var outputChanged: AudioObjectPropertyListenerBlock?
     private var defaultOutput = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
 
@@ -6979,6 +6984,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         let headphones = !streams.isEmpty && streams.allSatisfy { values($0, kAudioStreamPropertyTerminalType).first == kAudioStreamTerminalTypeHeadphones }
         setHeadphoneOutput(headphones)
     }
+    var inputMuted: Bool { reference.withLock { $0.muted } }
     var headphoneOutput: Bool { reference.withLock { $0.headphones } }
     func recordConversation(_ archive: ConversationRecording) { reference.withLock { $0.archive = archive } }
     func setHeadphoneOutput(_ headphones: Bool) {
@@ -6996,8 +7002,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
     func microphoneFrame(_ mic: UnsafeBufferPointer<Int16>) -> [Int16] {
         var stereo = [Int16](repeating: 0, count: 2 * mic.count)
-        for i in mic.indices { stereo[2*i] = mic[i] }
         let (archive, headphones) = reference.withLockUnchecked { ref in
+            if !ref.muted { for i in mic.indices { stereo[2*i] = mic[i] } }
             let used = min(mic.count, ref.pcm.count)
             for i in 0..<used { stereo[2*i+1] = ref.pcm[i] }
             ref.pcm.removeFirst(used)
@@ -7047,7 +7053,10 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         updatePlaybackRoute()
         let cancelEcho = !conversation || !headphoneOutput
         if mic.isVoiceProcessingEnabled != cancelEcho { try mic.setVoiceProcessingEnabled(cancelEcho) }
-        if cancelEcho { mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min) }
+        if cancelEcho {
+            mic.isVoiceProcessingInputMuted = inputMuted
+            mic.voiceProcessingOtherAudioDuckingConfiguration = .init(enableAdvancedDucking: false, duckingLevel: .min)
+        }
         let source = mic.outputFormat(forBus: 0)
         guard source.sampleRate > 0, source.channelCount > 0, let converter = microphoneConverter(from: source) else {
             throw StorageError(description: "No microphone available. Check Sound settings.")
@@ -7482,6 +7491,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let status = NSTextField(wrappingLabelWithString: "")
     let meter = ConversationMeter()
     let listenNext = NSButton()
+    let muteMic = NSButton()
+    let pauseReply = NSButton()
+    private var playbackPaused = false
+    private var micMuted: Bool { audio?.inputMuted == true }
+    private var sessionLock: FileHandle?
     let welcome = NSStackView()
     let headline = NSTextField(labelWithString: "")
     let hint = NSTextField(wrappingLabelWithString: "")
@@ -7615,7 +7629,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
         listenNext.bezelStyle = .accessoryBarAction; listenNext.controlSize = .small
         listenNext.target = self; listenNext.action = #selector(listenForNextTurn)
-        let voiceStatus = NSStackView(views: [status, listenNext])
+        muteMic.bezelStyle = .accessoryBarAction; muteMic.controlSize = .small
+        muteMic.imagePosition = .imageOnly; muteMic.target = self; muteMic.action = #selector(toggleMute)
+        pauseReply.bezelStyle = .accessoryBarAction; pauseReply.controlSize = .small
+        pauseReply.imagePosition = .imageOnly; pauseReply.target = self; pauseReply.action = #selector(togglePlayback)
+        let voiceStatus = NSStackView(views: [muteMic, pauseReply, status, listenNext])
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
         for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
@@ -7840,13 +7858,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if phase != next {
             ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): \(String(describing: self.phase), privacy: .public) → \(String(describing: next), privacy: .public)")
         }
-        phase = next; status.stringValue = message
+        if next == .idle { sessionLock = nil }
+        phase = next; status.stringValue = micMuted && next == .listening && message == "Listening" ? "Microphone muted" : message
         meter.show(next)
         let voiceAction = voiceStatus["action"] as! String
         meter.isEnabled = true
         meter.toolTip = voiceAction + " (Hyper+R)"
         meter.setAccessibilityLabel(voiceAction)
-        meter.setAccessibilityValue(message)
+        meter.setAccessibilityValue(status.stringValue)
         updateComposerActions()
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
@@ -7856,14 +7875,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         switch phase {
         case .idle: label = "Voice off"
         case .starting: label = "Starting…"
-        case .listening: label = "Listening"
+        case .listening: label = micMuted ? "Microphone muted" : "Listening"
         case .recording: label = "Recording"
         case .decoding: label = "Transcribing…"
         case .thinking: label = "Thinking…"
-        case .speaking: label = "Speaking"
+        case .speaking: label = playbackPaused ? "Paused" : "Speaking"
         }
         return ["active": window.isVisible && (window.isKeyWindow || phase != .idle), "phase": phase.rawValue,
-                "microphone": phase == .starting || (audio != nil && audio?.stopped == false),
+                "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
     }
@@ -7894,9 +7913,19 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         releaseStandby()
         publishVoiceStatus()
     }
-    func modelReady() -> Bool {
+    func beginSession() -> Bool {
         if let restoreError { state(.idle, restoreError); return false }
-        return true
+        guard sessionLock == nil else { return true }
+        let folder = saveURL.deletingLastPathComponent()
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            let fd = open(folder.appendingPathComponent("upgrade.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+            guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+            guard flock(fd, LOCK_SH | LOCK_NB) == 0 else { state(.idle, "Hey Boss is updating. Try again in a moment."); return false }
+            sessionLock = handle
+            return true
+        } catch { state(.idle, error.localizedDescription); return false }
     }
     private var answering: Bool { phase == .thinking || phase == .speaking }
     private var turnAccepted = false
@@ -7905,11 +7934,36 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
     private func updateComposerActions() {
+        muteMic.isHidden = audio == nil || audio?.stopped == true || phase == .starting
+        let action = micMuted ? "Unmute microphone" : "Mute microphone"
+        muteMic.image = NSImage(systemSymbolName: micMuted ? "mic.slash.fill" : "mic", accessibilityDescription: nil)
+        muteMic.toolTip = action; muteMic.setAccessibilityLabel(action)
+        muteMic.contentTintColor = micMuted ? .systemOrange : .secondaryLabelColor
+        pauseReply.isHidden = phase != .speaking
+        let playbackAction = playbackPaused ? "Resume reply" : "Pause reply"
+        pauseReply.image = NSImage(systemSymbolName: playbackPaused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
+        pauseReply.toolTip = playbackAction; pauseReply.setAccessibilityLabel(playbackAction)
         send.isEnabled = acceptsTypedMessage
         listenNext.isHidden = !canListenNext
         listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
-        listenNext.toolTip = turnDone ? "Stop reading this answer and listen for your next message" : "Stop this reply and listen for your next message"
+        listenNext.toolTip = turnDone ? "Skip the rest of this spoken answer" : "Stop this reply"
         publishVoiceStatus()
+    }
+    @objc func togglePlayback() {
+        guard let audio, phase == .speaking else { return }
+        playbackPaused.toggle()
+        if playbackPaused { audio.pause(); state(.speaking, "Paused") }
+        else { audio.resume(); state(.speaking, "Speaking"); playNext() }
+    }
+    @objc func toggleMute() {
+        guard let audio, !audio.stopped, phase != .starting else { return }
+        audio.muteInput(!micMuted)
+        if micMuted, phase == .recording {
+            recording = nil
+            state(.decoding, "Transcribing…")
+            transcribeNext()
+        } else if phase == .listening { state(.listening, "Listening") }
+        else { updateComposerActions() }
     }
     @objc func listenForNextTurn() {
         guard canListenNext else { return }
@@ -7920,12 +7974,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     @objc func sendTyped() {
         guard acceptsTypedMessage else { return }
         let text = input.stringValue
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, modelReady() else { return }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else { return }
         interruptPlayback()
         input.stringValue = ""; respond(text)
     }
     private func interruptPlayback() {
-        if reading || heldReply {
+        if reading || heldReply || playbackPaused {
+            playbackPaused = false
             audio?.stopPlayback()
             if let (field, _) = lit { highlight(field, nil) }
             speech.removeAll(); reading = false
@@ -7946,7 +8001,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     @objc func toggle() {
         if phase == .recording { if recording?.isEmpty == false { endRecording("manual") }; return }
         guard phase == .idle else { stop("Voice off"); return }
-        guard modelReady() else { return }
+        guard beginSession() else { return }
         state(.starting, "Starting…")
         window.displayIfNeeded()
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
@@ -7992,7 +8047,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.listening, "Listening")
     }
     func receive(_ event: ReviewAudio.Event) {
-        guard audio != nil else { return }
+        guard audio != nil, !micMuted else { return }
         switch event {
         case .began where phase == .listening || phase == .decoding || answering:
             if answering && (reading || !playedPassages.isEmpty || turnDone) {
@@ -8028,8 +8083,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if text.isEmpty && !audio.stopped {
                     heldReply = false
                     ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): no words in interruption; resuming reply")
-                    state(reading ? .speaking : .thinking, reading ? "Speaking" : "Thinking…")
-                    audio.resume(); playNext()
+                    if playbackPaused { state(.speaking, "Paused") }
+                    else {
+                        state(reading ? .speaking : .thinking, reading ? "Speaking" : "Thinking…")
+                        audio.resume(); playNext()
+                    }
                     return
                 }
                 interruptPlayback()
@@ -8313,7 +8371,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         label.paintWord(styled)
     }
     private func playNext() {
-        guard !reading, !heldReply else { return }
+        guard !reading, !heldReply, !playbackPaused else { return }
         if let audio, !speech.isEmpty {
             let part = speech.removeFirst()
             reading = true; playingPassage = part.text; playingThrough = 0

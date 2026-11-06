@@ -1,5 +1,6 @@
 //! Publish a validated build with rollback, while the caller owns upgrade.lock.
 use super::*;
+use std::os::unix::fs::DirBuilderExt;
 
 fn desktop_app() -> io::Result<Option<PathBuf>> {
     hey_boss::desktop_identity::desktop_app(&home()?)
@@ -305,6 +306,18 @@ fn publish_to(
                 .arg(&staged_app),
         )?;
     }
+    // A chat holds a shared lock for the entire voice session or typed reply.
+    // Wait before changing live services, then exclude new sessions through rollback.
+    let _conversation = if has_desktop {
+        let folder = home()?.join("Library/Application Support/Hey Boss/Conversation");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&folder)?;
+        Some(InstallLock::acquire(&folder)?)
+    } else {
+        None
+    };
     // Schema changes precede any service restart or binary replacement.
     output(
         Command::new(built)
