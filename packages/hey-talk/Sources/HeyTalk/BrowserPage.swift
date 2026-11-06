@@ -23,6 +23,11 @@ enum BrowserPage {
         return url.host?.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
     }
 
+    static func documentHost(in window: AXUIElement) -> String? {
+        if let document = url(window, "AXDocument") { return host(document) }
+        return page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.08).flatMap { host($0.url) }
+    }
+
     static func host(in app: NSRunningApplication?) -> String? {
         guard let app, isBrowser(app), AXIsProcessTrusted() else { return nil }
         let ax = AXUIElementCreateApplication(app.processIdentifier)
@@ -30,8 +35,7 @@ enum BrowserPage {
         AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         guard let window = SpeechAX.element(ax, "AXFocusedWindow") else { return nil }
         AXUIElementSetMessagingTimeout(window, 0.02)
-        if let document = url(window, "AXDocument") { return host(document) }
-        return page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.08).flatMap { host($0.url) }
+        return documentHost(in: window)
     }
 
     static func page(in window: AXUIElement, deadline: TimeInterval) -> (area: AXUIElement, url: URL)? {

@@ -116,6 +116,10 @@ The focused input is read before the rest of the window and has priority within 
 T3 and Slack capture keep conversations and the current input, excluding navigation
 and workspace status text. The focused input or message composer appears under **Current input**.
 Missing context does not block correction. File transcription never reads app context.
+Hover over the idle pill and click the conversation button, or press **Hyper+C**, to start listening without capturing context or opening a chat window. A floating caption shows one line while the reply is spoken and highlights the current word. Right-click the pill and choose **Open Transcript** to see the chat. **Esc** ends voice.
+
+In an ordinary conversation, ask “Look at my browser” or name a running app. Hey Talk can return a screenshot, an Accessibility snapshot of the window’s text and controls, or both. “Look at my Gmail” finds an open Gmail window or selects an accessible Gmail browser tab and verifies that it displays mail.google.com. Requested captures go to the conversation model and are saved in its local history. Accessibility and Screen & System Audio Recording are separate permissions for Hey Talk in System Settings.
+
 Press **Hyper+M** (Control+Command+Option+Shift+M), or choose **Chat with Context** from the waveform menu, to start a new Hey Boss chat and listen on macOS 26. The source app appears above the message field; click it to inspect or remove the capture. Your next spoken or typed message shows a preview; click its paperclip to read the full capture. Ordinary chats send messages and captured text through Hey Proxy using the `gpt-6.1-sol` alias and its routing rules; folder chats send them to your configured Codex provider. If the app exposes no readable text, voice chat still opens. With the chat focused, **Hyper+R** or a click on its voice bubble starts voice, sends the current spoken message while recording, or turns voice off while waiting for speech. Elsewhere, **Hyper+R** still toggles Hey Talk dictation.
 Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`;
 `history --json` also includes it. `null` means no context was attached.

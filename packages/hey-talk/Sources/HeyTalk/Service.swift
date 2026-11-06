@@ -592,6 +592,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let command = request["command"] as? String ?? ""
         switch command {
+        case "inspect_window":
+            guard let target = request["target"] as? String, let mode = request["mode"] as? String else { reply(failure("Missing target or format.")); return }
+            Task {
+                do { reply(try await WindowInspection.capture(target: target, mode: mode)) }
+                catch { reply(failure(error.localizedDescription)) }
+            }
         case "speech":
             do {
                 guard let args = request["arguments"] as? [String] else { throw TalkError("Missing speech arguments") }
