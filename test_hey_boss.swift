@@ -4596,7 +4596,11 @@ func auditChatPolish(_ root: String) {
 @available(macOS 26, *)
 func auditHeadphoneInterrupt(_ root: String) {
     let dir = URL(fileURLWithPath: root), cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!
-    let chat = VoiceConversation(cli: cli, saveURL: dir.appendingPathComponent(UUID().uuidString).appendingPathComponent("current.json"))
+    let folderURL = dir.appendingPathComponent(UUID().uuidString)
+    let chat = VoiceConversation(cli: cli, saveURL: folderURL.appendingPathComponent("current.json"))
+    precondition(chat.beginSession())
+    let deployment = try! FileHandle(forUpdating: folderURL.appendingPathComponent("upgrade.lock"))
+    precondition(flock(deployment.fileDescriptor, LOCK_EX | LOCK_NB) == -1 && errno == EWOULDBLOCK)
     let audio = ReviewAudio(); audio.conversation = true
     let writer = try! audio.listen(cli: cli, duplex: true)
     audio.engine.attach(audio.player); audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
@@ -4606,6 +4610,18 @@ func auditHeadphoneInterrupt(_ root: String) {
     let deadline = Date().addingTimeInterval(12)
     while !audio.player.isPlaying && Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
     precondition(audio.player.isPlaying)
+    chat.muteMic.performClick(nil)
+    chat.receive(.began); chat.receive(.pcm(Data(count: 640))); chat.receive(.ended)
+    precondition(audio.player.isPlaying && chat.phase == .speaking && chat.recording == nil)
+    precondition(chat.voiceStatus["microphone"] as? Bool == false)
+    precondition([Int16(731)].withUnsafeBufferPointer { audio.microphoneFrame($0)[0] } == 0)
+    chat.pauseReply.performClick(nil)
+    precondition(!audio.player.isPlaying && chat.voiceStatus["message"] as? String == "Paused")
+    chat.muteMic.performClick(nil)
+    precondition(!audio.player.isPlaying && chat.voiceStatus["microphone"] as? Bool == true)
+    chat.pauseReply.performClick(nil)
+    precondition(audio.player.isPlaying)
+    precondition([Int16(731)].withUnsafeBufferPointer { audio.microphoneFrame($0)[0] } == 731)
     let render = try! Data(contentsOf: dir.appendingPathComponent("reply.pcm")).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
     let user = try! Data(contentsOf: dir.appendingPathComponent("blue.pcm")).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }
     audio.setHeadphoneOutput(true)
@@ -4627,6 +4643,10 @@ func auditHeadphoneInterrupt(_ root: String) {
     ref.withUnsafeBufferPointer { audio.bufferPlayback($0) }
     precondition(mic.withUnsafeBufferPointer { audio.microphoneFrame($0) } == [1, 10, 2, 20], "Speaker echo reference must return on a route change")
     chat.stop("Done")
+    precondition(flock(deployment.fileDescriptor, LOCK_EX | LOCK_NB) == 0)
+    precondition(!chat.beginSession() && chat.phase == .idle)
+    try! deployment.close()
+    precondition(chat.beginSession())
     let fm = FileManager.default, root = dir.appendingPathComponent(UUID().uuidString)
     let active = UUID(), folder = root.appendingPathComponent(active.uuidString)
     for id in [active] + (0..<5).map({ _ in UUID() }) {
@@ -4647,7 +4667,7 @@ func auditHeadphoneInterrupt(_ root: String) {
     precondition(Array(UnsafeBufferPointer(start: buffer.int16ChannelData![0], count: 4)) == [123, 321, -100, 200])
     let chats = try! fm.contentsOfDirectory(atPath: root.path), clips = try! fm.contentsOfDirectory(atPath: folder.path)
     precondition(chats.count == 5 && clips.count == 12 && chats.contains(active.uuidString))
-    print("PASS: quiet headset speech interrupted playback; speaker echo reference restored")
+    print("PASS: mute and pause are independent; unmuted speech interrupts playback; upgrades wait for the session")
 }
 
 @available(macOS 26, *)
