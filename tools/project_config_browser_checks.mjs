@@ -33,6 +33,7 @@ try {
   const page=await browser.newPage({viewport:{width:1280,height:900}}), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(info.url);
+  await page.locator('#project-more').click();
   await page.locator('#project-settings-trigger').click();
   await page.waitForFunction(()=>!document.querySelector('#project-prs').disabled);
   await page.locator('#project-prs').check();
@@ -48,6 +49,7 @@ try {
   await run(['config','sync','--json']);
   history=await run(['config','log','--json']);
   check(history.revisions[0].actor.source==='filesystem','File save has honest attribution');
+  await page.locator('#project-more').click();
   await page.locator('#project-settings-trigger').click();
   await page.getByRole('tab',{name:'Activity',exact:true}).click();
   await page.locator('.config-history-entry').nth(1).waitFor();

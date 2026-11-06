@@ -991,14 +991,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                         },
                     )
                     .replace(
-                        "<!--header-actions-->",
-                        if issues {
-                            include_str!("web/issue-header-actions.html")
-                        } else {
-                            ""
-                        },
-                    )
-                    .replace(
                         "<!--profile-->",
                         if issues {
                             include_str!("web/issue-profile.html")

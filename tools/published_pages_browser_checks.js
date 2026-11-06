@@ -6,7 +6,7 @@ async page => {
   const origin = new URL(page.url()).origin;
   await page.goto(origin + '/pages');
   await page.getByRole('heading', {name:'weekly-report',exact:true}).waitFor();
-  await page.getByRole('button', {name:'More navigation',exact:true}).click();
+  await page.getByRole('button', {name:'More global destinations',exact:true}).click();
   check(await page.locator('#navigation-more-links #nav-pages').isVisible(), 'Published Pages lives in global overflow');
   check(await page.locator('.app-navigation #nav-pages').count() === 0, 'Project tabs do not contain Published Pages');
   check(await page.locator('#nav-pages').getAttribute('href') === '/pages', 'Global link has no project selector');

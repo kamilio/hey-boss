@@ -48,7 +48,7 @@ const server=createServer(async(req,res)=>{
     let text=readFileSync(resolve(root,name));
     if(name.endsWith('.html')){
       let shell=readFileSync(root+'/app-shell.html','utf8');
-      for(const [marker,file] of [['header-actions','issue-header-actions'],['profile','issue-profile'],['project-action','issue-project-action']]) shell=shell.replace('<!--'+marker+'-->',readFileSync(root+'/'+file+'.html','utf8'));
+      for(const [marker,file] of [['profile','issue-profile'],['project-action','issue-project-action']]) shell=shell.replace('<!--'+marker+'-->',readFileSync(root+'/'+file+'.html','utf8'));
       text=String(text).replace('<!--app-shell-->',shell);
     }
     if(name==='routes.js') text=String(text).replace('/* ROUTE_DEFINITIONS */ []',readFileSync(root+'/routes.json','utf8'));

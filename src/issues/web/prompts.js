@@ -62,7 +62,6 @@
     boot = await response.json();
     if (!response.ok || !boot.ok) throw Error(boot.error?.message || 'Unable to connect.');
     window.addEventListener('hashchange', navigate);
-    document.querySelector('#nav-prompts').scrollIntoView({block:'nearest', inline:'nearest'});
     await navigate();
   } catch (error) { container.textContent = error.message; }
 })();

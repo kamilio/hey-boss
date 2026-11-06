@@ -6,14 +6,17 @@ const shell = fs.readFileSync('src/issues/web/app-shell.html', 'utf8');
 const mainNavigation = shell.slice(shell.indexOf('<nav class="app-navigation"'), shell.indexOf('<dialog'));
 const projectLinks = [...mainNavigation.matchAll(/<a id="([^"]+)" href="([^"]+)"/g)].map(([, id]) => id);
 assert.ok(projectLinks.includes("nav-prompts"), "Prompts is a project navigation section");
-for (const [, id, href] of shell.matchAll(/<a id="(nav-[^"]+)" href="([^"]+)"/g)) {
+assert.ok(!projectLinks.includes('nav-inbox'), 'Inbox is global');
+assert.match(shell, /id="nav-skills"[^]*?id="navigation-more"/, 'Skills is visible before global overflow');
+assert.match(mainNavigation, /id="project-more-links"[^]*?id="nav-prompts"/, 'Prompts is in project overflow');
+for (const [, id, href] of shell.matchAll(/<a id="([^"]+)" href="([^"]+)"/g)) {
   nodes.set('#' + id, {id, href, hidden:false, getAttribute(name) { return this[name]; }});
 }
 const context = vm.createContext({
   URLSearchParams, location:{hash:'#project=one&host=remote',pathname:'/'},
   localStorage:{setItem(){}}, document:{documentElement:{dataset:{}},addEventListener(){},
     querySelector:selector=>nodes.get(selector),
-    querySelectorAll:selector=>selector === '.app-navigation a, #nav-admin' ? [...projectLinks, 'nav-admin'].map(id => nodes.get('#' + id)) : []},
+    querySelectorAll:selector=>selector === '.app-navigation a' ? projectLinks.map(id => nodes.get('#' + id)) : []},
 });
 context.history = {replaceState(_state, _unused, hash) { context.location.hash = hash; }};
 vm.runInContext(fs.readFileSync('src/issues/web/components.js','utf8')+'\nthis.ui = HeyBossUI;',context);
@@ -49,7 +52,7 @@ context.location.hash = '#project=old&host=remote';
 const project = 'named:Beta & more / #2';
 update({id:project,name:'Beta'});
 assert.equal(new URLSearchParams(context.location.hash.slice(1)).get('project'), project, 'Current URL follows the selected project on reload');
-for (const id of [...projectLinks, 'nav-admin']) {
+for (const id of projectLinks) {
   const link = nodes.get('#' + id), params = new URLSearchParams(link.href.split('#')[1]);
   assert.equal(params.get('project'), project, id + ' carries the current project');
   assert.equal(params.get('host'), 'remote', id + ' carries the remote host');
@@ -60,7 +63,7 @@ for (const id of ['nav-workers', 'nav-secrets']) {
 }
 context.document.documentElement.dataset.issueMobile = 'true';
 update({id:'mobile',name:'Mobile'});
-for (const id of [...projectLinks, 'nav-admin']) {
+for (const id of projectLinks) {
   assert.equal(new URLSearchParams(nodes.get('#' + id).href.split('#')[1]).has('host'), false, id + ' omits desktop host on paired devices');
 }
 context.location.pathname = '/';

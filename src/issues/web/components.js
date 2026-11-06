@@ -223,13 +223,15 @@ function date(at) {
     if (host && !Object.keys(document.documentElement.dataset).some(key => key.endsWith('Mobile'))) hash.set('host', host);
     // Every project tab inherits context; global overflow entries keep their scope.
     let projectPage = false;
-    for (const link of $$(".app-navigation a, #nav-admin")) {
+    for (const link of $$(".app-navigation a")) {
       const path = link.getAttribute("href").split("#")[0] || "/";
       if (path === location.pathname) projectPage = true;
       // The issue page owns its Inbox and Issues filters.
-      if (location.pathname === "/" && ["nav-issues", "nav-inbox"].includes(link.id)) continue;
-      link.href = `${path}#${hash}${link.id === "nav-inbox" ? "&view=inbox" : ""}`;
+      if (location.pathname === "/" && link.id === "nav-issues") continue;
+      link.href = `${path}#${hash}`;
     }
+    // Carry the return context without applying an Inbox filter.
+    if (location.pathname !== "/" && $("#nav-inbox")) $("#nav-inbox").href = "/#" + hash + "&view=inbox";
     if ($(".brand")) $(".brand").href = `/#${hash}`;
     // Pin remembered selections for Back/Forward, and keep picker changes reloadable.
     if ((projectPage || route.has("project")) && route.get("project") !== project) {
@@ -332,11 +334,11 @@ function date(at) {
     return `<span class="info-tip"><button type="button" class="info-tip-button" popovertarget="${esc(id)}" aria-label="${esc(label)}" aria-describedby="${esc(id)}">${icon("info")}</button><span id="${esc(id)}" class="info-tip-content" popover role="tooltip">${esc(text)}</span></span>`;
   }
   if (typeof window !== "undefined") window.addEventListener("resize", () => {
-    $("#navigation-more-links:popover-open")?.hidePopover();
+    $(".navigation-more-links:popover-open")?.hidePopover();
   });
   if (typeof document !== "undefined") document.addEventListener("beforetoggle", event => {
-    if (event.target.id === "navigation-more-links" && event.newState === "open") {
-      const rect = $("#navigation-more").getBoundingClientRect();
+    if (event.target.classList.contains("navigation-more-links") && event.newState === "open") {
+      const rect = event.target.previousElementSibling.getBoundingClientRect();
       event.target.style.top = rect.bottom + 6 + "px";
       event.target.style.left = Math.max(12, Math.min(rect.right - 176, window.innerWidth - 188)) + "px";
       return;

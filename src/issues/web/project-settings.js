@@ -78,7 +78,11 @@ function closeProjectSettings() {
   $("#project-settings-dialog").close();
   projectSettingsFocus?.focus();
 }
-$("#project-settings-trigger").onclick = async () => {
+$("#project-settings-trigger").onclick = async event => {
+  if (event?.metaKey || event?.ctrlKey || event?.shiftKey || event?.altKey) return;
+  event?.preventDefault();
+  if (!model.project) return;
+  document.getElementById("project-more-links")?.hidePopover();
   const sequence = ++projectSettingsSequence;
   projectSettingsProject = model.project.id;
   for (const link of document.querySelectorAll("[data-prompt-file]")) {
@@ -91,7 +95,7 @@ $("#project-settings-trigger").onclick = async () => {
           !confirm("Discard unsaved project settings?"))) event.preventDefault();
     };
   }
-  projectSettingsFocus = $("#project-settings-trigger");
+  projectSettingsFocus = document.getElementById("project-more") || $("#project-settings-trigger");
   projectSettingsOriginal = null;
   $("#project-settings-name").textContent = model.project.name;
   $("#project-settings-name").title = model.project.name;

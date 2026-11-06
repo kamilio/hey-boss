@@ -3,7 +3,10 @@
 The Issues page is the visual reference for Inbox, Issues, and Workers.
 Every route renders `src/issues/web/app-shell.html` and loads `components.css`
 and `components.js`. The server sets the current navigation item. Inbox lives
-within the Issues client and uses the same shell and controls.
+within the Issues client. The top row keeps Inbox and Skills visible; its ellipsis
+opens global destinations. The second row starts with the project picker,
+followed by Issues, Jobs, and Artifacts when enabled. Its ellipsis opens
+Prompts, Merged PRs when enabled, Errors, Review, and Project settings.
 
 `components.css` owns the light/dark theme tokens, typography, page width and
 responsive spacing, header/navigation, project picker, focus states and reduced

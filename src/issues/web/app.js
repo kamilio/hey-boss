@@ -1059,7 +1059,6 @@ async function renderRoute() {
   updateAppNavigation();
   projectOptions();
   $("#inbox-view").hidden = model.route.view !== "inbox";
-  $("#project-settings-trigger").hidden = model.route.view === "inbox";
   $(".project-control").hidden = false;
   if (model.route.view === "inbox") {
     closeProjectMenu();
@@ -2538,6 +2537,12 @@ async function boot() {
     model.labels = value.labels;
     model.project = value.project;
     initGlobalSettings();
+    $("#nav-global-settings").onclick = event => {
+      if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      $("#navigation-more-links").hidePopover();
+      $("#global-settings-trigger").click();
+    };
     IssueSubtasks.init();
     IssueBlockers.init();
     IssueAssignments.initWatcher({
@@ -2549,6 +2554,12 @@ async function boot() {
     updateProfile();
     initInbox();
     await renderRoute();
+    const address = new URL(location.href);
+    if (address.searchParams.get("settings") === "project") {
+      address.searchParams.delete("settings");
+      history.replaceState(null, "", address);
+      $("#project-settings-trigger").click();
+    }
     refreshInboxBadge();
     setInterval(() => {
       refresh();

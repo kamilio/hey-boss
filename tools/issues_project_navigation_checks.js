@@ -80,6 +80,7 @@ async page => {
     await selected(projects[1]);
     await page.goto(origin + path);
     await selected(projects[1]);
+    await page.locator('#project-more').click();
     await page.locator('#nav-errors').click();
     await selected(projects[1]);
     await page.locator('#nav-issues').click();
@@ -109,6 +110,7 @@ async page => {
   check(await page.locator('#nav-workers').getAttribute('href')==='/workers','Global worker link is independent of storage and project');
   await page.locator('#nav-issues').click();
   await selected(projects[1]);
+  await page.locator('#project-more').click();
   await page.locator('#nav-errors').click();
   await selected(projects[1]);
   await page.reload();
