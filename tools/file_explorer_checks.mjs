@@ -20,6 +20,14 @@ export async function checkExplorer(page, root, run, origin) {
   const rows = await dialog.locator('.fx-row').allTextContents();
   for (const name of expectedFiles) assert.ok(rows.includes(name),name);
   assert.equal(['goal_continue.md','handoff.md','resume.md','layout.md'].some(name => rows.includes(name)),false);
+  assert.ok(!rows.includes('error_task.md'));
+  const project = new URLSearchParams(new URL(page.url()).hash.slice(1)).get('project');
+  await run(['errors','--project',project,'enable','true']);
+  await page.reload(); await open('error_task.md'); await edit.waitFor();
+  await run(['errors','--project',project,'enable','false']);
+  await page.reload(); await edit.waitFor();
+  assert.equal(await dialog.getByRole('button',{name:'error_task.md',exact:true}).count(),0);
+  assert.equal(await dialog.locator('h3').innerText(),'worker.md');
   const legacy = new URL(page.url());
   const route = new URLSearchParams(legacy.hash.slice(1)); route.set('file','main.md'); legacy.hash = route;
   await page.goto(legacy.href); await dialog.getByRole('heading',{name:'delivery-main.md',exact:true}).waitFor();
@@ -51,6 +59,10 @@ export async function checkExplorer(page, root, run, origin) {
       headers:{'x-hey-boss-csrf':token},data:{project:saved.project.id,key:'../config.yaml'}
     });
     assert.equal(refused.status(),400);
+    const disabled=await page.request.post(new URL('/api/prompts/open',origin).href,{
+      headers:{'x-hey-boss-csrf':token},data:{project:saved.project.id,key:'error_task'}
+    });
+    assert.equal(disabled.status(),400);
     // Exercise the real socket payload without opening a window in someone's desktop session.
     let launch;
     const socket=createServer({allowHalfOpen:true},client=>{

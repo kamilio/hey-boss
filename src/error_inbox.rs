@@ -317,8 +317,16 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
         self.db.execute("INSERT INTO error_settings VALUES(?1,?2) ON CONFLICT(project) DO UPDATE SET enabled=excluded.enabled",params![project,enabled])?;
         Ok(json!({"ok":true,"enabled":enabled}))
     }
-    fn enabled(&self, project: &str) -> Result<bool> {
-        Ok(self.db.query_row(
+    pub(crate) fn collection_enabled(issue_path: &Path, project: &str) -> Result<bool> {
+        let path = issue_path.with_extension("errors.db");
+        if !path.try_exists()? {
+            return Ok(false);
+        }
+        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Self::enabled(&db, project)
+    }
+    fn enabled(db: &Connection, project: &str) -> Result<bool> {
+        Ok(db.query_row(
             "SELECT COALESCE((SELECT enabled FROM error_settings WHERE project=?1),0)",
             [project],
             |r| r.get(0),
@@ -326,7 +334,7 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
     }
     pub fn ingest(&mut self, project: &str, events: &[Event], now: i64) -> Result<Value> {
         crate::issues::identifier(project, "project", 512)?;
-        if !self.enabled(project)? {
+        if !Self::enabled(&self.db, project)? {
             return Err(Error::new(
                 "collection_disabled",
                 "Error collection is disabled for this project",
@@ -484,7 +492,7 @@ CREATE INDEX IF NOT EXISTS error_event_samples ON error_events(project,group_id,
             );
         }
         Ok(
-            json!({"ok":true,"enabled":self.enabled(project)?,"groups":groups,"observed_at":now,"limit":200,"retention_days":30}),
+            json!({"ok":true,"enabled":Self::enabled(&self.db, project)?,"groups":groups,"observed_at":now,"limit":200,"retention_days":30}),
         )
     }
     pub fn detail(&self, project: &str, id: &str, now: i64) -> Result<Value> {

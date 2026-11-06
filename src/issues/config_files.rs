@@ -83,6 +83,17 @@ fn write(path: &Path, text: &str) -> Result<()> {
     result
 }
 
+fn write_optional(path: &Path, text: Option<&str>) -> Result<()> {
+    match text {
+        Some(text) => write(path, text),
+        None => {
+            fs::remove_file(path)?;
+            fs::File::open(path.parent().unwrap())?.sync_all()?;
+            Ok(())
+        }
+    }
+}
+
 fn root(cwd: &Path) -> Result<PathBuf> {
     let cwd = cwd.canonicalize()?;
     if let Some(git) = crate::agents::git_repository_info(&cwd.to_string_lossy()) {
@@ -397,9 +408,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
                 && disk.get(key) == previous.get(key)
                 && disk.get(key) != Some(text)
             {
-                if let Some(text) = text {
-                    write(&working_path(&dir, key), text)?;
-                }
+                write_optional(&working_path(&dir, key), text.as_deref())?;
                 disk.insert(key.clone(), text.clone());
             }
         }
@@ -407,7 +416,16 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         base.as_object_mut().unwrap().remove("pending");
     }
     let previous: Files = serde_json::from_value(base["files"].clone())?;
-    let changes = edit(&previous, &disk)?;
+    let mut changes = edit(&previous, &disk)?;
+    // An absent disabled file is not a request to clear its saved override.
+    if settings["prompt_defaults"].get("error_task").is_none()
+        && disk["prompts/error_task.md"].is_none()
+    {
+        changes
+            .as_object_mut()
+            .unwrap()
+            .remove("prompt_overrides.error_task");
+    }
     let changed = !changes.as_object().unwrap().is_empty();
     if changed {
         let mut req = request(
@@ -427,7 +445,10 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         store.execute(&req)?;
         settings = store.execute(&request(project, actor, Operation::ProjectSettings))?;
     }
-    let next = desired(&settings, &disk)?;
+    let mut next = desired(&settings, &disk)?;
+    if settings["prompt_defaults"].get("error_task").is_none() {
+        next.insert("prompts/error_task.md".into(), None);
+    }
     let revision: Option<String> = store.db.query_row("SELECT id FROM project_config_revisions WHERE project_id=?1 ORDER BY sequence DESC,id DESC LIMIT 1", [&project.id], |r| r.get(0)).optional()?;
     let pending = json!({"files":disk,"pending":next,"revision":revision});
     let root_string = root.to_string_lossy();
@@ -440,9 +461,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         store.db.execute("INSERT INTO project_config_checkouts(path,project_id,base,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(path) DO UPDATE SET base=excluded.base,error=NULL,updated_at=excluded.updated_at", params![root_string,project.id,pending.to_string(),worker::now()])?;
         for (key, text) in &next {
             if disk.get(key) != Some(text) && read(&working_path(&dir, key))? == disk[key] {
-                if let Some(text) = text {
-                    write(&working_path(&dir, key), text)?;
-                }
+                write_optional(&working_path(&dir, key), text.as_deref())?;
             }
         }
         store.db.execute(
@@ -481,7 +500,11 @@ pub(super) fn prompt_file(path: &Path, project: &Project, key: &str) -> Result<P
     directory(&configs)?;
     directory(&root)?;
     sync_root(path, &root, project)?;
-    Ok(root.join(".hey-boss/prompts").join(filename))
+    let file = root.join(".hey-boss/prompts").join(filename);
+    if !file.try_exists()? {
+        return Err(Error::invalid("Prompt is not enabled for this project"));
+    }
+    Ok(file)
 }
 
 pub(crate) fn reconcile(path: &Path) -> Result<()> {
