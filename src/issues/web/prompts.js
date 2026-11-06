@@ -27,7 +27,7 @@
       let settings = await action({action:'project_settings'});
       if (sequence !== generation) return;
       const files = [{key:'worker', title:'Implementation'}, ...settings.prompt_sections].map(section =>
-        ({...section, path:section.key+'.md', editable:true}));
+        ({...section, path:section.path || section.key+'.md', editable:true}));
       function describe(file) {
         file.custom = file.key === 'worker' ? settings.prompt !== settings.worker_prompt_default : settings.prompt_overrides[file.key] != null;
         file.detail = [file.title, file.custom ? 'Project override' : 'Built-in default', file.help].filter(Boolean).join(' · ');
@@ -39,7 +39,7 @@
         settings = await action({action:'configure_project', if_version:settings.version, ...patch}, HeyBossUI.requestId());
         describe(file);
       }
-      unmount = HeyBossFiles.open({title:'Prompt files', root:'prompts', files, initial:params.get('file') || 'worker.md',
+      unmount = HeyBossFiles.open({title:'Prompt files', root:'prompts', files, initial:files.find(f => f.key+'.md' === params.get('file'))?.path || params.get('file') || 'worker.md',
         onSelect(file) {
           const route = new URLSearchParams(location.hash.slice(1));
           route.set('file', file.path); currentHash = '#' + route;

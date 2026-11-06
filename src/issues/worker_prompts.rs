@@ -4,12 +4,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 macro_rules! prompts {
-    ($(($key:ident, $constant:ident, $title:literal, $help:literal)),* $(,)?) => {
-        $(pub const $constant: &str = include_str!(concat!("prompts/", stringify!($key), ".md")).trim_ascii_end();)*
+    ($(($key:ident, $constant:ident, $file:literal, $title:literal, $help:literal)),* $(,)?) => {
+        $(pub const $constant: &str = include_str!(concat!("prompts/", $file)).trim_ascii_end();)*
         #[derive(Debug, Clone, Default, Serialize, Deserialize)]
         #[serde(default, deny_unknown_fields)]
         pub struct PromptOverrides {
             // Accept old saved sections without applying or exposing them.
+            #[serde(skip_serializing)]
+            pub layout: Option<String>,
+            #[serde(skip_serializing)]
+            pub resume: Option<String>,
             #[serde(skip_serializing)]
             pub dependencies: Option<String>,
             #[serde(skip_serializing)]
@@ -42,22 +46,23 @@ macro_rules! prompts {
                 Ok(())
             }
         }
+        pub(crate) fn prompt_filename(key: &str) -> Option<&'static str> {
+            match key { "worker" => Some("worker.md"), $(stringify!($key) => Some($file),)* _ => None }
+        }
         pub fn prompt_defaults() -> Value { json!({$(stringify!($key): $constant,)*}) }
-        pub fn prompt_sections() -> Value { json!([$({"key":stringify!($key),"title":$title,"help":$help},)*]) }
+        pub fn prompt_sections() -> Value { json!([$({"key":stringify!($key),"path":$file,"title":$title,"help":$help},)*]) }
     };
 }
 
 prompts! {
-    (layout, DEFAULT_LAYOUT_PROMPT, "Prompt sequence", "Arrange or omit {{task}}, {{workspace}}, {{delivery}}, {{handoff}}, {{resume}}. Empty sections disappear. Task selects Implementation or Plan; workspace and delivery follow the workflow settings."),
-    (plan, DEFAULT_PLAN_PROMPT, "Planning", ""),
-    (worktree, DEFAULT_WORKTREE_PROMPT, "Dedicated worktree", ""),
-    (checkout, DEFAULT_CHECKOUT_PROMPT, "Existing checkout", ""),
-    (prs, DEFAULT_PRS_PROMPT, "Pull request", ""),
-    (main, DEFAULT_MAIN_PROMPT, "Push to main", ""),
-    (handoff, DEFAULT_HANDOFF_PROMPT, "Ready handoff", "PR tasks that unblock dependencies before merge."),
-    (resume, DEFAULT_RESUME_PROMPT, "Resume", "Resumed tasks."),
-    (goal_continue, DEFAULT_GOAL_CONTINUE_PROMPT, "Continue a goal", "A goal turn ends before a completion report."),
-    (error_task, DEFAULT_ERROR_TASK_PROMPT, "Error task", "Tasks created from Errors. Variable: {{command}} reads the error evidence."),
+    (plan, DEFAULT_PLAN_PROMPT, "plan.md", "Planning", ""),
+    (worktree, DEFAULT_WORKTREE_PROMPT, "workspace-worktree.md", "Dedicated worktree", ""),
+    (checkout, DEFAULT_CHECKOUT_PROMPT, "workspace-checkout.md", "Existing checkout", ""),
+    (prs, DEFAULT_PRS_PROMPT, "delivery-pr.md", "Pull request", ""),
+    (main, DEFAULT_MAIN_PROMPT, "delivery-main.md", "Push to main", ""),
+    (handoff, DEFAULT_HANDOFF_PROMPT, "handoff.md", "Ready handoff", "PR tasks that unblock dependencies before merge."),
+    (goal_continue, DEFAULT_GOAL_CONTINUE_PROMPT, "goal_continue.md", "Continue a goal", "A goal turn ends before a completion report."),
+    (error_task, DEFAULT_ERROR_TASK_PROMPT, "error_task.md", "Error task", "Tasks created from Errors. Variable: {{command}} reads the error evidence."),
 }
 
 pub fn render(text: &str, mut value: impl FnMut(&str) -> Option<String>) -> String {

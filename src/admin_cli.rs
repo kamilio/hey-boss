@@ -481,23 +481,15 @@ pub fn catalog() -> Value {
     root.build();
     let mut commands = Vec::new();
     walk(&root, &[], &scenarios(), &mut commands);
-    let mut prompts = [
-        ("worker", "Shared task", hey_boss::issues::worker::DEFAULT_PROMPT),
-        ("plan", "Planning", hey_boss::issues::worker::DEFAULT_PLAN_PROMPT),
-        ("worktree", "Dedicated worktree", hey_boss::issues::worker::DEFAULT_WORKTREE_PROMPT),
-        ("checkout", "Existing checkout", hey_boss::issues::worker::DEFAULT_CHECKOUT_PROMPT),
-        ("main", "Push to main", hey_boss::issues::worker::DEFAULT_MAIN_PROMPT),
-        ("prs", "Pull request", hey_boss::issues::worker::DEFAULT_PRS_PROMPT),
-    ].map(|(id,title,text)|json!({"id":id,"title":title,"text":text,"source":format!("src/issues/prompts/{id}.md")})).to_vec();
+    let mut prompts = vec![json!({"id":"worker","title":"Shared task","text":hey_boss::issues::worker::DEFAULT_PROMPT,"source":"src/issues/prompts/worker.md"})];
     let defaults = hey_boss::issues::worker::prompt_defaults();
     for section in hey_boss::issues::worker::prompt_sections()
         .as_array()
         .unwrap()
     {
         let key = section["key"].as_str().unwrap();
-        if !prompts.iter().any(|p| p["id"] == key) {
-            prompts.push(json!({"id":key,"title":section["title"],"text":defaults[key],"source":format!("src/issues/prompts/{key}.md")}));
-        }
+        let path = section["path"].as_str().unwrap();
+        prompts.push(json!({"id":key,"title":section["title"],"text":defaults[key],"source":format!("src/issues/prompts/{path}")}));
     }
     json!({"commands":commands,"prompts":prompts,"skill":{"text":hey_boss::skill::MARKDOWN,"source":"skills/hey-boss/SKILL.md","install":"hey-boss skill install","references":hey_boss::skill::references()},"guide":{"text":hey_boss::agent_guidance::GUIDE,"source":"src/issues/web/agent-guide.md"},"build":env!("HEY_BOSS_BUILD_ID")})
 }

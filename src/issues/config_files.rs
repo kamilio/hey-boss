@@ -193,10 +193,63 @@ fn desired(settings: &Value, existing: &Files) -> Result<Files> {
     }
     Ok(files)
 }
+// Journal and API keys stay stable across file renames.
+fn working_path(dir: &Path, key: &str) -> PathBuf {
+    match key
+        .strip_prefix("prompts/")
+        .and_then(|p| p.strip_suffix(".md"))
+        .and_then(worker::prompt_filename)
+    {
+        Some(file) => dir.join("prompts").join(file),
+        None => dir.join(key),
+    }
+}
+fn migrate_prompt_names(dir: &Path) -> Result<()> {
+    let prompts = dir.join("prompts");
+    for key in ["worktree", "checkout", "prs", "main", "layout", "resume"] {
+        let old = prompts.join(format!("{key}.md"));
+        match fs::symlink_metadata(&old) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+            Ok(meta) if !meta.is_file() => {
+                return Err(Error::invalid(format!(
+                    "{} must be a regular file",
+                    old.display()
+                )));
+            }
+            Ok(_) => {}
+        }
+        if let Some(name) = worker::prompt_filename(key) {
+            match fs::hard_link(&old, prompts.join(name)) {
+                Ok(()) => {
+                    fs::remove_file(&old)?;
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Keep retired files and conflicting local edits outside the active folder.
+        let archive = dir.join("retired-prompts");
+        directory(&archive)?;
+        match fs::hard_link(&old, archive.join(format!("{key}.md"))) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                fs::hard_link(
+                    &old,
+                    archive.join(format!("{key}-{}.md", worker::random_id()?)),
+                )?;
+            }
+            Err(e) => return Err(e.into()),
+        }
+        fs::remove_file(old)?;
+    }
+    Ok(())
+}
 fn observed(dir: &Path, template: &Files) -> Result<Files> {
     template
         .keys()
-        .map(|key| Ok((key.clone(), read(&dir.join(key))?)))
+        .map(|key| Ok((key.clone(), read(&working_path(dir, key))?)))
         .collect()
 }
 fn edit(before: &Files, after: &Files) -> Result<Value> {
@@ -297,6 +350,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
             "This working copy is registered to another project",
         ));
     }
+    migrate_prompt_names(&dir)?;
     let template = desired(&settings, &Files::new())?;
     let mut disk = observed(&dir, &template)?;
     // Recreate an emptied working copy from the saved configuration, including
@@ -335,7 +389,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
                 && disk.get(key) != Some(text)
             {
                 if let Some(text) = text {
-                    write(&dir.join(key), text)?;
+                    write(&working_path(&dir, key), text)?;
                 }
                 disk.insert(key.clone(), text.clone());
             }
@@ -376,9 +430,9 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
     {
         store.db.execute("INSERT INTO project_config_checkouts(path,project_id,base,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(path) DO UPDATE SET base=excluded.base,error=NULL,updated_at=excluded.updated_at", params![root_string,project.id,pending.to_string(),worker::now()])?;
         for (key, text) in &next {
-            if disk.get(key) != Some(text) && read(&dir.join(key))? == disk[key] {
+            if disk.get(key) != Some(text) && read(&working_path(&dir, key))? == disk[key] {
                 if let Some(text) = text {
-                    write(&dir.join(key), text)?;
+                    write(&working_path(&dir, key), text)?;
                 }
             }
         }
@@ -411,15 +465,14 @@ fn automatic_copy(configs: &Path, project: &Project) -> PathBuf {
 }
 
 pub(super) fn prompt_file(path: &Path, project: &Project, key: &str) -> Result<PathBuf> {
-    if key != "worker" && worker::prompt_defaults().get(key).is_none() {
-        return Err(Error::invalid("Unknown project prompt"));
-    }
+    let filename =
+        worker::prompt_filename(key).ok_or_else(|| Error::invalid("Unknown project prompt"))?;
     let configs = path.parent().unwrap().join("project-configs");
     let root = automatic_copy(&configs, project);
     directory(&configs)?;
     directory(&root)?;
     sync_root(path, &root, project)?;
-    Ok(root.join(".hey-boss/prompts").join(format!("{key}.md")))
+    Ok(root.join(".hey-boss/prompts").join(filename))
 }
 
 pub(crate) fn reconcile(path: &Path) -> Result<()> {

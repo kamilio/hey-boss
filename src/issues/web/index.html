@@ -399,9 +399,9 @@
               </section>
               <section class="settings-section configuration-card"><h3>Workflow</h3><p class="field-help">Choose how this project handles code changes.</p>
                 <label class="draft-choice"><input type="checkbox" id="project-prs" aria-describedby="project-prs-help" /><span><strong>Use pull requests</strong><span id="project-prs-help">Use pull request instructions when delivering changes. When off, workers use the direct-push instructions.</span></span></label>
-                <p class="setting-prompt-links">On: <a href="/prompts" data-prompt-file="prs.md">prs.md</a> · Off: <a href="/prompts" data-prompt-file="main.md">main.md</a></p>
+                <p class="setting-prompt-links">On: <a href="/prompts" data-prompt-file="delivery-pr.md">delivery-pr.md</a> · Off: <a href="/prompts" data-prompt-file="delivery-main.md">delivery-main.md</a></p>
                 <label class="draft-choice"><input type="checkbox" id="project-worktree" aria-describedby="project-worktree-help" /><span><strong>Allow worktrees</strong><span id="project-worktree-help">Workers use the existing checkout by default. Enable this to let workers choose a dedicated worktree for new tasks.</span></span></label>
-                <p class="setting-prompt-links">Dedicated worktree: <a href="/prompts" data-prompt-file="worktree.md">worktree.md</a> · Existing checkout: <a href="/prompts" data-prompt-file="checkout.md">checkout.md</a></p>
+                <p class="setting-prompt-links">Dedicated worktree: <a href="/prompts" data-prompt-file="workspace-worktree.md">workspace-worktree.md</a> · Existing checkout: <a href="/prompts" data-prompt-file="workspace-checkout.md">workspace-checkout.md</a></p>
               </section>
               <section class="settings-section configuration-card"><h3>Task prompts</h3><p class="field-help">Edit the Markdown instructions for each task in Prompts.</p><p class="setting-prompt-links">Implementation: <a href="/prompts" data-prompt-file="worker.md">worker.md</a> · Planning: <a href="/prompts" data-prompt-file="plan.md">plan.md</a></p></section>
               <section class="settings-section configuration-card"><h3>Project resources</h3><p class="field-help">Turn off creation for resources this project does not use. Existing content stays available.</p>

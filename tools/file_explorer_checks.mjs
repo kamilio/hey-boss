@@ -12,11 +12,17 @@ export async function checkExplorer(page, root, run, origin) {
   await page.locator('#project-settings-trigger').click();
   const settings = page.locator('#project-settings-dialog');
   assert.deepEqual(await settings.getByRole('tab').allTextContents(),['Configuration','Activity']);
-  const expectedFiles = ['prs.md','main.md','worktree.md','checkout.md','worker.md','plan.md'];
+  const expectedFiles = ['delivery-pr.md','delivery-main.md','workspace-worktree.md','workspace-checkout.md','worker.md','plan.md'];
   assert.deepEqual(await settings.locator('[data-prompt-file]').allTextContents(),expectedFiles);
-  await settings.getByRole('link',{name:'prs.md',exact:true}).click();
+  await settings.getByRole('link',{name:'delivery-pr.md',exact:true}).click();
   await edit.waitFor();
-  assert.equal(await dialog.locator('h3').innerText(),'prs.md');
+  assert.equal(await dialog.locator('h3').innerText(),'delivery-pr.md');
+  const rows = await dialog.locator('.fx-row').allTextContents();
+  for (const name of expectedFiles) assert.ok(rows.includes(name),name);
+  assert.equal(rows.includes('resume.md') || rows.includes('layout.md'),false);
+  const legacy = new URL(page.url());
+  const route = new URLSearchParams(legacy.hash.slice(1)); route.set('file','main.md'); legacy.hash = route;
+  await page.goto(legacy.href); await dialog.getByRole('heading',{name:'delivery-main.md',exact:true}).waitFor();
   assert.equal(await page.locator('#nav-prompts').getAttribute('aria-current'),'page');
   await page.locator('#project-more').click();
   await page.locator('#project-settings-trigger').click();
@@ -55,9 +61,10 @@ export async function checkExplorer(page, root, run, origin) {
     });
     await new Promise((ok,no)=>{socket.on('error',no);socket.listen(join(root,'inbox.sock'),ok);});
     try {
+      await open('workspace-worktree.md');
       await open('Open in Mac editor'); await dialog.getByText('Opened in Mac editor').waitFor();
-      assert.ok(launch.file.startsWith(join(root,'project-configs')+'/') && launch.file.endsWith('/.hey-boss/prompts/handoff.md'));
-      assert.equal(readFileSync(launch.file,'utf8'),initial);
+      assert.ok(launch.file.startsWith(join(root,'project-configs')+'/') && launch.file.endsWith('/.hey-boss/prompts/workspace-worktree.md'));
+      assert.equal(readFileSync(launch.file,'utf8'),saved.prompt_defaults.worktree);
     } finally {await new Promise(ok=>socket.close(ok));}
   }
   await find.fill('handoff');await open('handoff.md');await edit.fill(initial+'?');

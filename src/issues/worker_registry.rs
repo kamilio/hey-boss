@@ -1247,7 +1247,6 @@ pub(super) fn reserve(
                  AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
                 params![project.id, number, machine, config.cwd], |r| r.get(0),
             ).optional()?;
-            let retry = previous_checkout.is_some();
             let worktree_attempt = previous_checkout.unwrap_or_else(|| Some(id.clone()));
             if let Some(attempt) = worktree_attempt {
                 issue["_worktree_attempt"] = json!(attempt);
@@ -1256,7 +1255,6 @@ pub(super) fn reserve(
                 session_ref: None,
                 id: id.clone(),
                 worker_id: worker_id.clone(),
-                retry,
                 project: project.clone(),
                 issue,
                 comments: vec![],

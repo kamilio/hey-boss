@@ -946,7 +946,6 @@ mod tests {
                 session_ref: None,
                 id: "handoff-run".into(),
                 worker_id: String::new(),
-                retry: false,
                 project,
                 issue,
                 comments: vec![],
@@ -1102,7 +1101,6 @@ mod tests {
             .execute("UPDATE issues SET assignee=NULL", [])
             .unwrap();
         f.job.id = "fresh-run".into();
-        f.job.retry = true;
         f.store.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at) VALUES(?1,?2,1,?3,?4,'reserved',1,'start','unit',2,2)",params![f.job.id,f.job.project.id,serde_json::to_string(&f.job).unwrap(),f.job.actor.id]).unwrap();
         f.store.worker_attach(&mut f.job, "new-session").unwrap();
         assert!(f.issue().assignee.is_none());
