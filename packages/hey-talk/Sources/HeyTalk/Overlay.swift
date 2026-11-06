@@ -390,22 +390,19 @@ final class Overlay {
         let next: Phase = name == "recording" ? .recording : busy ? .processing : .idle
         clearStatus(); clearNotice()
         update(next, waitingForAudio: false)
-        connecting.stringValue = state["message"] as? String ?? "Ready"
-        connecting.isHidden = false
-        correctionIndicator.isHidden = true; submitIndicator.isHidden = true
-        glow.isHidden = true
-        updateModeAppearance(); updateAccessibilityLabel(); layout(animated: true)
         panel.displayIfNeeded()
     }
     private func update(_ next: Phase, waitingForAudio: Bool) {
         pasteWait?.removeFromSuperview(); pasteWait = nil
         identity.isHidden = false
-        correctionIndicator.isHidden = correctionEnabled; submitIndicator.isHidden = autoSubmitEnabled
+        correctionIndicator.isHidden = correctionEnabled || conversation != nil
+        submitIndicator.isHidden = autoSubmitEnabled || conversation != nil
         completionDismiss?.cancel(); completionDismiss = nil
         connectingDelay?.cancel(); connectingDelay = nil
         if confirmation.isHidden || next == .recording { clearNotice() }
         self.waitingForAudio = waitingForAudio
-        connecting.isHidden = true
+        if let conversation { connecting.stringValue = conversation["message"] as? String ?? "Ready" }
+        connecting.isHidden = conversation == nil
         phase = next; expanded = next == .recording
         updateModeAppearance()
         wave.update(level: nil)
@@ -413,10 +410,10 @@ final class Overlay {
         wave.alphaValue = waitingForAudio ? 0.35 : 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
-        glow.isHidden = next != .processing; halo.isHidden = next != .processing && !waitingForAudio
+        glow.isHidden = next != .processing || conversation != nil; halo.isHidden = next != .processing && !waitingForAudio
         if next == .processing { processingStarted = ProcessInfo.processInfo.systemUptime; glow.strokeEnd = 0.02 }
         updateAccessibilityLabel()
-        layout(animated: true); updateTimer()
+        layout(animated: conversation == nil); updateTimer()
         if next != .processing { glow.removeAllAnimations(); halo.removeAllAnimations() }
         if next == .processing || waitingForAudio {
             if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
@@ -465,7 +462,7 @@ final class Overlay {
         let delay = DispatchWorkItem { [weak self] in
             guard let self, self.waitingForAudio else { return }
             self.connecting.isHidden = false
-            self.layout(animated: true)
+            self.layout(animated: false)
         }
         connectingDelay = delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: delay)
@@ -584,10 +581,13 @@ final class Overlay {
             if glass.style != style { glass.style = style }
         }
         let showConnecting = !connecting.isHidden
-        let statusWidth: CGFloat = conversation != nil && !expanded ? 144 : 200
+        let compactVoice = conversation != nil && !expanded
+        let labelX: CGFloat = expanded ? 102 : 40
+        if showConnecting { connecting.sizeToFit() }
+        let statusWidth = labelX + connecting.frame.width + (compactVoice ? labelX : 12)
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
-        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? 200 : 104), height: $0.frame.height + 36) }
+        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : TalkDesign.idleSize)
         // Status messages grow only the right edge of the window, keeping the recording control still.
         let baseWidth = max(200, size.width + 96, size.width + 2 * leftExtension + 16)
@@ -642,11 +642,6 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let minimumLabelX: CGFloat = expanded ? 102 : 40
-        let labelSize = connecting.intrinsicContentSize
-        let labelWidth = min(ceil(labelSize.width), statusWidth - minimumLabelX - 8)
-        let compactVoice = conversation != nil && showConnecting && !expanded
-        let labelX = compactVoice ? max(minimumLabelX, (statusWidth - labelWidth) / 2) : minimumLabelX
         let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
         let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (size.width - 22) / 2
         NSAnimationContext.runAnimationGroup { context in
@@ -657,12 +652,14 @@ final class Overlay {
             status?.animator().alphaValue = closingStatus ? 0 : 1
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
-            let labelY = (18 + connecting.firstBaselineOffsetFromTop - labelSize.height - connecting.font!.capHeight / 2).rounded()
-            connecting.animator().frame = NSRect(x: contentOrigin + labelX, y: labelY, width: labelWidth, height: labelSize.height)
         } completionHandler: { [weak self] in
             guard let self, layoutRevision == revision else { return }
             if closingStatus { clearStatus(); layout(animated: false) }
             else if shrinking { layout(animated: false) }
+        }
+        if showConnecting {
+            let labelY = (18 + connecting.firstBaselineOffsetFromTop - connecting.frame.height - connecting.font!.capHeight / 2).rounded()
+            connecting.setFrameOrigin(NSPoint(x: contentOrigin + labelX, y: labelY))
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         correctionIndicator.position = CGPoint(x: markX + 23, y: 26)
