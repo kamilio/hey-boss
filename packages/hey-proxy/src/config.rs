@@ -41,6 +41,7 @@ pub struct Config {
     pub api_keys: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini: Option<hey_proxy::gemini::ProviderConfig>,
+    pub bedrock: Option<crate::proxy::bedrock::Provider>,
     pub claude: Option<crate::proxy::claude::ProviderConfig>,
     pub codex: Option<crate::proxy::codex::ProviderConfig>,
     #[serde(default)]
@@ -125,6 +126,8 @@ struct ConfigFile {
 #[serde(deny_unknown_fields)]
 struct Providers {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    bedrock: Option<crate::proxy::bedrock::Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     claude: Option<crate::proxy::claude::ProviderConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codex: Option<crate::proxy::codex::ProviderConfig>,
@@ -189,6 +192,7 @@ impl TryFrom<ConfigFile> for Config {
             upstream_url: file.upstream_url,
             api_keys: file.api_keys,
             gemini: file.gemini,
+            bedrock: file.providers.bedrock,
             claude: file.providers.claude,
             codex: file.providers.codex,
             default: file.default,
@@ -219,6 +223,7 @@ impl Serialize for Config {
                     credential_cache_seconds: self.credential_cache_seconds,
                 }),
                 gemini: self.gemini.clone(),
+                bedrock: self.bedrock.clone(),
                 claude: self.claude.clone(),
                 codex: self.codex.clone(),
             }
@@ -300,6 +305,8 @@ pub enum SshHost {
 #[serde(deny_unknown_fields)]
 pub struct RemoteHost {
     pub host: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bedrock: Option<crate::proxy::bedrock::Provider>,
     /// Use a supervised SSH reverse tunnel for controller-owned Gemini ADC.
     #[serde(default)]
     pub gemini_via_controller: bool,
@@ -517,6 +524,7 @@ impl Default for Config {
             model_registry: None,
             fallbacks: BTreeMap::new(),
             gemini: None,
+            bedrock: None,
             claude: None,
             codex: None,
             credential_cache_seconds: 2400,
@@ -611,6 +619,9 @@ impl Config {
         config
     }
     pub fn validate(&self) -> Result<()> {
+        if let Some(provider) = &self.bedrock {
+            provider.validate()?;
+        }
         self.validate_routes()?;
         self.validate_workers()?;
         anyhow::ensure!(self.accounts.len() <= 128, "Too many named accounts");
@@ -658,6 +669,7 @@ impl Config {
                 || !self.aliases.is_empty()
                 || !self.fallbacks.is_empty()
                 || self.gemini.is_some()
+                || self.bedrock.is_some()
                 || self.claude.is_some()
                 || self.codex.is_some()
             {

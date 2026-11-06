@@ -164,7 +164,7 @@ fn catalog(config: &Config) -> Value {
     let relay = config.mode == Mode::Client;
     let openai = !relay && !config.api_keys.is_empty();
     let gemini = config.gemini.is_some();
-    let apis = vec![
+    let mut apis = vec![
         Api {
             id: "claude",
             name: "Claude",
@@ -244,6 +244,14 @@ fn catalog(config: &Config) -> Value {
             models: native_models(config),
         },
     ];
+    if config.bedrock.is_some() {
+        apis.push(Api {
+            id: "bedrock", name: "Amazon Bedrock", base_path: "/bedrock",
+            description: "Explicit Bedrock inference. Use this base URL for Anthropic clients, or append /v1 for OpenAI clients. The model catalog lists regional inference profile IDs.",
+            routes: vec![("GET","/bedrock/v1/models","Cached inference profiles"),("POST","/bedrock/v1/responses","OpenAI Responses"),("POST","/bedrock/v1/messages","Anthropic Messages")],
+            configured: true, models: Vec::new(),
+        });
+    }
     let claude_default = config
         .routes
         .iter()
