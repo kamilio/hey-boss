@@ -51,15 +51,15 @@ final class OverlayNotice: NSView {
     private let performAction: (() -> Void)?
     private let dismiss: () -> Void
 
-    init(message: String, action: (title: String, perform: () -> Void)? = nil, dismiss: @escaping () -> Void, compact: Bool = false) {
-        performAction = action?.perform
+    init(message: String, action: (title: String, perform: () -> Void)? = nil, retry: (() -> Void)? = nil, dismiss: @escaping () -> Void, compact: Bool = false) {
+        performAction = retry ?? action?.perform
         self.dismiss = dismiss
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = .systemFont(ofSize: compact ? 12 : 13, weight: compact ? .medium : .regular)
         label.maximumNumberOfLines = compact ? 1 : 4
         label.sizeToFit()
         let width: CGFloat = compact ? ceil(label.frame.width) + 38 : 312
-        let textWidth = compact ? label.frame.width : width - 58
+        let textWidth = compact ? label.frame.width : width - (retry == nil ? 58 : 84)
         label.preferredMaxLayoutWidth = textWidth
         let textHeight = ceil(label.intrinsicContentSize.height)
         let actionsHeight: CGFloat = action == nil ? 0 : 40
@@ -80,15 +80,19 @@ final class OverlayNotice: NSView {
             separator.alphaValue = 0.3
             addSubview(separator)
         }
-        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: "Dismiss notice")!, target: self, action: #selector(closeNotice))
-        close.isBordered = false
-        close.contentTintColor = .secondaryLabelColor
-        close.setAccessibilityLabel("Dismiss notice")
-        close.toolTip = "Dismiss"
-        close.symbolConfiguration = .init(pointSize: 10, weight: .medium)
         let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
-        close.frame = NSRect(x: width - 34, y: (capCenter - 12).rounded(), width: 24, height: 24)
-        addSubview(close)
+        func addIcon(_ symbol: String, _ title: String, x: CGFloat, selector: Selector) {
+            let button = NSButton(image: NSImage(systemSymbolName: symbol, accessibilityDescription: title)!, target: self, action: selector)
+            button.isBordered = false
+            button.contentTintColor = .secondaryLabelColor
+            button.setAccessibilityLabel(title)
+            button.toolTip = title
+            button.symbolConfiguration = .init(pointSize: 10, weight: .medium)
+            button.frame = NSRect(x: x, y: (capCenter - 12).rounded(), width: 24, height: 24)
+            addSubview(button)
+        }
+        addIcon("xmark", "Dismiss notice", x: width - 34, selector: #selector(closeNotice))
+        if retry != nil { addIcon("arrow.clockwise", "Retry", x: width - 60, selector: #selector(activateAction)) }
         if let action {
             let button = NoticeActionButton(title: action.title, target: self, action: #selector(activateAction))
             button.isBordered = false

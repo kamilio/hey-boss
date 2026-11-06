@@ -81,7 +81,7 @@ The proxy's configured routing, model rewrites, and authentication remain author
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
 If correction fails during dictation, Hey Talk copies the raw transcript so you can press ⌘V. File transcription and `--no-paste` leave the clipboard alone. Escape discards pending correction too.
-If correction times out, click **Retry** to continue with the same transcript and original destination. Completed actions won’t run again.
+If correction times out, click the retry arrow next to the close button to continue with the same transcript and original destination. Completed actions won’t run again.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
 uses T3’s local server API without submitting a message or touching the clipboard.
