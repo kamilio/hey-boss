@@ -243,23 +243,25 @@ final class TalkService: NSObject, NSApplicationDelegate {
         applyConversation(["active": true, "phase": "starting", "message": "Opening chat…", "action": "Cancel opening chat"])
         let source = app.flatMap { $0.bundleIdentifier == "local.hey-boss.desktop" ? nil : $0.localizedName ?? "Current app" }
         let revision = conversationRevision
-        contextQueue.async {
+        Task { @MainActor in
             do {
-                let text = source != nil ? app.flatMap { AppContext.capture(pid: $0.processIdentifier) } : nil
-                guard DispatchQueue.main.sync(execute: { self.openingConversation && self.conversationRevision == revision }) else { return }
+                let text = await Task.detached { () -> String? in
+                    guard source != nil, let app else { return nil }
+                    return try? await ConversationContext.text(app, window: ConversationContext.focusedWindow(app)) {
+                        AppContext.capture(pid: app.processIdentifier)
+                    }
+                }.value
+                guard openingConversation, conversationRevision == revision else { return }
                 var request: [String: Any] = ["command": withContext ? "conversation_context" : "conversation_start", "sync": false]
                 request["title"] = source; request["description"] = text
-                guard try self.chatRequest(request)?["status"] as? String == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
-                DispatchQueue.main.async {
-                    guard self.openingConversation, self.conversationRevision == revision else { return }
-                    self.openingConversation = false; self.refreshConversation()
-                }
+                let reply = try await Task.detached { try self.chatRequest(request) }.value
+                guard openingConversation, conversationRevision == revision else { return }
+                guard reply?["status"] as? String == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
+                openingConversation = false; refreshConversation()
             } catch {
-                DispatchQueue.main.async {
-                    guard self.openingConversation, self.conversationRevision == revision else { return }
-                    self.openingConversation = false; self.applyConversation(nil)
-                    self.showOverlay(true); self.overlay?.error("Couldn’t open chat: " + error.localizedDescription)
-                }
+                guard openingConversation, conversationRevision == revision else { return }
+                openingConversation = false; applyConversation(nil)
+                showOverlay(true); overlay?.error("Couldn’t open chat: " + error.localizedDescription)
             }
         }
     }

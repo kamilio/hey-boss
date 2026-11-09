@@ -53,39 +53,54 @@ enum WindowInspection {
         guard let owner else { throw TalkError(gmail ? "Select your Gmail tab in a browser window, then try again." : "No visible window for " + target + ".") }
         let name = owner.localizedName ?? target
         var result: [String: Any] = ["ok": true, "source": gmail ? "Gmail · " + name : name]
+        if mode != "screenshot" { selectedWindow = selectedWindow ?? ConversationContext.focusedWindow(owner) }
+        // Start the image with the text read, before paging a long chat history.
+        let window = selectedWindow
+        async let image = mode == "accessibility" ? nil : try await screenshot(owner, window: window, visible: visible)
+        var textError: Error?
         if mode != "screenshot" {
-            guard AXIsProcessTrusted() else { throw TalkError("Allow Hey Talk in Privacy & Security → Accessibility.") }
-            let root = AXUIElementCreateApplication(owner.processIdentifier)
-            AXUIElementSetMessagingTimeout(root, 0.15)
-            AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
-            selectedWindow = selectedWindow ?? SpeechAX.element(root, "AXFocusedWindow")
-            guard let window = selectedWindow, SpeechAX.value(window, "AXMinimized") as? Bool != true else { throw TalkError("No accessible window in " + name + ".") }
-            result["text"] = snapshot(window)
+            do {
+                result["text"] = try await ConversationContext.text(owner, window: selectedWindow) { selectedWindow.map(snapshot) }
+            } catch { textError = error }
         }
         if mode != "accessibility" {
-            guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else { throw TalkError("Allow Hey Talk in Privacy & Security → Screen & System Audio Recording, then retry.") }
-            let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
-            let candidates = content.windows.filter { $0.owningApplication?.processID == owner.processIdentifier && $0.windowLayer == 0 }
-            let chosen: SCWindow?
-            if let ax = selectedWindow {
-                let title = SpeechAX.string(ax, "AXTitle"), bounds = bounds(ax)
-                let matches = candidates.filter { $0.frame == bounds && (title.isEmpty || $0.title == title) }
-                chosen = matches.count == 1 ? matches[0] : nil
-            } else {
-                let front = visible.first { $0[kCGWindowOwnerPID as String] as? pid_t == owner.processIdentifier }
-                chosen = candidates.first { $0.windowID == front?[kCGWindowNumber as String] as? CGWindowID }
+            do {
+                result["jpeg"] = try await image
+                if let textError { result["text"] = "Text unavailable: " + textError.localizedDescription }
+            } catch {
+                guard let text = result["text"] as? String else {
+                    if let textError { throw TalkError(textError.localizedDescription + " " + error.localizedDescription) }
+                    throw error
+                }
+                result["text"] = text + "\n\nScreenshot unavailable: " + error.localizedDescription
             }
-            guard let window = chosen, window.frame.width > 0, window.frame.height > 0 else { throw TalkError("Could not identify the requested window in " + name + ".") }
-            let config = SCStreamConfiguration()
-            let scale = min(2, 1920 / max(window.frame.width, window.frame.height))
-            config.width = max(1, Int(window.frame.width * scale)); config.height = max(1, Int(window.frame.height * scale))
-            config.showsCursor = false; config.ignoreShadowsSingleWindow = true
-            let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
-            guard let data = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.86]) else { throw TalkError("Could not encode screenshot.") }
-            result["jpeg"] = data.base64EncodedString()
-        }
+        } else if let textError { throw textError }
         if gmail, let selectedWindow, BrowserPage.documentHost(in: selectedWindow) != "mail.google.com" { throw TalkError("The Gmail tab changed during capture. Try again.") }
         return result
+    }
+
+    private static func screenshot(_ owner: NSRunningApplication, window selectedWindow: AXUIElement?, visible: [[String: Any]]) async throws -> String {
+        guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else { throw TalkError("Allow Hey Talk in Privacy & Security → Screen & System Audio Recording, then retry.") }
+        let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        let candidates = content.windows.filter { $0.owningApplication?.processID == owner.processIdentifier && $0.windowLayer == 0 }
+        let chosen: SCWindow?
+        if let ax = selectedWindow {
+            let title = SpeechAX.string(ax, "AXTitle"), bounds = bounds(ax)
+            let frames = candidates.filter { $0.frame == bounds }
+            let matches = frames.count == 1 ? frames : frames.filter { !title.isEmpty && $0.title == title }
+            chosen = matches.count == 1 ? matches[0] : nil
+        } else {
+            let front = visible.first { $0[kCGWindowOwnerPID as String] as? pid_t == owner.processIdentifier }
+            chosen = candidates.first { $0.windowID == front?[kCGWindowNumber as String] as? CGWindowID }
+        }
+        guard let window = chosen, window.frame.width > 0, window.frame.height > 0 else { throw TalkError("Could not identify the requested window in " + (owner.localizedName ?? "the app") + ".") }
+        let config = SCStreamConfiguration()
+        let scale = min(2, 1920 / max(window.frame.width, window.frame.height))
+        config.width = max(1, Int(window.frame.width * scale)); config.height = max(1, Int(window.frame.height * scale))
+        config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        let image = try await SCScreenshotManager.captureImage(contentFilter: SCContentFilter(desktopIndependentWindow: window), configuration: config)
+        guard let data = NSBitmapImageRep(cgImage: image).representation(using: .jpeg, properties: [.compressionFactor: 0.86]) else { throw TalkError("Could not encode screenshot.") }
+        return data.base64EncodedString()
     }
 
     // Only inspect browser chrome for tabs. A page can give its own controls any label.

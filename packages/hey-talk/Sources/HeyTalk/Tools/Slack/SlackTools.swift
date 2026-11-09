@@ -64,6 +64,10 @@ enum SlackTools {
         AXUIElementSetMessagingTimeout(ax, 0.1)
         AXUIElementSetAttributeValue(ax, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         guard let window = SpeechAX.element(ax, "AXFocusedWindow") else { return nil }
+        return route(in: window)
+    }
+
+    static func route(in window: AXUIElement) -> URL? {
         var pending = [window]
         for _ in 0..<80 {
             guard let node = pending.popLast() else { break }

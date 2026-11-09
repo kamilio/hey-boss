@@ -122,7 +122,7 @@ export async function createConversation({home = homedir(), statePath, emit, fet
           return JSON.stringify(results.map((result, i) => ({...args.commands[i], ...(result.status === 'fulfilled' ? {output: result.value} : {error: result.reason.message})})));
         }},
         {name: 'inspect_window', description: windowDescription, inputSchema: {type: 'object', properties: {
-          target: {type: 'string', examples: ['active', 'browser', 'Gmail', 'Finder']},
+          target: {type: 'string', examples: ['active', 'browser', 'Gmail', 'Obsidian', 'Slack', 'cmux']},
           mode: {type: 'string', enum: ['accessibility', 'screenshot', 'both']}},
           required: ['target', 'mode'], additionalProperties: false},
         async call({target, mode}, ctx) {
@@ -131,7 +131,7 @@ export async function createConversation({home = homedir(), statePath, emit, fet
           emit({ToolStarted: {id, input}});
           const socket = createConnection({path: join(home, 'Library/Application Support/hey-talk/control.sock'), signal: ctx.signal});
           try {
-            socket.setTimeout(15000, () => socket.destroy(new Error('Hey Talk did not answer.')));
+            socket.setTimeout(105000, () => socket.destroy(new Error('Hey Talk did not answer.')));
             socket.write(JSON.stringify({command: 'inspect_window', target, mode}) + '\n');
             let size = 0; const chunks = [];
             for await (const chunk of socket) {
