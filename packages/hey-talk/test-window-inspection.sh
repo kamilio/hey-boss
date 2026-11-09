@@ -1,5 +1,5 @@
 #!/bin/bash
-# Runs against the installed Hey Talk; requires Accessibility and Screen Recording.
+# Runs against the installed Hey Talk; requires Accessibility; also checks Screen Recording denial.
 set -eu
 cd "$(dirname "$0")"
 mkdir -p .build
@@ -41,11 +41,15 @@ assert.ok(ax.ok, ax.error); assert.match(ax.text, /Marigold capture test/);
 assert.ok(!ax.jpeg && !ax.text.includes('must-not-appear'));
 assert.equal((await inspect('both', 'No Such Window Fixture')).ok, false);
 console.log('PASS named window, accessibility text, secure-field omission, and no fallback to an unrelated app');
-for (const mode of ['screenshot','both']) {
-  const result = await inspect(mode);
-  assert.ok(result.ok, result.error);
-  assert.ok(Buffer.from(result.jpeg, 'base64').subarray(0, 2).equals(Buffer.from([255,216])));
-  if (mode === 'both') assert.match(result.text, /Marigold capture test/); else assert.equal(result.text, undefined);
+const image = await inspect('screenshot'), both = await inspect('both');
+assert.ok(both.ok, both.error); assert.match(both.text, /Marigold capture test/);
+if (!image.ok) {
+  assert.match(image.error, /Allow Hey Talk.*Screen & System Audio Recording/);
+  assert.ok(!both.jpeg); assert.match(both.text, /Screenshot unavailable:.*Screen & System Audio Recording/);
+  console.log('PASS text survives missing Screen Recording permission; JPEG check requires that permission');
+} else {
+  for (const result of [image, both]) assert.ok(Buffer.from(result.jpeg, 'base64').subarray(0, 2).equals(Buffer.from([255,216])));
+  assert.equal(image.text, undefined);
+  console.log('PASS screenshot alone and with accessibility from the same window');
 }
-console.log('PASS screenshot alone and with accessibility from the same window');
 JS
