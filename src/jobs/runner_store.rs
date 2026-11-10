@@ -187,10 +187,18 @@ impl Store {
         };
         if !matches!(
             report.state.as_str(),
-            "running" | "succeeded" | "failed" | "cancelled" | "released"
+            "running" | "succeeded" | "failed" | "cancelled" | "released" | "skipped"
         ) {
             return Err(Error::invalid("Invalid execution report"));
         };
+        if report.state == "skipped"
+            && (run.snapshot.definition.condition.is_none()
+                || report.started_at.is_some()
+                || report.session_id.is_some()
+                || run.state != "pending")
+        {
+            return Err(Error::invalid("Only an unstarted conditional job can skip"));
+        }
         if run.session_id.is_some() && run.session_id != report.session_id {
             return Err(Error::conflict("Job session cannot change"));
         };
@@ -253,6 +261,9 @@ impl Store {
                     tx.commit()?;
                     return Ok(true);
                 }
+            }
+            if report.state == "skipped" {
+                tx.execute("UPDATE scheduled_job_runs SET machine=?2 WHERE id=?1", params![run.id, node])?;
             }
             if report.state != "running" {
                 let state = if stop_requested {
@@ -380,6 +391,8 @@ impl Store {
                     "failed"
                 } else if children.iter().any(|r| r.state == "cancelled") {
                     "cancelled"
+                } else if children.iter().all(|r| r.state == "skipped") {
+                    "skipped"
                 } else {
                     "succeeded"
                 };

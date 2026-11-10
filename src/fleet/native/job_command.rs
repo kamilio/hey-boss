@@ -69,7 +69,7 @@ pub(super) fn run(
         report,
         root.to_str()
             .ok_or_else(|| replica::invalid("Non UTF-8 execution directory"))?,
-        &spec.program,
+        super::script::Program::Job(&spec.program),
     )?;
     let archive = root.join("result.tar.gz");
     command::pack(&root.join("result"), &archive)?;

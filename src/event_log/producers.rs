@@ -147,7 +147,7 @@ pub(crate) fn job(db: &Connection, run: &crate::jobs::Run) -> Result<()> {
             "parent_run_id":run.parent_run_id,"target_machine":run.target_machine,
             "scheduled_at":run.scheduled_at,"trigger":run.trigger,
             "error_code":run.reason.as_deref().and_then(error_code),
-            "skip_reason":(run.state=="skipped").then_some("overlap")}),
+            "skip_reason":(run.state=="skipped").then_some(if run.reason.as_deref()==Some("overlap") {"overlap"} else {"condition"})}),
         },
     )?;
     Ok(())

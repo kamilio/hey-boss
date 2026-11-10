@@ -30,6 +30,7 @@ fn check_non_target_observations(observation_state: &str) {
                 cron: "0 * * * *".into(),
                 timezone: "UTC".into(),
                 executable: None,
+                condition: None,
                 execution: None,
                 harness: "codex".into(),
                 model: "gpt-6-astra".into(),

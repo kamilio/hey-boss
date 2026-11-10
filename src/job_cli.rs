@@ -40,6 +40,9 @@ struct Fields {
     /// Run this executable in the project checkout (absolute path, relative path, or name on PATH).
     #[arg(long, conflicts_with_all = ["harness", "model", "thread_mode", "instructions"])]
     executable: Option<String>,
+    /// Check this executable in the project checkout first: print JSON true to run or false to skip.
+    #[arg(long)]
+    condition: Option<String>,
     /// Exact model override; omit for Codex to follow the project setting.
     #[arg(long, default_value = "")]
     model: String,
@@ -63,6 +66,7 @@ impl Fields {
             cron: self.cron.clone(),
             timezone: self.timezone.clone(),
             executable: self.executable.clone(),
+            condition: self.condition.clone(),
             execution: None,
             harness: self.harness.map(|p| p.name()).unwrap_or_default().into(),
             model: self.model.clone(),
@@ -462,6 +466,9 @@ fn print_job(job: &Value) {
             "paused"
         }
     );
+    if let Some(condition) = d["condition"].as_str() {
+        println!("  Condition: {condition}");
+    }
     if let Some(executable) = d["executable"].as_str() {
         println!(
             "  {} · {} · Script: {executable}",

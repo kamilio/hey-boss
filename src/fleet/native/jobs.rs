@@ -472,9 +472,34 @@ fn run_session(
     if d.run.snapshot.definition.execution.is_some() {
         return command::run(ctx, d, report);
     }
+    if let Some(condition) = &d.run.snapshot.definition.condition {
+        let outcome = script::run(
+            ctx,
+            d,
+            report,
+            &config.cwd,
+            script::Program::Condition(condition),
+        )?;
+        if outcome.0 != "succeeded" {
+            return Ok(outcome);
+        }
+        if revoked(ctx, d)? || ctx.stopped() {
+            return Ok((
+                "cancelled".into(),
+                Some("Stopped after condition check".into()),
+            ));
+        }
+        report.reason = None;
+    }
     if let Some(executable) = &d.run.snapshot.definition.executable {
         report.cwd = Some(config.cwd.clone());
-        return script::run(ctx, d, report, &config.cwd, executable);
+        return script::run(
+            ctx,
+            d,
+            report,
+            &config.cwd,
+            script::Program::Job(executable),
+        );
     }
     let cwd = job_workspace(&config, &d.run.id)?;
     report.cwd = Some(cwd.to_string_lossy().into_owned());

@@ -41,6 +41,7 @@ try{
   await page.locator('#job-harness').selectOption('codex');
   await page.locator('#job-name').fill('Execution settings check');
   await page.locator('#job-markdown').fill(await readFile('src/jobs/fixtures/original.md','utf8'));
+  await page.locator('#job-condition').fill('./scripts/build-is-broken');
   await page.locator('#job-enabled').uncheck();
   await page.getByRole('button',{name:'Create job',exact:true}).click();
   await page.locator('#job-run').waitFor();
@@ -49,10 +50,13 @@ try{
   assert.equal(saved().snapshot.definition.model,'');
   await page.reload();await page.locator('#job-model').waitFor();
   assert.equal(await page.locator('#job-model').inputValue(),'');
+  assert.equal(await page.locator('#job-condition').inputValue(),'./scripts/build-is-broken');
+  await page.locator('#job-condition').fill('');
   await page.locator('#job-model').fill('custom-model');
   await page.getByRole('button',{name:'Save changes',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('.job-panel-subtitle')?.textContent.includes('Revision 2'));
   assert.equal(saved().snapshot.definition.model,'custom-model');
+  assert.equal(saved().snapshot.definition.condition,undefined);
   await page.locator('#job-model-inherit').click();
   assert.equal(await page.locator('#job-model').inputValue(),'');
   await page.getByRole('button',{name:'Save changes',exact:true}).click();
@@ -67,10 +71,6 @@ try{
   cli(['issue','settings','set','--project','named:Execution','--worker-permissions','','--worker-reasoning','','--worker-model','','--json']);
   await page.reload();await page.waitForFunction(()=>document.querySelector('#job-execution-settings')?.textContent.includes('Machine default'));
   assert.equal(await page.locator('#job-model').inputValue(),'');
-  assert.deepEqual(errors,[]);
-  console.log('Scheduled job execution UI passed: project defaults, project switching, provider scope, blank/custom/reset persistence, live settings, responsive light/dark layout.');
-}finally{
-  await browser?.close();
   const exec=cli(['exec','--project','named:Execution','--json','submit','--request-id','platform-probe','--','uname','-s']);
   const jobId=exec.run.snapshot.job_id;
   await page.route('**/api/action',async route=>{
@@ -85,6 +85,10 @@ try{
   await page.locator('.job-run').waitFor();
   assert.match(await page.locator('#job-panel').innerText(),/platform-probe/);
   assert.equal(await page.locator('#job-save').count(),0);
+  assert.deepEqual(errors,[]);
+  console.log('Scheduled job execution UI passed: project defaults, project switching, provider scope, blank/custom/reset persistence, live settings, responsive light/dark layout.');
+}finally{
+  await browser?.close();
   if(child&&child.exitCode===null)await new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGKILL');});
   await rm(root,{recursive:true,force:true});
 }
