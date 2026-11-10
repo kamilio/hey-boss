@@ -30,12 +30,21 @@ final class OverlayTests: XCTestCase {
             XCTAssertFalse(panel.canBecomeKey)
         }
         overlay.showConversation(["phase": "thinking", "message": "Needs approval", "action": "Open chat", "approval": true])
-        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat"])
+        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "New Chat"])
         overlay.showConversation(["phase": "speaking", "message": "Speaking", "action": "Stop voice", "interrupt": true])
         let interrupt = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "Listen for next message" })
         var interrupted = false; overlay.onInterruptConversation = { interrupted = true }
         XCTAssertTrue(app.sendAction(try XCTUnwrap(interrupt.action), to: interrupt.target, from: interrupt))
         XCTAssertTrue(interrupted)
+        overlay.showConversation(["phase": "recording", "action": "Send voice message"])
+        let menu = overlay.contextMenu()
+        var stopped = false, reset = false
+        overlay.onStopConversation = { stopped = true }; overlay.onStartConversation = { reset = true }
+        for title in ["Stop recording", "New Chat"] {
+            let item = try XCTUnwrap(menu.item(withTitle: title))
+            XCTAssertTrue(app.sendAction(try XCTUnwrap(item.action), to: item.target, from: item))
+        }
+        XCTAssertTrue(stopped && reset)
         overlay.showConversation(nil)
         XCTAssertTrue(surface.accessibilityLabel()?.contains("Start dictation") == true)
         overlay.preparing(.listening)

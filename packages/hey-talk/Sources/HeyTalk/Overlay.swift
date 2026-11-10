@@ -510,15 +510,20 @@ final class Overlay {
     func contextMenu() -> NSMenu {
         let menu = NSMenu()
         if let conversation {
-            let action = menu.addItem(withTitle: conversation["action"] as? String ?? "Start voice", action: #selector(recordFromNotice), keyEquivalent: "")
+            let title = conversation["action"] as? String ?? "Start voice"
+            let stops = title == "Stop voice" || title == "Stop reply"
+            let action = menu.addItem(withTitle: title, action: stops ? #selector(stopConversation) : #selector(recordFromNotice), keyEquivalent: "")
             action.target = self
             if conversation["interrupt"] as? Bool == true {
                 menu.addItem(withTitle: "Listen for next message", action: #selector(interruptConversation), keyEquivalent: "").target = self
             }
-            if conversation["phase"] as? String == "recording" {
-                menu.addItem(withTitle: "Cancel recording", action: #selector(stopConversation), keyEquivalent: "").target = self
+            if !stops, let phase = conversation["phase"] as? String, phase != "idle", phase != "starting" {
+                menu.addItem(withTitle: phase == "recording" ? "Stop recording" : "Stop conversation", action: #selector(stopConversation), keyEquivalent: "").target = self
             }
             if conversation["approval"] as? Bool != true { menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self }
+            if conversation["action"] as? String != "Cancel opening chat" {
+                menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
+            }
             return menu
         }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")

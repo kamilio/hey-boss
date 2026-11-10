@@ -140,7 +140,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         speech.onNotice = { [weak self] message in self?.showOverlay(true); self?.overlay?.error(message) }
         speech.onActivityChanged = { [weak self] active in
             guard let self else { return }
-            self.hotkey?.captureEscape(active || self.waitingPaste != nil || self.session.phase == .listening || self.session.phase == .recording || self.session.phase == .processing)
+            self.hotkey?.captureEscape(self.openingConversation || active || self.waitingPaste != nil || self.session.phase == .listening || self.session.phase == .recording || self.session.phase == .processing)
             let ended = self.speechWasActive && !active
             self.speechWasActive = active
             if ended {
@@ -253,7 +253,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 guard openingConversation, conversationRevision == revision else { return }
                 var request: [String: Any] = ["command": withContext ? "conversation_context" : "conversation_start", "sync": false]
                 request["title"] = source; request["description"] = text
-                let reply = try await Task.detached { try self.chatRequest(request) }.value
+                // Queue Stop behind Start if Escape arrives while the socket request is in flight.
+                let reply: [String: Any]? = try await withCheckedThrowingContinuation { continuation in
+                    contextQueue.async { [request] in continuation.resume(with: Result { try self.chatRequest(request) }) }
+                }
                 guard openingConversation, conversationRevision == revision else { return }
                 guard reply?["status"] as? String == "ok" else { throw TalkError("Update Hey Boss on macOS 26 to use voice chat.") }
                 openingConversation = false; refreshConversation()
@@ -328,7 +331,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.focusedInputChanged(FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs))
             }
         }
-        hotkey?.captureEscape(speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
+        hotkey?.captureEscape(openingConversation || speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
     }
     private func switchToDictation() {
         guard !openingConversation, !switchingToDictation else { return }
@@ -401,6 +404,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if conversation == nil { startConversation() }
         case .chatWithContext: chatWithContext()
         case .cancel:
+            if openingConversation { controlConversation("stop"); return }
             guard conversation == nil else { return }
             if speech.active { speech.stop() }
             else if session.phase == .recording || session.phase == .processing || autoTarget != nil || autoRestart != nil || waitingPaste != nil { cancelDictation() }
@@ -557,7 +561,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: restart)
     }
     @objc private func toggle() {
-        if conversation != nil { controlConversation(); return }
+        if let conversation {
+            let action = conversation["action"] as? String
+            controlConversation(action == "Stop voice" || action == "Stop reply" ? "stop" : "toggle")
+            return
+        }
         switch DictationToggle.resolve(phase: session.phase, currentSubmit: pressEnter, requestedSubmit: true) {
         case .stop(let submit): pressEnter = submit; stop { _ in }
         case .start(let submit): start(showOverlay: overlayEnabled, paste: true, pressEnter: submit) { _ in }

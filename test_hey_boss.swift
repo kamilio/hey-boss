@@ -72,6 +72,10 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PILL_ESCAPE"] {
+        Task { @MainActor in await auditPillEscape(root); exit(0) }
+        app.run(); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DICTATION_HANDOFF"] {
         app.finishLaunching()
         auditDictationHandoff(root)
@@ -127,7 +131,7 @@ func audit() {
         let prefs = UserDefaults(suiteName: "hey-boss-issue66-preview")!
         defer { prefs.removePersistentDomain(forName: "hey-boss-issue66-preview") }
         let ui = NativeQuickIssue(preferences: prefs)
-        let shortcut = QuickIssueShortcut { ui.open(cli: nil) }
+        let shortcut = GlobalShortcut(key: kVK_ANSI_I, modifiers: cmdKey | controlKey | optionKey | shiftKey, signature: 0x48425149) { ui.open(cli: nil) }
         ui.open(cli: nil)
         withExtendedLifetime((ui, shortcut)) { app.run() }
         return
@@ -294,7 +298,7 @@ func auditIssuesShortcut() {
     precondition(item.keyEquivalent == "o" && item.keyEquivalentModifierMask == [.command, .control, .option, .shift])
     precondition(NSApp.sendAction(item.action!, to: item.target, from: item))
     precondition(urls.count == 1 && urls[0].absoluteString == "http://hey-boss.test/#view=issues", "Issues opens the normal list without imposing filters")
-    let shortcut = IssuesShortcut { overview.showIssues() }
+    let shortcut = GlobalShortcut(key: kVK_ANSI_O, modifiers: cmdKey | controlKey | optionKey | shiftKey, signature: 0x4842494F) { overview.showIssues() }
     withExtendedLifetime(shortcut) {
         var event: EventRef?
         precondition(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), GetCurrentEventTime(), 0, &event) == noErr)
@@ -345,7 +349,7 @@ func auditQuickIssue() {
     auditQuickIssueController()
     if ProcessInfo.processInfo.environment["HEY_BOSS_QUICK_ISSUE_INTEGRATION"] == "1" { auditQuickIssueMediaIntegration() }
     var calls = 0
-    let shortcut = QuickIssueShortcut { calls += 1 }
+    let shortcut = GlobalShortcut(key: kVK_ANSI_I, modifiers: cmdKey | controlKey | optionKey | shiftKey, signature: 0x48425149) { calls += 1 }
     withExtendedLifetime(shortcut) {
         var event: EventRef?
         precondition(CreateEvent(nil, OSType(kEventClassKeyboard), UInt32(kEventHotKeyPressed), GetCurrentEventTime(), 0, &event) == noErr)
@@ -4534,6 +4538,41 @@ func auditReviewEcho() {
 
 #if canImport(FoundationModels)
 import FoundationModels
+@available(macOS 26, *)
+@MainActor func auditPillEscape(_ root: String) async {
+    let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: URL(fileURLWithPath: root).appendingPathComponent("current.json"))
+    func escapeAvailable() -> Bool {
+        var probe: EventHotKeyRef?
+        let status = RegisterEventHotKey(UInt32(kVK_Escape), 0, EventHotKeyID(signature: 0x54455354, id: 1), GetApplicationEventTarget(), UInt32(kEventHotKeyExclusive), &probe)
+        if let probe { UnregisterEventHotKey(probe) }
+        return status == noErr
+    }
+    precondition(escapeAvailable(), "Escape must be free before the pill test")
+    let mic = ReviewAudio()
+    chat.connect(mic); chat.receive(.began); chat.receive(.pcm(Data(count: 640)))
+    precondition(chat.phase == .recording && !chat.window.isVisible && !chat.window.isKeyWindow)
+    precondition(!escapeAvailable(), "The pill must capture Escape while recording")
+    precondition(CGPreflightPostEventAccess(), "The keyboard check requires permission to post events")
+    for down in [true, false] {
+        let event = CGEvent(keyboardEventSource: nil, virtualKey: CGKeyCode(kVK_Escape), keyDown: down)!
+        event.flags = []; event.post(tap: .cghidEventTap)
+    }
+    for _ in 0..<100 where chat.phase != .idle { try? await Task.sleep(for: .milliseconds(20)) }
+    chat.receive(.ended)
+    precondition(chat.phase == .idle && mic.stopped && chat.audio == nil && chat.recording == nil && chat.rows.isEmpty)
+    precondition(!chat.window.isVisible && escapeAvailable(), "Stop must release Escape without opening the transcript")
+    precondition(chat.selectDirectory(nil, capture: .init(source: "Test Editor", text: "Previous context")))
+    chat.respond("Previous question")
+    let handoff = chat.pauseSession()!
+    precondition(escapeAvailable() && chat.resumeSession(handoff) && !escapeAvailable())
+    let previous = ReviewAudio(); chat.connect(previous)
+    chat.startFromPill()
+    precondition(previous.stopped && chat.rows.isEmpty && chat.contextChip.isHidden && !chat.window.isVisible)
+    precondition(chat.historyList.numberOfRows == 1)
+    chat.stop("Voice off")
+    print("PASS: Escape discarded the hidden recording; New Chat cleared context and kept history")
+}
+
 @available(macOS 26, *)
 func auditDictationHandoff(_ root: String) {
     let url = URL(fileURLWithPath: root).appendingPathComponent("current.json")
