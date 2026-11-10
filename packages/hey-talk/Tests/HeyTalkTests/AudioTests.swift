@@ -42,8 +42,14 @@ final class AudioTests: XCTestCase {
             service.command(["command": "status"]) { value = $0 }
             return value
         }
+        var keyboard = HotkeyState()
+        func pressHyperR() {
+            service.handleShortcut(keyboard.keyDown(code: 15, hyper: true, repeated: false))
+            _ = keyboard.keyUp(code: 15)
+        }
         for phase in ["listening", "speaking"] {
-            service.switchToDictation()
+            service.applyConversation(["active": true, "phase": phase])
+            pressHyperR()
             let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in status()["microphone_ready"] as? Bool == true }, object: nil)
             wait(for: [ready], timeout: 25)
             XCTAssertNil(status()["conversation"])
@@ -52,7 +58,7 @@ final class AudioTests: XCTestCase {
                 stream.receive(try sampleBuffer(Array(dictated[offset..<min(offset + 320, dictated.count)])))
             }
             XCTAssertGreaterThan(capture.sampleCount, 2400)
-            service.command(["command": "stop"]) { _ in }
+            pressHyperR()
             eventually { (status()["conversation"] as? [String: Any])?["phase"] as? String == phase }
         }
         history.finishPendingWrites()

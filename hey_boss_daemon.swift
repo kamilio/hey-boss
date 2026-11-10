@@ -5272,12 +5272,6 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         currentConversation().show()
     }
     @available(macOS 26, *)
-    func toggleFocusedConversation() -> Bool {
-        guard let chat = conversationWindow as? VoiceConversation, NSApp.isActive, chat.window.isKeyWindow,
-              chat.window.attachedSheet == nil else { return false }
-        chat.meter.performClick(nil); return true
-    }
-    @available(macOS 26, *)
     var conversationStatus: [String: Any] { (conversationWindow as? VoiceConversation)?.voiceStatus ?? ["active": false] }
     @available(macOS 26, *)
     func controlConversation(_ action: String?) -> Bool {
@@ -7439,7 +7433,6 @@ final class ConversationMeter: NSButton {
     override init(frame: NSRect) {
         super.init(frame: frame)
         title = ""; isBordered = false; focusRingType = .exterior
-        keyEquivalent = "r"; keyEquivalentModifierMask = [.control, .command, .option, .shift]
         glass.style = .clear; glass.cornerRadius = 18; glass.contentView = face
         glass.frame = bounds; glass.autoresizingMask = [.width, .height]; addSubview(glass)
         face.wantsLayer = true
@@ -8027,7 +8020,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         meter.show(next)
         let voiceAction = voiceStatus["action"] as! String
         meter.isEnabled = true
-        meter.toolTip = voiceAction + " (Hyper+R)"
+        meter.toolTip = voiceAction
         meter.setAccessibilityLabel(voiceAction)
         meter.setAccessibilityValue(status.stringValue)
         updateComposerActions()
@@ -8230,7 +8223,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if !turnDone { cancelTurn() }
             }
             // The detector sends the buffered opening frames immediately after began.
-            recording = Data(); state(.recording, "Pause or Hyper+R to send · Esc to cancel")
+            recording = Data(); state(.recording, "Pause or click the voice bubble to send · Esc to cancel")
         case .pcm(let pcm) where phase == .recording:
             recording!.append(pcm); meter.capture(pcm)
             if recording!.count >= 32000 * 120 { endRecording("duration limit") }
@@ -10504,7 +10497,7 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
+                    } else if ["conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
@@ -10516,10 +10509,6 @@ struct Daemon {
                                 }
                                 if request.command == "conversation_control" {
                                     reply.send(["status": overview.controlConversation(request.title) ? "ok" : "unhandled", "conversation": overview.conversationStatus]); return
-                                }
-                                if request.command == "conversation_toggle" {
-                                    reply.send(["status": overview.toggleFocusedConversation() ? "ok" : "unhandled"])
-                                    return
                                 }
                                 if request.command == "conversation_start" {
                                     overview.currentConversation().startFromPill()

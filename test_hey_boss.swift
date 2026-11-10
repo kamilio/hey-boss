@@ -4540,6 +4540,7 @@ func auditDictationHandoff(_ root: String) {
     try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
     try! Data(#"{"messages":[{"text":"Keep this message","speaker":"You"}]}"#.utf8).write(to: url)
     let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
+    precondition(chat.meter.keyEquivalent.isEmpty, "The transcript must not intercept the dictation shortcut")
     let audio = ReviewAudio()
     audio.engine.attach(audio.player)
     audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)

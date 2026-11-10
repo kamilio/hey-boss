@@ -119,25 +119,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if ready { self.updateRecordingOverlay() } else { self.overlay?.preparing(self.session.phase) }
         }
         hotkey = Hotkey()
-        hotkey?.onAction = { [weak self] action in
-            guard let self else { return }
-            switch action {
-            case .toggle(.submit): self.recordShortcut()
-            case .toggle(.autoSubmit): self.toggleAutoSubmit()
-            case .toggleAuto: self.toggleAutoMode()
-            case .toggleSpeech: self.speech.toggle()
-            case .toggleSpeechMode: self.speech.toggleEnabled()
-            case .startConversation:
-                if self.conversation == nil { self.startConversation() }
-                else { self.switchToDictation() }
-            case .chatWithContext: self.chatWithContext()
-            case .cancel:
-                guard self.conversation == nil else { return }
-                if self.speech.active { self.speech.stop() }
-                else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil || self.waitingPaste != nil { self.cancelDictation() }
-            case .none: break
-            }
-        }
+        hotkey?.onAction = { [weak self] in self?.handleShortcut($0) }
         speech.canOffer = { [weak self] in
             guard let self else { return false }
             return self.conversation == nil && self.waitingPaste == nil && self.session.phase != .processing && (self.session.phase != .recording || self.autoTarget != nil)
@@ -318,7 +300,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
         }
     }
-    private func applyConversation(_ state: [String: Any]?) {
+    func applyConversation(_ state: [String: Any]?) {
         conversationRevision += 1
         let next = state?["active"] as? Bool == true ? state : nil
         if next != nil, waitingPaste != nil || session.phase == .processing || (session.phase == .recording && autoTarget == nil) {
@@ -348,7 +330,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         hotkey?.captureEscape(speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
     }
-    func switchToDictation() {
+    private func switchToDictation() {
         guard !openingConversation, !switchingToDictation else { return }
         guard pausedConversation == nil else { return }
         switchingToDictation = true
@@ -408,16 +390,35 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
         }
     }
+    func handleShortcut(_ action: HotkeyAction) {
+        switch action {
+        case .toggle(.submit): recordShortcut()
+        case .toggle(.autoSubmit): toggleAutoSubmit()
+        case .toggleAuto: toggleAutoMode()
+        case .toggleSpeech: speech.toggle()
+        case .toggleSpeechMode: speech.toggleEnabled()
+        case .startConversation:
+            if conversation == nil { startConversation() }
+        case .chatWithContext: chatWithContext()
+        case .cancel:
+            guard conversation == nil else { return }
+            if speech.active { speech.stop() }
+            else if session.phase == .recording || session.phase == .processing || autoTarget != nil || autoRestart != nil || waitingPaste != nil { cancelDictation() }
+        case .none: break
+        }
+    }
     private func recordShortcut() {
-        if conversation != nil { controlConversation(); return }
+        guard !openingConversation, !switchingToDictation else { return }
+        if conversation != nil { switchToDictation(); return }
         guard let app = NSWorkspace.shared.frontmostApplication, app.bundleIdentifier == "local.hey-boss.desktop",
               session.phase == .idle || session.phase == .failed else { toggle(); return }
         contextQueue.async {
-            // Other Hey Boss windows still use ordinary dictation.
-            if (try? self.chatRequest(["command": "conversation_toggle", "sync": false]))?["status"] as? String != "ok" {
-                DispatchQueue.main.async {
-                    if NSWorkspace.shared.frontmostApplication == app { self.toggle() }
-                }
+            // The transcript can gain focus before its status notification arrives.
+            let state = (try? self.chatRequest(["command": "conversation_status", "sync": false]))?["conversation"] as? [String: Any]
+            DispatchQueue.main.async {
+                guard NSWorkspace.shared.frontmostApplication == app else { return }
+                if state?["active"] as? Bool == true || self.conversation != nil { self.switchToDictation() }
+                else { self.toggle() }
             }
         }
     }
