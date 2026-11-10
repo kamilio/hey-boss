@@ -865,7 +865,21 @@ pub(super) async fn forward_native(
             }
         };
         if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
-            && repair_native_tool_names(&mut value)
+            && {
+                let mut changed = repair_native_tool_names(&mut value);
+                // -1 delegates the budget to Gemini. Level-based models express the
+                // same choice by leaving the level unset and reject a numeric budget.
+                if matches!(config.thinking, hey_proxy::gemini::Thinking::Level)
+                    && let Some(thinking) = value
+                        .pointer_mut("/generationConfig/thinkingConfig")
+                        .and_then(Value::as_object_mut)
+                    && thinking.get("thinkingBudget").and_then(Value::as_i64) == Some(-1)
+                {
+                    thinking.remove("thinkingBudget");
+                    changed = true;
+                }
+                changed
+            }
         {
             Body::from(value.to_string())
         } else {
@@ -1347,6 +1361,41 @@ mod tests {
             assert!(!repair_native_tool_names(&mut body));
             assert_eq!(body, original);
         }
+    }
+
+    #[tokio::test]
+    async fn native_level_provider_accepts_automatic_thinking() {
+        let (upstream_url, upstream) = serve(
+            Router::new()
+                .fallback(|axum::Json(body): axum::Json<Value>| async move { axum::Json(body) }),
+        )
+        .await;
+        let mut gemini = provider(&upstream_url, "api_key");
+        gemini.thinking = hey_proxy::gemini::Thinking::Level;
+        let (url, proxy) = serve(
+            super::super::router(Config {
+                gemini: Some(gemini),
+                ..Config::test_fixture()
+            })
+            .unwrap(),
+        )
+        .await;
+        let client = reqwest::Client::new();
+        for (budget, expected) in [
+            (-1, json!({"includeThoughts": true})),
+            (
+                1024,
+                json!({"includeThoughts": true, "thinkingBudget": 1024}),
+            ),
+        ] {
+            let response = client
+                .post(format!("{url}/v1beta/models/example:generateContent"))
+                .json(&json!({"generationConfig":{"thinkingConfig":{"includeThoughts":true,"thinkingBudget":budget}}}))
+                .send().await.unwrap().json::<Value>().await.unwrap();
+            assert_eq!(response["generationConfig"]["thinkingConfig"], expected);
+        }
+        upstream.abort();
+        proxy.abort();
     }
 
     #[tokio::test]
