@@ -426,6 +426,39 @@ final class OverlayTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(glow.path).boundingBox.width, try XCTUnwrap(outline).width)
     }
 
+    @MainActor func testHoverRevealsAndDismissesConversationAction() async throws {
+        try XCTSkipIf(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, "Requires motion")
+        let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
+        let overlay = Overlay()
+        overlay.show(true)
+        defer { overlay.show(false) }
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
+        func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
+        let button = try XCTUnwrap(descendants(try XCTUnwrap(panel.contentView)).compactMap { $0 as? NSButton }.first { $0.accessibilityLabel() == "Start conversation" })
+        let face = try XCTUnwrap(button.superview)
+        func checkTransition() async throws {
+            for _ in 0..<20 {
+                try await Task.sleep(for: .milliseconds(10))
+                if !button.isHidden, let opacity = button.layer?.presentation()?.opacity, opacity > 0, opacity < 1,
+                   let width = face.layer?.presentation()?.bounds.width, width > TalkDesign.idleSize.width, width < 84 { return }
+            }
+            XCTFail("The conversation icon should fade as the capsule changes width")
+        }
+        face.mouseEntered(with: NSEvent())
+        try await checkTransition()
+        try await Task.sleep(for: .milliseconds(320))
+        XCTAssertTrue(button.isEnabled)
+        face.mouseExited(with: NSEvent())
+        XCTAssertFalse(button.isEnabled)
+        try await checkTransition()
+        face.mouseEntered(with: NSEvent())
+        try await Task.sleep(for: .milliseconds(320))
+        XCTAssertFalse(button.isHidden, "An interrupted dismissal must leave the action visible")
+        face.mouseExited(with: NSEvent())
+        try await Task.sleep(for: .milliseconds(320))
+        XCTAssertTrue(button.isHidden)
+    }
+
     @MainActor func testRightStatusOpensAndClosesWithoutMovingThePill() async throws {
         guard !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else { throw XCTSkip("Requires motion") }
         let windows = Set(NSApplication.shared.windows.map(\.windowNumber))

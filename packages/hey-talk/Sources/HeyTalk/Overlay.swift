@@ -301,7 +301,8 @@ final class Overlay {
         pillContent.makeMenu = { [weak self] in self?.contextMenu() ?? NSMenu() }
         pillContent.onHover = { [weak self] hover in
             guard let self, self.hover != hover else { return }
-            self.hover = hover; self.pillContent.emphasized = hover; self.layout(animated: false)
+            self.hover = hover; self.pillContent.emphasized = hover
+            if self.canRevealChat { self.layout(animated: true) }
         }
         pillContent.onDrag = { [weak self] in
             self?.dockMotion?.stop(); self?.dockMotion = nil; self?.dockRestY = nil
@@ -610,7 +611,11 @@ final class Overlay {
         let action = waitingForAudio ? "Opening microphone" : phase == .listening ? "Listening · Speak to record" : phase == .recording ? "Stop dictation" : phase == .processing ? "Transcribing" : "Start dictation"
         pillContent.setAccessibilityLabel((autoMode ? "Auto mode · " : "") + action + " · AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off")")
     }
+    private var canRevealChat: Bool {
+        phase == .idle && conversation == nil && connecting.isHidden && confirmation.isHidden && notice == nil && status == nil && pasteWait == nil
+    }
     private func layout(animated: Bool) {
+        let animate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let duration = phase == .recording ? 0.16 : 0.3
         if #available(macOS 26, *), let glass = pill as? NSGlassEffectView {
             let style: NSGlassEffectView.Style = pasteWait != nil || notice != nil || status != nil || !confirmation.isHidden ? .regular : .clear
@@ -623,8 +628,10 @@ final class Overlay {
         let statusWidth = labelX + connecting.frame.width + (compactVoice ? labelX : 12)
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26 + (editSpelling.isHidden ? 0 : 26)
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
-        let showChat = hover && phase == .idle && conversation == nil && !showConnecting && confirmation.isHidden && notice == nil && status == nil && pasteWait == nil
-        chatButton.isHidden = !showChat
+        let showChat = hover && canRevealChat
+        chatButton.isEnabled = showChat
+        if showChat { chatButton.isHidden = false }
+        else if !animate || !canRevealChat { chatButton.isHidden = true }
         let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : showChat ? NSSize(width: 84, height: 36) : TalkDesign.idleSize)
         // Status messages grow only the right edge of the window, keeping the recording control still.
@@ -633,7 +640,7 @@ final class Overlay {
         let target = NSSize(width: max(baseWidth, anchorX + size.width / 2 + rightExtension + 8), height: size.height + 48)
         layoutRevision += 1
         let revision = layoutRevision
-        let shrinking = animated && panel.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion &&
+        let shrinking = animate && panel.isVisible &&
             (target.width < panel.frame.width || target.height < panel.frame.height)
         if shrinking {
             // Keep closing glass inside the transparent window until its last frame.
@@ -662,7 +669,7 @@ final class Overlay {
         }
         let outline = CGPath(roundedRect: frame, cornerWidth: 18, cornerHeight: 18, transform: nil)
         let autoOutline = CGPath(roundedRect: frame.insetBy(dx: -0.5, dy: -0.5), cornerWidth: 18.5, cornerHeight: 18.5, transform: nil)
-        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+        if animate {
             for key in ["path", "shadowPath"] {
                 let transition = CABasicAnimation(keyPath: key)
                 transition.fromValue = depth.presentation()?.value(forKey: key) ?? depth.value(forKey: key)
@@ -684,15 +691,17 @@ final class Overlay {
         let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (showChat ? 13 : (size.width - 22) / 2)
         chatButton.frame = NSRect(x: 44, y: 3, width: 32, height: 30)
         NSAnimationContext.runAnimationGroup { context in
-            context.duration = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? duration : 0
+            context.duration = animate ? duration : 0
             context.timingFunction = CAMediaTimingFunction(controlPoints: 0.2, 0, 0, 1)
             pill.animator().frame = frame
             pillContent.animator().frame = NSRect(origin: .zero, size: frame.size)
+            chatButton.animator().alphaValue = showChat ? 1 : 0
             status?.animator().alphaValue = closingStatus ? 0 : 1
             identity.animator().frame = NSRect(x: markX, y: 7, width: 22, height: 22)
             wave.animator().frame = NSRect(x: contentOrigin + 39, y: 6, width: 52, height: 24)
         } completionHandler: { [weak self] in
             guard let self, layoutRevision == revision else { return }
+            if !showChat { chatButton.isHidden = true }
             if closingStatus { clearStatus(); layout(animated: false) }
             else if shrinking { layout(animated: false) }
         }
