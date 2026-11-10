@@ -1,8 +1,32 @@
 import AppKit
+import TalkCore
 import XCTest
 @testable import HeyTalk
 
 final class T3ToolsTests: XCTestCase {
+    @MainActor
+    func testLiveThreadSwitchKeepsVoiceConversation() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_T3_VOICE_TEST"] == "1" else { throw XCTSkip("Requires a running voice conversation and a focused T3 composer") }
+        func checkVoice() throws {
+            let status = try ControlSocket.request(["command": "status"])
+            let chat = try XCTUnwrap(status["conversation"] as? [String: Any])
+            XCTAssertEqual(chat["microphone"] as? Bool, true)
+            XCTAssertEqual(status["state"] as? String, "idle", "Dictation must not take over the new composer")
+            XCTAssertEqual(status["escape_registered"] as? Bool, false, "T3 must own its navigation keys")
+        }
+        try checkVoice()
+        let app = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.t3tools.t3code").first)
+        app.activate(options: [])
+        try await Task.sleep(for: .milliseconds(200))
+        let field = try XCTUnwrap(FocusedInput.read(app: app, forAuto: false))
+        let original = try XCTUnwrap(field.document.flatMap(FocusedInput.threadLink))
+        defer { NSWorkspace.shared.open(original) }
+        let next = await field.nextThread(isCurrent: { true })
+        XCTAssertNotEqual(try XCTUnwrap(next).document, field.document)
+        try await Task.sleep(for: .seconds(2.2)) // Past dictation’s focus-loss grace period.
+        try checkVoice()
+    }
+
     @MainActor
     func testLiveNavigationPreservesDraftAndClipboard() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_T3_TOOLS_TEST"] == "1" else { throw XCTSkip("Requires a focused T3 thread with Auto off") }
