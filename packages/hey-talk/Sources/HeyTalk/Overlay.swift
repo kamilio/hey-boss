@@ -577,7 +577,7 @@ final class Overlay {
             let color = conversation["approval"] as? Bool == true ? NSColor.systemOrange : recording ? TalkDesign.active : TalkDesign.accent
             pillContent.accent = color; identity.color = color; wave.color = color
             autoHalo.isHidden = true
-            pillContent.toolTip = (conversation["detail"] as? String ?? "") + " · " + (conversation["action"] as? String ?? "") + " · Hyper+R"
+            pillContent.toolTip = (conversation["detail"] as? String ?? "") + " · " + (conversation["action"] as? String ?? "") + " · Hyper+R · Switch to dictation: Hyper+C"
             return
         }
         let tint = resultIcon.isHidden ? nil : resultIcon.contentTintColor

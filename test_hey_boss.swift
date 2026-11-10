@@ -72,6 +72,30 @@ func audit() {
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DESKTOP_ACTIONS_ONLY"] == "1" { auditDesktopActions(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_REVIEW_ECHO"] == "1" { auditReviewEcho(); return }
     #if canImport(FoundationModels)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DICTATION_HANDOFF"] {
+        app.finishLaunching()
+        let url = URL(fileURLWithPath: root).appendingPathComponent("current.json")
+        try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! Data(#"{"messages":[{"text":"Keep this message","speaker":"You"}]}"#.utf8).write(to: url)
+        let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
+        for phase: VoiceConversation.Phase in [.recording, .speaking] {
+            let mic = ReviewAudio()
+            chat.audio = mic
+            if phase == .recording {
+                chat.state(.listening, "Listening")
+                chat.receive(.began); chat.receive(.pcm(Data(repeating: 1, count: 640)))
+                precondition(chat.recording?.count == 640)
+            } else { chat.state(.speaking, "Speaking") }
+            precondition(chat.releaseForDictation())
+            chat.receive(.ended); chat.receive(.began); chat.receive(.pcm(Data(count: 640))); chat.receive(.ended)
+            precondition(mic.stopped && chat.audio == nil && chat.recording == nil && chat.phase == .idle)
+            precondition(chat.voiceStatus["active"] as? Bool == false && !chat.releaseForDictation())
+            let reopened = VoiceConversation(cli: chat.cli, saveURL: url)
+            precondition(reopened.rows.map(\.stringValue) == ["Keep this message"])
+        }
+        print("PASS: recording and playback released; partial speech discarded; saved chat preserved")
+        return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_POLISH"] {
         app.finishLaunching(); auditChatPolish(root); return
     }
