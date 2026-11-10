@@ -843,7 +843,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/css; charset=utf-8",
                 include_bytes!("web/artifacts.css"),
             )),
-            "/jobs" => Some(("text/html; charset=utf-8", include_bytes!("web/jobs.html"))),
+            "/jobs" | "/runs" => Some(("text/html; charset=utf-8", include_bytes!("web/jobs.html"))),
             "/jobs.js" => Some((
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/jobs.js"),
@@ -962,6 +962,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/agents/session"
                     | "/merged-prs"
                     | "/jobs"
+                    | "/runs"
                     | "/artifacts"
                     | "/errors"
                     | "/prompts"

@@ -1,5 +1,7 @@
 # Scheduled jobs
 
+**Scheduled jobs** lists recurring definitions, including paused schedules. **Runs** lists individual executions, newest first: one-off commands, scheduled occurrences, and manual **Run now** attempts. A schedule keeps its own run history. Old one-off job links open the corresponding run.
+
 `hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs to a running worker for the project. Jobs use no task slots, so a full worker can still run them. Without a running worker, runs wait.
 
 Placement is automatic by default. In the editor, choose **Specific machines** and add machines in priority order; move a fallback up to change the order. The CLI accepts repeated `--machine NODE_ID` on create/edit, and the definition API accepts `"machines":["primary-node-id","fallback-node-id"]`. IDs are the stable fleet node IDs, not hostnames. The first connected, fresh machine with an eligible project worker and harness wins. If none qualify, the run waits; unlisted machines are never used. One entry pins a job to one machine. Omit the list (or use an empty list) to restore automatic placement. Edits replace the list along with the other definition fields. Each run keeps its revision’s list; changing it affects future runs. Fallback applies before assignment; a disconnected owner retains custody until the existing fenced handoff protocol permits release.

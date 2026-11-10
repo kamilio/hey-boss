@@ -1544,3 +1544,50 @@ fn selected_machine_mode_requires_an_explicit_nonempty_subset() {
         assert_eq!(definition.validate().is_ok(), valid);
     }
 }
+
+#[test]
+fn runs_include_commands_and_schedules_but_only_schedules_appear_in_jobs_and_calendar() {
+    let mut f = Fixture::new();
+    f.create("schedule", 0);
+    let read = |v| serde_json::from_value(v).unwrap();
+    f.op(
+        read(
+            json!({"command":"submit","id":"probe","execution":{"program":"uname","args":["-s"]}}),
+        ),
+        H,
+    )
+    .unwrap();
+    f.op(
+        JobOperation::RunNow {
+            id: "schedule".into(),
+        },
+        H,
+    )
+    .unwrap();
+    let jobs = f.op(read(json!({"command":"list","limit":1})), H).unwrap();
+    assert_eq!(jobs["jobs"][0]["id"], "schedule");
+    assert!(jobs["next_cursor"].is_null());
+    let first = f.op(read(json!({"command":"runs","limit":1})), H).unwrap();
+    let second = f
+        .op(
+            read(json!({"command":"runs","limit":1,"before":first["next_cursor"]})),
+            H,
+        )
+        .unwrap();
+    let ids: Vec<_> = [&first, &second]
+        .into_iter()
+        .map(|page| page["runs"][0]["snapshot"]["job_id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&"schedule") && ids.contains(&"probe"));
+    assert_ne!(first["runs"][0]["id"], second["runs"][0]["id"]);
+    assert!(second["next_cursor"].is_null());
+    for command in ["calendar", "calendar_entries"] {
+        let calendar = f
+            .op(
+                read(json!({"command":command,"start":"1970-01-01","days":1,"timezone":"UTC"})),
+                H,
+            )
+            .unwrap();
+        assert!(!calendar.to_string().contains("probe"), "{calendar}");
+    }
+}

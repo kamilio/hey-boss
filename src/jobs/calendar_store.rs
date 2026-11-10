@@ -83,7 +83,7 @@ fn summary_day(
     // Aggregate in SQLite; deserialize at most SAMPLE history snapshots, even
     // when a minute schedule has thousands of executions in the visible range.
     let history = db.query_collect(
-        &format!("SELECT job_id,state,COUNT(*),MIN(scheduled_at),MAX(scheduled_at),MIN(id) FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) GROUP BY job_id,state"),
+        &format!("SELECT job_id,state,COUNT(*),MIN(scheduled_at),MAX(scheduled_at),MIN(id) FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND json_extract(snapshot,'$.definition.execution') IS NULL AND (?4 IS NULL OR job_id=?4) GROUP BY job_id,state"),
         params![project, day.start, day.end, q.job_id],
         |r| -> rusqlite::Result<_> { Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?,r.get::<_,String>(5)?)) },
     )?;
@@ -163,7 +163,7 @@ pub(super) fn read(
         let limit = PAGE + 1;
         let mut entries = Vec::new();
         let lower = q.cursor.as_ref().map_or(day.start, |c| c.at.max(day.start));
-        let runs=db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND (?4 IS NULL OR job_id=?4) AND (scheduled_at>?5 OR (scheduled_at=?5 AND 'run:'||id>?6)) ORDER BY scheduled_at,id LIMIT ?7"),params![project,lower,day.end,q.job_id,q.cursor.as_ref().map_or(i64::MIN,|c|c.at),q.cursor.as_ref().map_or("",|c|c.key.as_str()),limit],run_row)?;
+        let runs=db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM {history_table} WHERE project_id=?1 AND scheduled_at>=?2 AND scheduled_at<?3 AND json_extract(snapshot,'$.definition.execution') IS NULL AND (?4 IS NULL OR job_id=?4) AND (scheduled_at>?5 OR (scheduled_at=?5 AND 'run:'||id>?6)) ORDER BY scheduled_at,id LIMIT ?7"),params![project,lower,day.end,q.job_id,q.cursor.as_ref().map_or(i64::MIN,|c|c.at),q.cursor.as_ref().map_or("",|c|c.key.as_str()),limit],run_row)?;
         entries.extend(runs.into_iter().map(Entry::run));
         for (job, schedule) in jobs.iter().zip(&schedules) {
             let mut after = (day.start - 1).max(now).max(job.schedule_from);

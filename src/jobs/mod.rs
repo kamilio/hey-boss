@@ -207,6 +207,10 @@ pub enum Operation {
         through: i64,
         limit: usize,
     },
+    Runs {
+        before: Option<(i64, String)>,
+        limit: usize,
+    },
     History {
         id: String,
         before: Option<i64>,
@@ -331,6 +335,12 @@ impl Operation {
             } => {
                 validate_id(id)?;
                 range(*after, *through, *limit)?;
+            }
+            Self::Runs { before, limit } => {
+                page(*limit)?;
+                if let Some((_, id)) = before {
+                    validate_id(id)?;
+                }
             }
             Self::History { id, before, limit } => {
                 validate_id(id)?;

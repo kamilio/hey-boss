@@ -6,5 +6,6 @@
   {"paths":["/project-resource"],"present":"issue","selector":"issue","number":true,"entity":"issue","collection":"issues"},
   {"paths":["/agents/session"],"selector":"run","entity":"agent","collection":"agents"},
   {"paths":["/agents","/workers"],"entity":"agents","collection":"agents"},
-  {"paths":["/jobs"],"selector":"job","entity":"job","collection":"jobs"}
+  {"paths":["/jobs"],"selector":"job","entity":"job","collection":"jobs"},
+  {"paths":["/runs"],"selector":"run","entity":"run","collection":"runs"}
 ]

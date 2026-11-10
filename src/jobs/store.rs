@@ -561,7 +561,7 @@ impl Store {
                     limit,
                     include_deleted,
                 } => {
-                    let jobs=tx.query_collect(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE project_id=?1 AND id>?2 AND (?3 OR deleted_at IS NULL) ORDER BY id LIMIT ?4"),params![project.id,after.as_deref().unwrap_or(""),include_deleted,limit+1],job_row)?;
+                    let jobs=tx.query_collect(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE project_id=?1 AND id>?2 AND json_extract(snapshot,'$.definition.execution') IS NULL AND (?3 OR deleted_at IS NULL) ORDER BY id LIMIT ?4"),params![project.id,after.as_deref().unwrap_or(""),include_deleted,limit+1],job_row)?;
                     let next = (jobs.len() > *limit).then(|| jobs[limit - 1].id.clone());
                     let summaries = jobs
                         .into_iter()
@@ -597,6 +597,16 @@ impl Store {
                         Vec::new()
                     };
                     json!({"job_id":id,"revision":job.revision,"occurrences":dates})
+                }
+                JobOperation::Runs { before, limit } => {
+                    let history = history_table(&tx)?;
+                    let (at, id) = before
+                        .as_ref()
+                        .map_or((i64::MAX, ""), |(at, id)| (*at, id.as_str()));
+                    let runs=tx.query_collect(&format!("SELECT {RUN_COLUMNS} FROM {history} WHERE project_id=?1 AND (scheduled_at,id)<(?2,?3) ORDER BY scheduled_at DESC,id DESC LIMIT ?4"),params![project.id,at,id,limit+1],run_row)?;
+                    let next = (runs.len() > *limit)
+                        .then(|| (runs[limit - 1].scheduled_at, &runs[limit - 1].id));
+                    json!({"next_cursor":next,"runs":&runs[..runs.len().min(*limit)]})
                 }
                 JobOperation::History { id, before, limit } => {
                     get_job(&tx, &project.id, id)?;
