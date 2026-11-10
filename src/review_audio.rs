@@ -241,7 +241,15 @@ pub fn stream(
                     output.write_all(&prior)?;
                 }
             }
-            Some(Edge::End) => output.write_all(&1u16.to_le_bytes())?,
+            Some(Edge::End) => {
+                if let Some(detector) = &mut chat_vad {
+                    detector.reset();
+                    pending.clear();
+                    probability = 0.0;
+                    voiced = false;
+                }
+                output.write_all(&1u16.to_le_bytes())?;
+            }
             None if turn.active => {
                 output.write_all(&640u16.to_le_bytes())?;
                 output.write_all(&frame)?;
