@@ -71,6 +71,20 @@ try{
   console.log('Scheduled job execution UI passed: project defaults, project switching, provider scope, blank/custom/reset persistence, live settings, responsive light/dark layout.');
 }finally{
   await browser?.close();
+  const exec=cli(['exec','--project','named:Execution','--json','submit','--request-id','platform-probe','--','uname','-s']);
+  const jobId=exec.run.snapshot.job_id;
+  await page.route('**/api/action',async route=>{
+    const op=route.request().postDataJSON().operation?.operation;
+    if(op?.command!=='view'||op.id!==jobId)return route.continue();
+    const response=await route.fetch(),data=await response.json();
+    data.job.revision++; // Replicated jobs can have a different local edit revision.
+    return route.fulfill({response,json:data});
+  });
+  await page.goto(new URL('/jobs#project=named%3AExecution&job='+jobId,origin).href);
+  await page.getByRole('heading',{name:'uname -s'}).waitFor();
+  await page.locator('.job-run').waitFor();
+  assert.match(await page.locator('#job-panel').innerText(),/platform-probe/);
+  assert.equal(await page.locator('#job-save').count(),0);
   if(child&&child.exitCode===null)await new Promise(resolve=>{child.once('exit',resolve);child.kill('SIGKILL');});
   await rm(root,{recursive:true,force:true});
 }
