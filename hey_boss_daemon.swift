@@ -8730,6 +8730,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
     }
+    func releaseForDictation() -> Bool {
+        guard voiceStatus["active"] as? Bool == true else { return false }
+        window.orderOut(nil)
+        releaseStandby()
+        stop("Voice off")
+        publishVoiceStatus()
+        return true
+    }
     func stop(_ message: String) {
         if answering || heldReply { interruptPlayback() }
         heldReply = false; transcriptionTask?.cancel(); transcriptionTask = nil
@@ -10387,10 +10395,14 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control"].contains(request.command) {
+                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control", "conversation_release"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
+                                if request.command == "conversation_release" {
+                                    let released = overview.currentConversation().releaseForDictation()
+                                    reply.send(["status": released ? "ok" : "unhandled"]); return
+                                }
                                 if request.command == "conversation_status" {
                                     reply.send(["status": "ok", "conversation": overview.conversationStatus]); return
                                 }

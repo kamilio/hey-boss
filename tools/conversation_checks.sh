@@ -28,3 +28,4 @@ for turn in reply blue; do
 done
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT="$root" "$2"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_FOREGROUND_MIC="$root" "$2"
+HEY_BOSS_AUDIT_DICTATION_HANDOFF="$root/handoff" "$2"

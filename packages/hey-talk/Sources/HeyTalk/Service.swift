@@ -46,6 +46,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var conversationLevel = 0.0
     private var conversationRevision = 0
     private var openingConversation = false
+    private var switchingToDictation = false
     private var hotkey: Hotkey?
     private var menuItem: NSStatusItem?
     private var pendingReply: (([String: Any]) -> Void)?
@@ -118,7 +119,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .toggleAuto: self.toggleAutoMode()
             case .toggleSpeech: self.speech.toggle()
             case .toggleSpeechMode: self.speech.toggleEnabled()
-            case .startConversation: self.startConversation()
+            case .startConversation:
+                if self.conversation == nil { self.startConversation() }
+                else { self.switchToDictation() }
             case .chatWithContext: self.chatWithContext()
             case .cancel:
                 guard self.conversation == nil else { return }
@@ -230,7 +233,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     @objc private func startConversation() { openConversation(withContext: false) }
     @objc private func chatWithContext() { openConversation(withContext: true) }
     private func openConversation(withContext: Bool) {
-        guard !openingConversation else { return }
+        guard !openingConversation, !switchingToDictation else { return }
         let app = withContext ? NSWorkspace.shared.frontmostApplication : nil
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
@@ -280,7 +283,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     @objc private func conversationChanged(_ notification: Notification) {
         if let level = notification.userInfo?["level"] as? Double { conversationLevel = level; return }
-        guard !openingConversation else { return }
+        guard !openingConversation, !switchingToDictation else { return }
         guard let state = notification.userInfo as? [String: Any] else { return }
         applyConversation(state)
     }
@@ -290,13 +293,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         refreshConversation()
     }
     private func refreshConversation() {
-        guard !openingConversation else { return }
+        guard !openingConversation, !switchingToDictation else { return }
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.desktop").isEmpty else { applyConversation(nil); return }
         let revision = conversationRevision
         contextQueue.async {
             guard let state = (try? self.chatRequest(["command": "conversation_status", "sync": false]))?["conversation"] as? [String: Any] else { return }
             DispatchQueue.main.async {
-                guard self.conversationRevision == revision, !self.openingConversation else { return }
+                guard self.conversationRevision == revision, !self.openingConversation, !self.switchingToDictation else { return }
                 self.applyConversation(state)
             }
         }
@@ -331,7 +334,24 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         hotkey?.captureEscape(speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
     }
+    private func switchToDictation() {
+        guard !openingConversation, !switchingToDictation else { return }
+        switchingToDictation = true
+        contextQueue.async {
+            let result = try? self.chatRequest(["command": "conversation_release", "sync": false])
+            DispatchQueue.main.async {
+                self.switchingToDictation = false
+                guard result?["status"] as? String == "ok" else {
+                    self.refreshConversation()
+                    self.overlay?.error("Couldn’t switch to dictation."); return
+                }
+                self.applyConversation(nil)
+                self.start(showOverlay: self.overlayEnabled, paste: true) { _ in }
+            }
+        }
+    }
     private func controlConversation(_ action: String = "toggle") {
+        guard !switchingToDictation else { return }
         if openingConversation {
             openingConversation = false; applyConversation(nil)
             contextQueue.async { _ = try? self.chatRequest(["command": "conversation_control", "title": "stop", "sync": false]) }
@@ -447,7 +467,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } else { autoSubmitKey.stop() }
     }
     private func focusedInputChanged(_ input: FocusedInput?, notice: String? = nil) {
-        guard conversation == nil, !openingConversation else { return }
+        guard conversation == nil, !openingConversation, !switchingToDictation else { return }
         if input != autoTarget { autoSubmitKey.passNextEnter = false }
         if session.phase == .listening, input != autoTarget {
             cancel()
