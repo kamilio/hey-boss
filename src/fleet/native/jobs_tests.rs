@@ -312,6 +312,7 @@ impl Fixture {
                 cron: "* * * * *".into(),
                 timezone: "UTC".into(),
                 executable: None,
+                condition: None,
                 execution: None,
                 harness: "codex".into(),
                 model: model.into(),
@@ -1649,4 +1650,56 @@ fn exec_file_reads_use_the_submitting_owner_after_peer_replication() {
     assert_eq!(client.join().unwrap().unwrap()["data"], "aW5wdXQgYnl0ZXM=");
     drop(relay);
     fs::remove_dir_all(state).unwrap();
+}
+
+#[test]
+fn condition_controls_agent_launch_and_saved_history() {
+    if isolated("condition_controls_agent_launch_and_saved_history", &[]) {
+        return;
+    }
+    let mut f = Fixture::new();
+    use std::os::unix::fs::PermissionsExt;
+    let check = f.root.join("check-build");
+    for (id, body, expected) in [
+        ("healthy", "echo false", "skipped"),
+        ("broken", "echo true", "succeeded"),
+        ("numeric", "echo 1", "failed"),
+        ("zero", "echo 0", "failed"),
+        ("empty", "exit 0", "failed"),
+        ("bad-exit", "echo true; exit 1", "failed"),
+    ] {
+        fs::write(&check, format!("#!/bin/sh\necho checking >&2\n{body}\n")).unwrap();
+        fs::set_permissions(&check, fs::Permissions::from_mode(0o700)).unwrap();
+        f.op(
+            serde_json::from_value(json!({"command":"create","id":id,"enabled":false,
+            "definition":{"name":id,"cron":"*/5 * * * *","timezone":"UTC","harness":"codex",
+            "model":"exact-model","condition":"./check-build"}, "markdown":MARKDOWN}))
+            .unwrap(),
+        );
+        let run = f.op(Operation::RunNow { id: id.into() })["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+        let dispatch = f
+            .store
+            .job_dispatches(&f.ctx.node)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.run.id == run)
+            .unwrap();
+        receive(&f.ctx, &dispatch, MARKDOWN).unwrap();
+        execute(&f.ctx, &dispatch).unwrap();
+        let report = f.report(&dispatch);
+        assert_eq!(report.state, expected, "{id}: {report:?}");
+        assert_eq!(report.session_id.is_some(), expected == "succeeded");
+        f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+        assert_eq!(
+            f.op(Operation::Run {
+                id: id.into(),
+                run_id: run
+            })["run"]["state"],
+            expected
+        );
+    }
 }

@@ -269,7 +269,7 @@ fn execution_for_observation(db: &Connection, last: &Run) -> Result<Option<Run>>
     // Materialize the occurrence first so SQLite uses distributed_job_calendar
     // instead of scanning the job's full history to satisfy sequence ordering.
     let candidates = db.query_collect(
-        &format!("WITH occurrence AS MATERIALIZED (SELECT * FROM distributed_job_runs WHERE project_id=?1 AND scheduled_at=?2) SELECT {RUN_COLUMNS} FROM occurrence WHERE job_id=?3 AND parent_run_id IS NULL AND trigger=?4 AND request_key IS ?5 AND machine IS NOT NULL AND state IN ('running','succeeded','failed','cancelled') ORDER BY sequence DESC"),
+        &format!("WITH occurrence AS MATERIALIZED (SELECT * FROM distributed_job_runs WHERE project_id=?1 AND scheduled_at=?2) SELECT {RUN_COLUMNS} FROM occurrence WHERE job_id=?3 AND parent_run_id IS NULL AND trigger=?4 AND request_key IS ?5 AND machine IS NOT NULL AND state IN ('running','succeeded','failed','cancelled','skipped') ORDER BY sequence DESC"),
         params![last.snapshot.project_id,last.scheduled_at,last.snapshot.job_id,last.trigger,last.request_key],
         run_row,
     )?;
@@ -457,6 +457,7 @@ impl Store {
                     cron: String::new(),
                     timezone: "UTC".into(),
                     executable: Some(execution.program.clone()),
+                    condition: None,
                     execution: Some(execution.clone()),
                     harness: String::new(),
                     model: String::new(),

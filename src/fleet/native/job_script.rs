@@ -52,20 +52,35 @@ pub(super) fn read_log(
     }))
 }
 
+pub(super) enum Program<'a> {
+    Job(&'a str),
+    Condition(&'a str),
+}
+
 pub(super) fn run(
     ctx: &Context,
     d: &Dispatch,
     report: &mut Report,
     cwd: &str,
-    executable: &str,
+    program: Program<'_>,
 ) -> Result<(String, Option<String>)> {
+    let condition = matches!(program, Program::Condition(_));
+    let executable = match program {
+        Program::Condition(s) | Program::Job(s) => s,
+    };
     let path = log_path(ctx, report);
     let mut log = OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
-        .open(path)?;
-    writeln!(log, "Executable: {executable}\nDirectory: {cwd}\n")?;
+        .read(condition)
+        .open(&path)?;
+    // The condition needs only its stdout verdict; no artifact survives the check.
+    if condition {
+        std::fs::remove_file(&path)?;
+    } else {
+        writeln!(log, "Executable: {executable}\nDirectory: {cwd}\n")?;
+    }
     let cwd = Path::new(cwd);
     let program = if executable.contains('/') {
         cwd.join(executable)
@@ -99,7 +114,11 @@ pub(super) fn run(
         .process_group(0)
         .stdin(Stdio::piped())
         .stdout(log.try_clone()?)
-        .stderr(log);
+        .stderr(if condition {
+            Stdio::inherit()
+        } else {
+            Stdio::from(log.try_clone()?)
+        });
     command
         .env_remove("HEY_BOSS_EXEC_HARNESS")
         .env_remove("HEY_BOSS_EXEC_MODEL")
@@ -125,12 +144,25 @@ pub(super) fn run(
             return Ok(false);
         }
         ctx.db()?.execute("UPDATE local_job_executions SET pid=?3,process_start=?4,submitted=1 WHERE run_id=?1 AND generation=?2",params![d.run.id,d.generation,pid,start])?;
-        report.started_at = Some(now().max(d.run.created_at));
-        report.state = "running".into();
+        if condition {
+            report.reason = Some("Checking job condition".into());
+        } else {
+            report.reason = None;
+            report.started_at = Some(now().max(d.run.created_at));
+            report.state = "running".into();
+        }
         save(ctx, report)?;
         child.stdin.take().unwrap().write_all(b"start\n")?;
         let mut published = std::time::Instant::now();
         loop {
+            if condition && published.elapsed() >= Duration::from_secs(60) {
+                return Err(replica::invalid("Condition timed out after 60 seconds"));
+            }
+            if condition && log.metadata()?.len() > 4096 {
+                return Err(replica::invalid(
+                    "Condition must print only JSON true or false (at most 4096 bytes)",
+                ));
+            }
             if published.elapsed() >= Duration::from_secs(1) && spec.is_some() {
                 report.log = read_log(ctx, report, 0)?;
                 save(ctx, report)?;
@@ -165,7 +197,7 @@ pub(super) fn run(
         if group_empty(pid)? {
             return Ok(if !result? {
                 (
-                    if report.started_at.is_none() && revoked(ctx, d)? {
+                    if report.started_at.is_none() && !condition && revoked(ctx, d)? {
                         "released"
                     } else {
                         "cancelled"
@@ -173,6 +205,26 @@ pub(super) fn run(
                     .into(),
                     Some("Script stopped".into()),
                 )
+            } else if condition && !status.success() {
+                (
+                    "failed".into(),
+                    Some(format!("Condition {executable}: {status}")),
+                )
+            } else if condition {
+                log.rewind()?;
+                let mut output = Vec::new();
+                log.take(4097).read_to_end(&mut output)?;
+                match (output.len() <= 4096)
+                    .then(|| serde_json::from_slice::<bool>(&output).ok())
+                    .flatten()
+                {
+                    Some(true) => ("succeeded".into(), None),
+                    Some(false) => ("skipped".into(), Some("Condition returned false".into())),
+                    None => (
+                        "failed".into(),
+                        Some("Condition must print only JSON true or false".into()),
+                    ),
+                }
             } else if status.success() {
                 ("succeeded".into(), None)
             } else {

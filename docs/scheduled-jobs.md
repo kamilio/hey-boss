@@ -42,6 +42,8 @@ Every agent run starts a **New thread** by default, including existing jobs. Cho
 
 Resume starts fresh when that machine has no saved thread for the job or its latest thread used a different harness. Saved references survive worker restarts and include Pi’s exact session file. Threads are never transferred between machines or resumed while their previous execution is active. A missing or rejected saved thread fails visibly rather than silently creating a replacement. Worktree creation still follows the assigned worker’s policy; resuming a thread does not restore a deleted worktree. The `job resume` command separately re-enables a paused schedule.
 
+To check a build every five minutes, use `*/5 * * * *` and set **Condition script** (CLI: `--condition ./scripts/build-is-broken`). The assigned worker runs the executable in its project checkout before each scheduled or manual run. Exit successfully and print only JSON `true` to start the job or `false` to skip it. Empty output, numbers, nonzero exits, or a check taking over 60 seconds fail the run without starting the job. Leave the field empty for an unconditional job.
+
 Run Now can execute a paused schedule without enabling it. Use the same request ID to retry an uncertain request; overlapping scheduled/manual occurrences are recorded as skipped. Stop takes an exact run ID and cancels only its owned process group. Pause/delete affect future scheduling and retain current executions and history.
 
 Each occurrence creates only a Jobs history entry. It does not create an issue, allocate an issue number, or reserve a task slot. The entry records its worker, machine, session and outcome. Existing task links from older versions remain available.

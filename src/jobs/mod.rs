@@ -35,6 +35,8 @@ pub struct Definition {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<command::Spec>,
     /// Empty Codex model inherits the project's current execution settings.
     #[serde(default)]
@@ -56,6 +58,12 @@ impl Definition {
     }
     pub fn validate(&self) -> Result<()> {
         identifier(&self.name, "job name", 256)?;
+        if let Some(condition) = &self.condition {
+            identifier(condition, "condition executable", 4096)?;
+            if self.execution.is_some() {
+                return Err(Error::invalid("One-shot commands cannot have a condition"));
+            }
+        }
         if let Some(executable) = &self.executable {
             identifier(executable, "executable", 4096)?;
             if !self.harness.is_empty()
