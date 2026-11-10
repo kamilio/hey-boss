@@ -68,6 +68,11 @@ const HeyBossJobs = (() => {
   async function start() {
     const $=s=>document.querySelector(s), mobile=document.documentElement.dataset.issueMobile==='true';
     let boot,context,rows=[],next=null,selected=null,editor=null,generation=0,detailGeneration=0,modelGeneration=0,previewGeneration=0,previewTimer,refreshTimer,history=[],historyNext=null,busy=false,dirty=false,machines=[],catalogResult=null,filter='all';
+    const runsPage=location.pathname==='/runs';
+    let selectedRun=null;
+    const source=run=>run.snapshot.definition.execution?'One-off command':run.trigger==='manual'?'Run now':'Scheduled';
+    const runName=run=>{const d=run.snapshot.definition;return d.execution?[d.execution.program,...d.execution.args].map(s=>/^[\w./-]+$/.test(s)?s:JSON.stringify(s)).join(' '):d.name;};
+    const runUrl=run=>{const params=hash(run.snapshot.job_id);params.set('run',run.id);return '/runs#'+params;};
     const date=(ms,zone,short=false)=>ms==null?'—':new Date(ms).toLocaleString(undefined,{timeZone:zone,month:'short',day:'numeric',...(short?{}:{year:'numeric'}),hour:'numeric',minute:'2-digit',timeZoneName:'short'});
     const message=text=>{$('#jobs-error').textContent=text||'';$('#jobs-error').hidden=!text;};
     const persist=value=>{try{value?sessionStorage.setItem('jobs-pending',JSON.stringify(value)):sessionStorage.removeItem('jobs-pending');}catch{}};
@@ -92,6 +97,12 @@ const HeyBossJobs = (() => {
       $('#job-retry').disabled=busy;
     }
     function renderList(){
+      if(runsPage){
+        $('#jobs-count').textContent=rows.length?String(rows.length)+(next?' +':''):'';
+        $('#runs-status').textContent=rows.length?'':'No runs yet for this project.';
+        $('#runs-list').innerHTML=rows.map(run=>`<li><a class="runs-row" href="${esc(runUrl(run))}"><span><strong>${esc(runName(run))}</strong><small>${esc(source(run))}${run.target_machine?' · '+esc(run.target_machine):''}</small></span><time>${esc(date(run.scheduled_at,run.snapshot.definition.timezone,true))}</time><span class="job-outcome ${esc(run.state)}">${esc(run.state)}</span></a></li>`).join('');
+        $('#runs-more').hidden=!next;return;
+      }
       const focus=document.activeElement?.closest('[data-job-toggle]'),focusedId=focus?.dataset.jobToggle;
       $('#jobs-count').textContent=rows.length?String(rows.length)+(next?' +':''):'';
       for(const button of document.querySelectorAll('[data-filter]')){
@@ -103,15 +114,15 @@ const HeyBossJobs = (() => {
       $('#jobs-list').innerHTML=visible.map(job=>{
         const d=job.snapshot.definition,state=scheduleState(job),run=job.active_run||job.last_run;
         const outcome=run?({succeeded:'Succeeded',failed:'Failed',pending:'Waiting',running:'Running',cancelled:'Stopped',skipped:'Skipped'}[run.state]||run.state):'Not run yet';
-        return '<article class="job-row '+state.toLowerCase()+'"><a class="job-card" href="#'+esc(hash(job.id))+'" aria-current="'+(selected?.id===job.id)+'"><div class="job-identity"><span class="job-icon" data-icon="clock"></span><div><h2>'+esc(d.execution?.program||d.name)+'</h2><p>'+esc(d.executable?'Script · '+d.executable:d.harness+' · '+(d.model||'Project model'))+'</p></div></div><div class="job-schedule"><strong>'+esc(d.execution?'One-off command':summary(d.cron))+'</strong><span>'+esc(d.timezone)+'</span><code class="job-cron-caption">'+esc(d.cron)+'</code><small>'+(job.enabled&&job.next_at?'Next '+esc(date(job.next_at,d.timezone,true)):job.deleted_at?'History retained':'No upcoming runs')+'</small></div><div class="job-last-run"><span class="job-outcome '+esc(run?.state||'none')+'">'+esc(outcome)+'</span><small>'+(run?esc(date(run.started_at||run.scheduled_at,d.timezone,true)):'—')+'</small></div></a><div class="job-row-status">'+(d.execution?'<span class="job-state">One-off</span>':job.deleted_at?'<span class="job-state deleted">Deleted</span>':'<button class="job-switch" type="button" role="switch" aria-checked="'+job.enabled+'" aria-label="'+esc((job.enabled?'Disable ':'Enable ')+d.name)+'" data-job-toggle="'+esc(job.id)+'" data-mutation><span class="job-switch-track" aria-hidden="true"></span><span>'+state+'</span></button>')+'</div></article>';
+        return '<article class="job-row '+state.toLowerCase()+'"><a class="job-card" href="#'+esc(hash(job.id))+'" aria-current="'+(selected?.id===job.id)+'"><div class="job-identity"><span class="job-icon" data-icon="clock"></span><div><h2>'+esc(d.name)+'</h2><p>'+esc(d.executable?'Script · '+d.executable:d.harness+' · '+(d.model||'Project model'))+'</p></div></div><div class="job-schedule"><strong>'+esc(summary(d.cron))+'</strong><span>'+esc(d.timezone)+'</span><code class="job-cron-caption">'+esc(d.cron)+'</code><small>'+(job.enabled&&job.next_at?'Next '+esc(date(job.next_at,d.timezone,true)):job.deleted_at?'History retained':'No upcoming runs')+'</small></div><div class="job-last-run"><span class="job-outcome '+esc(run?.state||'none')+'">'+esc(outcome)+'</span><small>'+(run?esc(date(run.started_at||run.scheduled_at,d.timezone,true)):'—')+'</small></div></a><div class="job-row-status">'+(job.deleted_at?'<span class="job-state deleted">Deleted</span>':'<button class="job-switch" type="button" role="switch" aria-checked="'+job.enabled+'" aria-label="'+esc((job.enabled?'Disable ':'Enable ')+d.name)+'" data-job-toggle="'+esc(job.id)+'" data-mutation><span class="job-switch-track" aria-hidden="true"></span><span>'+state+'</span></button>')+'</div></article>';
       }).join('');
       $('#jobs-more').hidden=!next;HeyBossUI.icons($('#jobs-list'));pendingUI();
       if(focusedId){const control=[...document.querySelectorAll('[data-job-toggle]')].find(el=>el.dataset.jobToggle===focusedId);control?.focus({preventScroll:true});}
     }
     async function load(reset=true){
       const seq=++generation,ctx={...context};
-      try{const value=await read({command:'list',after:reset?null:next,limit:50,include_deleted:$('#jobs-deleted').checked},ctx);if(seq!==generation)return;
-        rows=reset?value.jobs:[...rows,...value.jobs];next=value.next_cursor;renderList();
+      try{const value=await read(runsPage?{command:'runs',before:reset?null:next,limit:50}:{command:'list',after:reset?null:next,limit:50,include_deleted:$('#jobs-deleted').checked},ctx);if(seq!==generation)return;
+        const page=runsPage?value.runs:value.jobs;rows=reset?page:[...rows,...page];next=value.next_cursor;renderList();
       }catch(e){if(seq===generation)message(e.message);}
     }
     async function service(){
@@ -122,24 +133,40 @@ const HeyBossJobs = (() => {
     function field(id,label,value,extra=''){return `<label class="job-field ${extra.includes('wide')?'wide':''}" for="${id}">${label}<input id="${id}" value="${esc(value)}" ${extra.replace('wide','')}></label>`;}
     async function open(id){
       const seq=++detailGeneration;modelGeneration++;previewGeneration++;editor=null;dirty=false;message('');$('#job-dialog-actions').hidden=true;
+      selected=null;selectedRun=null;
+      if(runsPage){
+        const runId=new URLSearchParams(location.hash.slice(1)).get('run');
+        if(runId){await openRun(id,runId,seq);}
+        return;
+      }
       if(id==='new'){selected=null;renderEditor(null,'');renderList();return;}
       if(!id){selected=null;$('#job-panel').innerHTML='';renderList();return;}
       $('#job-panel').innerHTML='<p class="job-help" role="status">Loading job…</p>';
-      try{const {job}=await read({command:'view',id});const revision=await read({command:'revision',id,revision:job.snapshot.revision});if(seq!==detailGeneration)return;
+      try{const {job}=await read({command:'view',id});if(seq!==detailGeneration)return;
+        if(job.snapshot.definition.execution){location.replace(job.last_run?runUrl(job.last_run):'/runs#'+hash());return;}
+        const revision=await read({command:'revision',id,revision:job.snapshot.revision});if(seq!==detailGeneration)return;
         selected=job;renderEditor(job,revision.instructions?.markdown||'');renderList();await loadHistory();
       }catch(e){if(seq===detailGeneration){message(e.message);$('#job-panel').innerHTML='<p class="job-help">Could not load this job. Refresh to retry.</p>';}}
+    }
+    async function openRun(id,runId,seq){
+      try{
+        const {run}=await read({command:'run',id,run_id:runId});if(seq!==detailGeneration)return;
+        if(run.session_id&&!machines.length){await service();if(seq!==detailGeneration)return;}
+        const fresh=selectedRun?.id!==run.id;
+        selectedRun=run;
+        if(fresh){
+          $('#job-dialog-actions').replaceChildren();
+          $('#job-dialog-label').textContent='Run details';
+          $('#job-panel').innerHTML=`<div class="job-panel-heading"><div><h2 id="job-panel-title">${esc(runName(run))}</h2><p class="job-panel-subtitle">${esc(source(run))}${run.snapshot.definition.execution?' · hey-boss exec':` · <a href="/jobs#${esc(hash(run.snapshot.job_id))}">View scheduled job</a>`}</p></div></div>${run.request_key&&run.snapshot.definition.execution?`<p class="job-help">Request: <code>${esc(run.request_key)}</code></p>`:''}<section class="job-section" id="job-history" aria-label="Execution"></section><button class="button danger" id="job-stop" type="button" data-mutation hidden>Stop current run</button>`;
+        }
+        $('#job-stop').hidden=!['pending','running'].includes(run.state);
+        $('#job-stop').onclick=()=>act({command:'stop',id,run_id:runId});
+        renderHistory([run],id);pendingUI();
+      }catch(e){if(seq===detailGeneration){message(e.message);if(!selectedRun)$('#job-panel').innerHTML='<h2 id="job-panel-title">Run unavailable</h2>';}}
     }
     const historySection='<section class="job-section" aria-label="Run history"><div class="job-history-heading"><h3>Run history</h3><button class="icon-button" id="job-history-refresh" type="button" aria-label="Refresh run history"><span data-icon="refresh"></span></button></div><div id="job-history" aria-live="polite"></div><button class="button" id="job-history-more" type="button" hidden>Older runs</button></section>';
     function renderEditor(job,markdown){
       const deleted=!!job?.deleted_at,d=job?.snapshot.definition||{name:'',cron:'0 9 * * *',timezone:Intl.DateTimeFormat().resolvedOptions().timeZone||'UTC',harness:'codex',model:''};
-      if(d.execution){
-        const argv=[d.execution.program,...d.execution.args].map(s=>/^[\w./-]+$/.test(s)?s:JSON.stringify(s)).join(' ');
-        $('#job-dialog-actions').replaceChildren();
-        $('#job-dialog-label').textContent='Command details';
-        $('#job-panel').innerHTML=`<div class="job-panel-heading"><div><h2 id="job-panel-title">${esc(argv)}</h2><p class="job-panel-subtitle">One-off command · hey-boss exec</p></div></div>${job.last_run?.request_key?`<p class="job-help">Request: <code>${esc(job.last_run.request_key)}</code></p>`:''}<button class="button danger" id="job-stop" type="button" data-mutation hidden>Stop current run</button>${historySection}`;
-        $('#job-history-refresh').onclick=()=>loadHistory();$('#job-history-more').onclick=()=>loadHistory(false);
-        HeyBossUI.icons($('#job-panel'));return;
-      }
       editor={job,markdown,targets:[...(d.machines||[])]};
       $('#job-panel').innerHTML=`<div class="job-panel-heading"><div><h2 id="job-panel-title">${job?esc(d.name):'New job'}</h2><p class="job-panel-subtitle">${deleted?'Deleted · Instructions and history are preserved':job?'Revision '+job.revision+' · '+(job.enabled?'Runs '+esc(summary(d.cron).toLowerCase()):'No upcoming runs'):'Choose what runs and when.'}</p></div>${job?`<span class="job-badge ${deleted?'deleted':job.enabled?'enabled':'disabled'}">${deleted?'Deleted':job.enabled?'Enabled':'Disabled'}</span>`:''}</div>
        ${job?`<div class="job-section job-controls"><h3 class="job-section-title">RUN CONTROLS</h3><div class="job-actions">${!deleted?'<button class="job-switch" id="job-enabled-toggle" type="button" role="switch" aria-checked="'+job.enabled+'" aria-label="'+(job.enabled?'Disable job':'Enable job')+'" data-mutation><span class="job-switch-track" aria-hidden="true"></span>'+(job.enabled?'Enabled':'Disabled')+'</button><button class="button" id="job-run" type="button" data-mutation>Run now</button>':''}<button class="button danger" id="job-stop" type="button" data-mutation hidden>Stop current run</button></div><p class="job-help" id="job-run-status">Run now also works while the schedule is disabled.</p></div>`:''}
@@ -292,6 +319,7 @@ const HeyBossJobs = (() => {
       if(busy)return;const command=retry?mutation.pending?.operation?.operation?.command:operation?.command,focusedToggle=document.activeElement?.dataset?.jobToggle;if(dirty&&!retry&&!['create','edit','run_now','stop'].includes(operation.command)&&!leave())return;busy=true;pendingUI();message('');const ctx={...context,project};
       try{const result=retry?await mutation.retry():await mutation.send(operation,project,context.host);if(result.job)dirty=false;
         if(result.job&&(selected?.id===result.job.id||['create','edit'].includes(command))){selected=result.job;const destination='#'+new URLSearchParams({project:result.job.project_id,...(ctx.host?{host:ctx.host}:{}),job:result.job.id});if(location.hash!==destination){location.hash=destination;return;}await open(result.job.id);}
+        else if(selectedRun)await openRun(selectedRun.snapshot.job_id,selectedRun.id,detailGeneration);
         else if(selected)await loadHistory();
         await load();
       }catch(e){message(e.code==='conflict'?(editor?'This job changed on another device. Your draft is preserved. Use Reload saved to review the latest revision before saving again.':'This job changed on another device. Refresh jobs before trying again.'):e.message);}
@@ -307,43 +335,53 @@ const HeyBossJobs = (() => {
         const active=latest.job.active_run;
         if($('#job-stop')){$('#job-stop').hidden=!active;$('#job-stop').onclick=()=>act({command:'stop',id:job.id,run_id:active.id});}
         if($('#job-run-status'))$('#job-run-status').textContent=active?(active.reason||`${active.state==='running'?'Running':'Pending'} · Stop affects this execution only.`):job.deleted_at?'This job is deleted. Saved runs remain available.':'Run now also works while the schedule is disabled.';
+        renderHistory(history,job.id);
+        $('#job-history-more').hidden=!historyNext;pendingUI();
+      }catch(e){if(seq===detailGeneration)message(e.message);}
+    }
+    function renderHistory(history,jobId){
         const openLogs=new Map([...$('#job-history').querySelectorAll('details[open][data-run-log]')].map(el=>[el.dataset.runLog,el]));
-        $('#job-history').innerHTML=history.length?`<ol class="job-history-list">${history.map(run=>`<li class="job-run"><div class="job-run-top"><span class="job-badge ${esc(run.state)}">${esc(run.state)}</span><time>${esc(date(run.scheduled_at,run.snapshot.definition.timezone,true))}</time></div>${run.reason?`<p>${esc(run.reason)}</p>`:''}<p><small>${run.parent_run_id?esc(machines.find(m=>m.node===run.target_machine)?.host||run.target_machine)+' · ':run.snapshot.definition.all_machines?'All machines · ':run.snapshot.definition.each_machine?'Selected machines · ':''}${esc(run.trigger==='manual'?'Run now':'Scheduled')} · Revision ${run.snapshot.revision} · ${esc(run.snapshot.definition.executable?'Script · '+run.snapshot.definition.executable:run.snapshot.definition.harness+' / '+(run.snapshot.definition.model||'Project model'))}${run.machine&&!run.parent_run_id?` · ${esc(machines.find(m=>m.node===run.machine)?.host||run.machine)}`:''}${run.worker_id?` · Worker ${esc(run.worker_id.slice(0,8))}`:""}</small></p><div class="job-run-links">${run.task_number?`<a href="/${mobile?'issues':''}#${esc(new URLSearchParams({project:job.project_id,issue:run.task_number,...(context.host?{host:context.host}:{})}))}">Task #${run.task_number} ↗</a>`:''}${run.session_id?`<a href="/agents/session#${esc(new URLSearchParams({project:job.project_id,host:machines.find(m=>m.node===run.machine)?.host||run.machine||'local',run:'job:'+run.id}))}">Session ↗</a>`:''}</div>${run.snapshot.definition.executable&&['succeeded','failed','cancelled'].includes(run.state)&&(run.worker_id||run.machine)?`<details class="job-log" data-run-log="${esc(run.id)}"><summary>View log</summary><pre></pre><button type="button" class="button" hidden>Show more output</button></details>`:''}</li>`).join('')}</ol>`:'<p class="job-help">No runs yet. Your first execution will appear here.</p>';
+        $('#job-history').innerHTML=history.length?`<ol class="job-history-list">${history.map(run=>`<li class="job-run"><div class="job-run-top"><span class="job-badge ${esc(run.state)}">${esc(run.state)}</span><time>${runsPage?esc(date(run.scheduled_at,run.snapshot.definition.timezone,true)):`<a href="${esc(runUrl(run))}">${esc(date(run.scheduled_at,run.snapshot.definition.timezone,true))}</a>`}</time></div>${run.reason?`<p>${esc(run.reason)}</p>`:''}<p><small>${run.parent_run_id?esc(machines.find(m=>m.node===run.target_machine)?.host||run.target_machine)+' · ':run.snapshot.definition.all_machines?'All machines · ':run.snapshot.definition.each_machine?'Selected machines · ':''}${esc(source(run))} · Revision ${run.snapshot.revision} · ${esc(run.snapshot.definition.executable?'Script · '+run.snapshot.definition.executable:run.snapshot.definition.harness+' / '+(run.snapshot.definition.model||'Project model'))}${run.machine&&!run.parent_run_id?` · ${esc(machines.find(m=>m.node===run.machine)?.host||run.machine)}`:''}${run.worker_id?` · Worker ${esc(run.worker_id.slice(0,8))}`:""}</small></p><div class="job-run-links">${run.task_number?`<a href="/${mobile?'issues':''}#${esc(new URLSearchParams({project:run.snapshot.project_id,issue:run.task_number,...(context.host?{host:context.host}:{})}))}">Task #${run.task_number} ↗</a>`:''}${run.session_id?`<a href="/agents/session#${esc(new URLSearchParams({project:run.snapshot.project_id,host:machines.find(m=>m.node===run.machine)?.host||run.machine||'local',run:'job:'+run.id}))}">Session ↗</a>`:''}</div>${run.snapshot.definition.executable&&['succeeded','failed','cancelled'].includes(run.state)&&(run.worker_id||run.machine)?`<details class="job-log" data-run-log="${esc(run.id)}"><summary>View log</summary><pre></pre><button type="button" class="button" hidden>Show more output</button></details>`:''}</li>`).join('')}</ol>`:'<p class="job-help">No runs yet. Your first execution will appear here.</p>';
         for(const detail of $('#job-history').querySelectorAll('[data-run-log]')){
           const previous=openLogs.get(detail.dataset.runLog);if(previous){detail.replaceWith(previous);continue;}
           const pre=detail.querySelector('pre'),more=detail.querySelector('button');
           let offset=0;
           async function page(){
             more.disabled=true;
-            try{const value=await read({command:'log',id:job.id,run_id:detail.dataset.runLog,offset});
+            try{const value=await read({command:'log',id:jobId,run_id:detail.dataset.runLog,offset});
               pre.append(document.createTextNode(value.log??value.reason??'No output recorded.'));
               offset=value.next_log_offset;more.hidden=offset==null;
             }catch(e){message(e.message);more.hidden=false;}finally{more.disabled=false;}
           }
           detail.ontoggle=()=>{if(detail.open&&!pre.hasChildNodes()&&!more.disabled)page();};more.onclick=page;
         }
-        $('#job-history-more').hidden=!historyNext;pendingUI();
-      }catch(e){if(seq===detailGeneration)message(e.message);}
     }
     async function navigate(){
       clearTimeout(refreshTimer);generation++;detailGeneration++;dirty=false;
       const params=new URLSearchParams(location.hash.slice(1));context={project:HeyBossUI.projectId(boot.project?.id||boot.projects[0]?.id),host:mobile?null:params.get('host')||boot.backend_host||null};
-      const calendarView=params.get('view')==='calendar';
-      $('#jobs-calendar').hidden=!calendarView;$('.jobs-layout').hidden=calendarView;
+      const calendarView=!runsPage&&params.get('view')==='calendar';
+      $('#jobs-calendar').hidden=!calendarView;$('.jobs-layout').hidden=runsPage||calendarView;
       $('#jobs-view-list').setAttribute('aria-pressed',String(!calendarView));$('#jobs-view-calendar').setAttribute('aria-pressed',String(calendarView));
       if(calendarView&&context.project){const identity=JSON.stringify(context);calendar.show(calendarProject!==identity);calendarProject=identity;}else calendar.hide();
-      picker.update(boot.projects,boot.projects.find(p=>p.id===context.project)||{id:context.project,name:context.project});$('#nav-jobs').setAttribute('aria-current','page');const nav=$('#nav-jobs').closest('.app-navigation');nav.scrollLeft=$('#nav-jobs').offsetLeft-nav.clientWidth/2;
-      const dialog=$('#job-dialog'),hasJob=!!params.get('job'),wasOpen=dialog.open,previousJob=selected?.id;
+      picker.update(boot.projects,boot.projects.find(p=>p.id===context.project)||{id:context.project,name:context.project});const tab=$(runsPage?'#nav-runs':'#nav-jobs');tab.setAttribute('aria-current','page');const nav=tab.closest('.app-navigation');nav.scrollLeft=tab.offsetLeft-nav.clientWidth/2;
+      const dialog=$('#job-dialog'),hasJob=!!params.get(runsPage?'run':'job'),wasOpen=dialog.open,previousJob=selected?.id,previousRun=selectedRun?.id;
       $('#jobs-feedback').append($('#jobs-error'),$('#jobs-retry'));
       if(hasJob){$('#job-panel').scrollTop=0;$('#job-panel').innerHTML='<h2 id="job-panel-title">Loading job…</h2>';$('#job-dialog-feedback').append($('#jobs-error'),$('#jobs-retry'));if(!dialog.open)dialog.showModal();}
       else if(dialog.open)dialog.close();
-      pendingUI();rows=[];next=null;renderList();if(!context.project){$('#jobs-status').textContent='Choose a project to manage jobs.';return;}
-      await Promise.all([load(),service(),open(params.get('job'))]);
-      if(wasOpen&&!hasJob){const link=[...document.querySelectorAll('.job-card')].find(el=>new URLSearchParams(el.hash.slice(1)).get('job')===previousJob);(link||$('#job-new')).focus({preventScroll:true});}
+      pendingUI();rows=[];next=null;renderList();if(!context.project){$(runsPage?'#runs-status':'#jobs-status').textContent='Choose a project to continue.';return;}
+      await Promise.all([load(),runsPage?null:service(),open(params.get('job'))]);
+      if(wasOpen&&!hasJob&&runsPage){([...document.querySelectorAll('.runs-row')].find(el=>new URLSearchParams(el.hash.slice(1)).get('run')===previousRun)||$('#runs-refresh')).focus({preventScroll:true});}
+      if(wasOpen&&!hasJob&&!runsPage){const link=[...document.querySelectorAll('.job-card')].find(el=>new URLSearchParams(el.hash.slice(1)).get('job')===previousJob);(link||$('#job-new')).focus({preventScroll:true});}
       scheduleRefresh();
     }
-    function scheduleRefresh(){clearTimeout(refreshTimer);if(!document.hidden)refreshTimer=setTimeout(async()=>{if(!busy){await load();if(selected)await loadHistory();await service();calendar.refresh();}scheduleRefresh();},15000);}
+    function scheduleRefresh(){clearTimeout(refreshTimer);if(!document.hidden)refreshTimer=setTimeout(async()=>{if(!busy){if(!runsPage||rows.length<=50)await load();if(selectedRun)await openRun(selectedRun.snapshot.job_id,selectedRun.id,detailGeneration);if(selected)await loadHistory();if(!runsPage){await service();calendar.refresh();}}scheduleRefresh();},15000);}
     function newJob(){if(leave())location.hash=hash('new');}
+    $('#runs-view').hidden=!runsPage;
+    if(runsPage){
+      document.title='Runs · Hey Boss';$('#jobs-title').textContent='Runs';$('.page-description').textContent='Execution history for this project.';
+      $('#job-new').hidden=true;$('.jobs-topbar').hidden=true;$('#job-close').setAttribute('aria-label','Close run details');
+    }
+    $('#runs-refresh').onclick=()=>load();$('#runs-more').onclick=()=>load(false);
     $('#job-new').onclick=newJob;
     const closeJob=()=>{if(leave())location.hash=hash();};
     $('#job-close').onclick=closeJob;$('#job-dialog').addEventListener('cancel',event=>{event.preventDefault();closeJob();});

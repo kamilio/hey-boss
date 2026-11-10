@@ -1551,6 +1551,7 @@ fn secrets_are_in_the_shared_global_menu_on_every_page() {
         "/",
         "/workers",
         "/jobs",
+        "/runs",
         "/skills",
         "/artifacts",
         "/admin",
