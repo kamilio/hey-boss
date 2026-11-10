@@ -5,7 +5,7 @@
 - Attention to performance
 - Every change must have a slick, polished design and be verified end-to-end before it is considered complete.
 - No useless params and config, it's easier to change code. 
-- After finishing task, install on all machines
+- Install changed components only on machines that use them. For Hey Talk–only changes, use `packages/hey-talk/install.sh` on Macs with Hey Talk; skip `hey-boss upgrade`.
 - Use Rust if possible, NO PYTHON
 - The user writes prompts. Request prompt wording through `hey-boss notif ask`; do not invent or expand it.
 - Store all prompt text in Markdown (`.md`) files. Code must load prompts from those files, never embed them.
