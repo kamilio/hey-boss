@@ -3209,3 +3209,45 @@ fn distributed_worker_settles_machine_reservation_before_starting_and_claiming()
     );
     worker.stop();
 }
+
+#[test]
+fn upgrade_check_verifies_workers_against_installed_build_when_source_is_newer() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new("outdated-rollout");
+    let installed = f.root.join("installed-cli");
+    fs::write(
+        &installed,
+        r#"#!/bin/sh
+case "$*" in
+    --version) echo 'hey-boss (build 0123456789abcdef)' ;;
+    'fleet sync-status') echo '{"mode":"legacy"}' ;;
+    'upgrade --reload-workers 0123456789abcdef --json --check')
+        echo '{"ok":true,"build":"0123456789abcdef","complete":true,"workers":[]}' ;;
+    *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&installed, fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        .env("HOME", &f.root)
+        .args([
+            "upgrade",
+            "--local-only",
+            "--check",
+            "--json",
+            "--source",
+            env!("CARGO_MANIFEST_DIR"),
+            "--binary",
+        ])
+        .arg(installed)
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(result.status.code(), Some(2), "{report}");
+    assert_eq!(report["machines"][0]["status"], "outdated");
+    assert_eq!(
+        report["machines"][0]["workers"]["build"],
+        "0123456789abcdef"
+    );
+}

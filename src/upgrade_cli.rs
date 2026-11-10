@@ -867,12 +867,12 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
                 }
                 .into();
                 entry.verified = Some(installed);
-            }
-            let workers = target_workers(&host, binary, &source.build, options.check)?;
-            let problem = workers_error(&workers, &source.build);
-            entry.workers = Some(workers);
-            if let Some(problem) = problem {
-                return Err(error(problem));
+                let workers = target_workers(&host, binary, &source.build, false)?;
+                let problem = workers_error(&workers, &source.build);
+                entry.workers = Some(workers);
+                if let Some(problem) = problem {
+                    return Err(error(problem));
+                }
             }
             Ok(())
         })();
@@ -951,15 +951,22 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             std::thread::sleep(std::time::Duration::from_secs(2));
         }
         if entry.error.is_none() {
-            match target_workers(&entry.host, binary, &source.build, true) {
+            // A check observes the installed release, even when an update is available.
+            let Some(build) = entry.verified.as_ref().and_then(|v| v.build.as_deref()) else {
+                continue;
+            };
+            match target_workers(&entry.host, binary, build, true) {
                 Ok(workers) => {
-                    entry.error = workers_error(&workers, &source.build);
+                    entry.error = workers_error(&workers, build);
                     entry.workers = Some(workers);
                 }
                 Err(error) => entry.error = Some(format!("Final worker verification: {error}")),
             }
-            if entry.error.is_some() {
+            if let Some(problem) = &entry.error {
                 entry.status = "unhealthy".into();
+                if !options.json {
+                    println!("{}: unhealthy — {problem}", entry.host);
+                }
             }
         }
     }
