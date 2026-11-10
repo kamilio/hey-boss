@@ -4,6 +4,66 @@ import TalkCore
 @testable import HeyTalk
 
 final class AudioTests: XCTestCase {
+    func testDictationReturnsMicrophoneToListeningAndSpeakingConversation() throws {
+        guard let binary = ProcessInfo.processInfo.environment["HEY_BOSS_HANDOFF_TEST_BINARY"] else {
+            throw XCTSkip("Run via tools/conversation_checks.sh with the desktop audit binary")
+        }
+        let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent(".build/handoff-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let utterance = directory.appendingPathComponent("dictation.aiff")
+        let say = Process()
+        say.executableURL = URL(fileURLWithPath: "/usr/bin/say")
+        say.arguments = ["-v", "Samantha", "-o", utterance.path, "These words belong in dictation."]
+        try say.run(); say.waitUntilExit()
+        let dictated = try AudioCapture.readFile(utterance.path)
+        let peer = Process(), input = Pipe(), output = Pipe()
+        peer.executableURL = URL(fileURLWithPath: binary)
+        peer.environment = ProcessInfo.processInfo.environment.merging(["HEY_BOSS_AUDIT_DICTATION_HANDOFF": directory.path, "HEY_BOSS_HANDOFF_PEER": "1"]) { _, new in new }
+        peer.standardInput = input; peer.standardOutput = output
+        try peer.run()
+        defer { if peer.isRunning { peer.terminate() } }
+        let rig = try CaptureRig(buffer: firstBuffer())
+        let capture = rig.capture()
+        let history = DictationHistory(directory: directory)
+        let service = TalkService(headless: true, capture: capture, history: history) { request in
+            guard ["conversation_pause", "conversation_resume"].contains(request["command"] as? String) else { return nil }
+            if request["command"] as? String == "conversation_resume" {
+                XCTAssertTrue(rig.streams.last?.stopped == true, "Chat must not resume while the dictation stream is warm")
+            }
+            var data = try JSONSerialization.data(withJSONObject: request); data.append(10)
+            try input.fileHandleForWriting.write(contentsOf: data)
+            let line = try Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 20)
+            return try JSONSerialization.jsonObject(with: line) as? [String: Any]
+        }
+        func status() -> [String: Any] {
+            var value: [String: Any] = [:]
+            service.command(["command": "status"]) { value = $0 }
+            return value
+        }
+        for phase in ["listening", "speaking"] {
+            service.switchToDictation()
+            let ready = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in status()["microphone_ready"] as? Bool == true }, object: nil)
+            wait(for: [ready], timeout: 25)
+            XCTAssertNil(status()["conversation"])
+            let stream = try XCTUnwrap(rig.streams.last)
+            for offset in stride(from: 0, to: dictated.count, by: 320) {
+                stream.receive(try sampleBuffer(Array(dictated[offset..<min(offset + 320, dictated.count)])))
+            }
+            XCTAssertGreaterThan(capture.sampleCount, 2400)
+            service.command(["command": "stop"]) { _ in }
+            eventually { (status()["conversation"] as? [String: Any])?["phase"] as? String == phase }
+        }
+        history.finishPendingWrites()
+        for index in 1...2 {
+            let saved = try AudioCapture.readFile(directory.appendingPathComponent("recordings/recording-\(index).wav").path)
+            XCTAssertTrue(saved.suffix(dictated.count).elementsEqual(dictated), "Only the dictation recorder receives this utterance")
+        }
+        eventually { !peer.isRunning }
+        if !peer.isRunning { XCTAssertEqual(peer.terminationStatus, 0) }
+    }
+
     func testAutomaticCaptureUsesConversationDetectorAndKeepsOnlyTheSpokenTurn() throws {
         let directory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
             .appendingPathComponent(".build/auto-speech-\(UUID().uuidString)")

@@ -453,6 +453,13 @@ final class AudioCapture {
             DispatchQueue.main.async { completion(result) }
         }
     }
+    // Unlike ordinary stop, a handoff must close even a healthy warm input.
+    func releaseMicrophone(_ released: @escaping () -> Void) {
+        control.async {
+            self.endCapture()
+            DispatchQueue.main.async(execute: released)
+        }
+    }
     func cancel(keepWarm: Bool = false) {
         lock.lock(); token &+= 1; let ticket = token
         acceptingAudio = false; samples = []; rms = 0; ready = false; lock.unlock()
