@@ -80,8 +80,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(conversationChanged(_:)), name: .init("local.hey-boss.conversation"), object: "local.hey-boss.desktop")
-        for name in [NSWorkspace.didActivateApplicationNotification, NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
-            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(refreshConversation), name: name, object: nil)
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(conversationAppChanged(_:)), name: name, object: nil)
         }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(updateSubmitIndicator),
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
@@ -121,8 +121,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .startConversation: self.startConversation()
             case .chatWithContext: self.chatWithContext()
             case .cancel:
-                if self.conversation != nil { self.controlConversation("stop") }
-                else if self.speech.active { self.speech.stop() }
+                guard self.conversation == nil else { return }
+                if self.speech.active { self.speech.stop() }
                 else if self.session.phase == .recording || self.session.phase == .processing || self.autoTarget != nil || self.autoRestart != nil || self.waitingPaste != nil { self.cancelDictation() }
             case .none: break
             }
@@ -284,12 +284,17 @@ final class TalkService: NSObject, NSApplicationDelegate {
         guard let state = notification.userInfo as? [String: Any] else { return }
         applyConversation(state)
     }
-    @objc private func refreshConversation() {
+    @objc private func conversationAppChanged(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              app.bundleIdentifier == "local.hey-boss.desktop" else { return }
+        refreshConversation()
+    }
+    private func refreshConversation() {
         guard !openingConversation else { return }
         guard !NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.desktop").isEmpty else { applyConversation(nil); return }
         let revision = conversationRevision
         contextQueue.async {
-            let state = (try? self.chatRequest(["command": "conversation_status", "sync": false]))?["conversation"] as? [String: Any]
+            guard let state = (try? self.chatRequest(["command": "conversation_status", "sync": false]))?["conversation"] as? [String: Any] else { return }
             DispatchQueue.main.async {
                 guard self.conversationRevision == revision, !self.openingConversation else { return }
                 self.applyConversation(state)
@@ -324,7 +329,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 self.focusedInputChanged(FocusedInput.current(bundleIDs: self.autoSettings.bundleIDs))
             }
         }
-        hotkey?.captureEscape((next != nil && next?["phase"] as? String != "idle") || speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
+        hotkey?.captureEscape(speech.active || waitingPaste != nil || session.phase == .listening || session.phase == .recording || session.phase == .processing)
     }
     private func controlConversation(_ action: String = "toggle") {
         if openingConversation {
@@ -520,7 +525,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         } catch { overlay?.error(error.localizedDescription) }
     }
     @objc private func cancelDictation() {
-        if conversation != nil { controlConversation("stop"); return }
+        guard conversation == nil else { return }
         if let wait = waitingPaste, wait.timer.isValid,
            !Paste.copyAndStopWaiting(wait.text, retry: wait.timer, to: .general) {
             overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: wait.timer)

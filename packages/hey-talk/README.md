@@ -116,7 +116,7 @@ The focused input is read before the rest of the window and has priority within 
 T3 and Slack capture keep conversations and the current input, excluding navigation
 and workspace status text. The focused input or message composer appears under **Current input**.
 Missing context does not block correction. File transcription never reads app context.
-Hover over the idle pill and click the conversation button, or press **Hyper+C**, to start listening without capturing context or opening a chat window. A floating caption shows one line while the reply is spoken and highlights the current word. Right-click the pill and choose **Open Transcript** to see the chat. **Esc** ends voice.
+Hover over the idle pill and click the conversation button, or press **Hyper+C**, to start listening without capturing context or opening a chat window. A floating caption shows one line while the reply is spoken and highlights the current word. Right-click the pill and choose **Open Transcript** to see the chat. Switching apps or T3 threads keeps voice running. **Esc** ends voice only in the transcript window.
 
 In an ordinary conversation, ask “Look at my browser” or name a running app. Hey Talk can return a screenshot, an Accessibility snapshot of the window’s text and controls, or both. “Look at my Gmail” finds an open Gmail window or selects an accessible Gmail browser tab and verifies that it displays mail.google.com. Requested captures go to the conversation model and are saved in its local history. Accessibility and Screen & System Audio Recording are separate permissions for Hey Talk in System Settings.
 
