@@ -29,3 +29,4 @@ done
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT="$root" "$2"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_FOREGROUND_MIC="$root" "$2"
 HEY_BOSS_AUDIT_DICTATION_HANDOFF="$root/handoff" "$2"
+HEY_BOSS_HANDOFF_TEST_BINARY="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")" swift test --package-path packages/hey-talk --filter testDictationReturnsMicrophoneToListeningAndSpeakingConversation

@@ -74,26 +74,7 @@ func audit() {
     #if canImport(FoundationModels)
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DICTATION_HANDOFF"] {
         app.finishLaunching()
-        let url = URL(fileURLWithPath: root).appendingPathComponent("current.json")
-        try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try! Data(#"{"messages":[{"text":"Keep this message","speaker":"You"}]}"#.utf8).write(to: url)
-        let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
-        for phase: VoiceConversation.Phase in [.recording, .speaking] {
-            let mic = ReviewAudio()
-            chat.audio = mic
-            if phase == .recording {
-                chat.state(.listening, "Listening")
-                chat.receive(.began); chat.receive(.pcm(Data(repeating: 1, count: 640)))
-                precondition(chat.recording?.count == 640)
-            } else { chat.state(.speaking, "Speaking") }
-            precondition(chat.releaseForDictation())
-            chat.receive(.ended); chat.receive(.began); chat.receive(.pcm(Data(count: 640))); chat.receive(.ended)
-            precondition(mic.stopped && chat.audio == nil && chat.recording == nil && chat.phase == .idle)
-            precondition(chat.voiceStatus["active"] as? Bool == false && !chat.releaseForDictation())
-            let reopened = VoiceConversation(cli: chat.cli, saveURL: url)
-            precondition(reopened.rows.map(\.stringValue) == ["Keep this message"])
-        }
-        print("PASS: recording and playback released; partial speech discarded; saved chat preserved")
+        auditDictationHandoff(root)
         return
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_POLISH"] {
@@ -4553,6 +4534,78 @@ func auditReviewEcho() {
 
 #if canImport(FoundationModels)
 import FoundationModels
+@available(macOS 26, *)
+func auditDictationHandoff(_ root: String) {
+    let url = URL(fileURLWithPath: root).appendingPathComponent("current.json")
+    try! FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try! Data(#"{"messages":[{"text":"Keep this message","speaker":"You"}]}"#.utf8).write(to: url)
+    let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
+    let audio = ReviewAudio()
+    audio.engine.attach(audio.player)
+    audio.engine.connect(audio.player, to: audio.engine.mainMixerNode, format: nil)
+    audio.engine.mainMixerNode.outputVolume = 0
+    try! audio.engine.start() // Output only; never attach the live microphone.
+    chat.connect(audio)
+    precondition(chat.beginSession())
+    // In the cross-process test, Hey Talk drives these same transitions
+    // through its request transport. Standalone runs exercise the core directly.
+    let peer = ProcessInfo.processInfo.environment["HEY_BOSS_HANDOFF_PEER"] != nil
+    func request(_ command: String) -> Request {
+        let value = try! JSONDecoder().decode(Request.self, from: Data(readLine()!.utf8))
+        precondition(value.command == command)
+        return value
+    }
+    func send(_ value: [String: Any]) {
+        var data = try! JSONSerialization.data(withJSONObject: value); data.append(10)
+        FileHandle.standardOutput.write(data)
+    }
+    var before = -1
+    func pause() -> UUID {
+        let incoming = peer ? request("conversation_pause") : nil
+        before = frame()
+        if let incoming {
+            let reply = chat.handleSessionRequest(incoming); send(reply)
+            return UUID(uuidString: reply["pause_id"] as! String)!
+        }
+        return chat.pauseSession()!
+    }
+    func resume(_ id: UUID) -> Bool {
+        if peer {
+            let incoming = request("conversation_resume")
+            precondition(incoming.pause_id == id)
+            let reply = chat.handleSessionRequest(incoming); send(reply)
+            return reply["status"] as? String == "ok"
+        }
+        return chat.resumeSession(id)
+    }
+    chat.receive(.began); chat.receive(.pcm(Data(count: 640)))
+    let listen = pause()
+    chat.receive(.ended); chat.receive(.began); chat.receive(.pcm(Data(count: 640)))
+    precondition(chat.audio === audio && chat.recording == nil && !audio.engine.isRunning)
+    precondition(!chat.resumeSession(UUID()) && chat.phase == .listening)
+    precondition(resume(listen) && chat.phase == .listening && audio.engine.isRunning)
+    precondition(chat.conversationHistory == [["role": "user", "content": "Keep this message"]])
+    chat.state(.thinking, "Thinking")
+    chat.event(["Message": ["text": "Start reading this sentence. Continue with several more words so we can check the middle of the passage."]])
+    func frame() -> Int { audio.playbackFrame }
+    let deadline = Date().addingTimeInterval(20)
+    while frame() < 5000 && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+    precondition(frame() >= 5000 && chat.phase == .speaking)
+    let history = chat.rows.map(\.stringValue)
+    let speech = pause()
+    precondition(!audio.engine.isRunning && !audio.player.isPlaying && speech != listen)
+    let parked = frame()
+    audio.engine.reset() // Dictation may change routes and invalidate the native player timeline.
+    RunLoop.main.run(until: Date().addingTimeInterval(0.35))
+    precondition(frame() == parked && !chat.resumeSession(listen) && resume(speech))
+    let until = Date().addingTimeInterval(0.08)
+    while frame() <= before && Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.005)) }
+    precondition(audio.player.isPlaying && chat.phase == .speaking && frame() > before && frame() - before < 4096, "Playback cursor before=\(before) after=\(frame())")
+    precondition(chat.rows.map(\.stringValue) == history && !chat.resumeSession(speech))
+    chat.stop("Done")
+    print("PASS: same chat resumed listening and mid-passage playback at frame \(before); stale resumes and paused input ignored")
+}
+
 @available(macOS 26, *)
 func auditChatPolish(_ root: String) {
     let saved = URL(fileURLWithPath: root).appendingPathComponent("current.json")

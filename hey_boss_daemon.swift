@@ -39,6 +39,7 @@ struct IssueReference: Codable, Equatable {
 
 struct Request: Codable {
     let command: String
+    let pause_id: UUID?
     let issue: IssueReference?
     let question: String?
     let project: String?
@@ -6952,7 +6953,10 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     let engine = AVAudioEngine()
     let player = AVAudioPlayerNode()
     private var synth: AVSpeechSynthesizer?
-    private let worker = Process(), input = Pipe(), output = Pipe()
+    private var worker: Process?
+    private let detectorInput = OSAllocatedUnfairLock(initialState: Optional<FileHandle>.none)
+    private(set) var suspended = false
+    private var restartEngine = false
     private var detectorLog: FileHandle?
     private var tapped = false
     private var micWatch: Timer?
@@ -6976,10 +6980,21 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         init(_ text: String) { utterance = AVSpeechUtterance(string: text) }
         func append(_ buffer: AVAudioPCMBuffer) {
             frames += Int(buffer.frameLength)
-            if let deliver { deliver(buffer) } else { buffers.append(buffer) }
+            buffers.append(buffer)
+            deliver?(buffer)
         }
     }
     private var passages: [Passage] = []
+    // Absolute PCM frame in the current passage. A route change can invalidate
+    // AVAudioPlayerNode's timeline while another app has the device.
+    private var playbackBase = 0, playedThrough = 0, scheduleGeneration = 0
+    private var parkedFrame: Int?
+    private var schedulePassage: (() -> Void)?
+    var playbackFrame: Int {
+        if let parkedFrame { return parkedFrame }
+        guard let rendered = player.lastRenderTime, let time = player.playerTime(forNodeTime: rendered) else { return playedThrough }
+        return max(playedThrough, playbackBase + Int(time.sampleTime))
+    }
     private var rendering: Passage?
     func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, willSpeakRangeOfSpeechString range: NSRange, utterance: AVSpeechUtterance) {
         onMain { [weak self] in
@@ -7056,14 +7071,14 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         let lastInput = OSAllocatedUnfairLock(initialState: TimeInterval.zero)
         engine.attach(player)
         engine.connect(player, to: engine.mainMixerNode, format: nil)
-        let writer = try listen(cli: cli, duplex: true)
+        _ = try listen(cli: cli, duplex: true)
         let changed: AudioObjectPropertyListenerBlock = { [weak self] _, _ in self?.updatePlaybackRoute() }
         if AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, changed) == noErr { outputChanged = changed }
         NotificationCenter.default.addObserver(self, selector: #selector(engineRouteChanged(_:)), name: .AVAudioEngineConfigurationChange, object: engine)
-        try openMicrophone(writer, lastInput, ready)
+        try openMicrophone(lastInput, ready)
         var attempted = ProcessInfo.processInfo.systemUptime, recovering = false
         micWatch = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, !self.stopped else { return }
+            guard let self, !self.stopped, !self.suspended else { return }
             let now = ProcessInfo.processInfo.systemUptime, last = lastInput.withLock { $0 }
             let wrongRoute = self.conversation && self.engine.inputNode.isVoiceProcessingEnabled == self.headphoneOutput
             if self.engine.isRunning && !wrongRoute && last >= attempted && now - last < 1 {
@@ -7074,7 +7089,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
                 self.engine.stop()
                 self.removeTaps()
                 do {
-                    try self.openMicrophone(writer, lastInput, ready)
+                    try self.openMicrophone(lastInput, ready)
                     if !self.paused && self.passages.first?.deliver != nil { self.player.play() }
                 } catch { /* A device can be absent while macOS switches routes. */ }
             }
@@ -7085,7 +7100,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         if tapped { engine.inputNode.removeTap(onBus: 0); engine.mainMixerNode.removeTap(onBus: 0); tapped = false }
     }
 
-    private func openMicrophone(_ writer: FileHandle, _ lastInput: OSAllocatedUnfairLock<TimeInterval>, _ ready: @escaping () -> Void) throws {
+    private func openMicrophone(_ lastInput: OSAllocatedUnfairLock<TimeInterval>, _ ready: @escaping () -> Void) throws {
         let mic = engine.inputNode
         updatePlaybackRoute()
         let cancelEcho = !conversation || !headphoneOutput
@@ -7128,7 +7143,11 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             let n = Int(pcm.frameLength)
             guard n > 0 else { return }
             let stereo = self.microphoneFrame(UnsafeBufferPointer(start: pcm.int16ChannelData![0], count: n))
-            if stereo.withUnsafeBytes({ Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) != $0.count }) {
+            let failed = self.detectorInput.withLock { writer in
+                guard let writer else { return false }
+                return stereo.withUnsafeBytes { Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) != $0.count }
+            }
+            if failed {
                 onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Microphone audio was interrupted. Start again.") }
             }
         }
@@ -7138,6 +7157,8 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
 
     var conversation = false
     func listen(cli: String, duplex: Bool = false) throws -> FileHandle {
+        let worker = Process(), input = Pipe(), output = Pipe()
+        self.worker = worker
         worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = ["review-audio"] + (duplex ? ["--duplex"] : []) + (conversation ? ["--conversation"] : [])
         worker.standardInput = input; worker.standardOutput = output; worker.standardError = FileHandle.nullDevice
         if conversation {
@@ -7155,6 +7176,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
         _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
         // Never wait on a child process in the audio callback.
+        detectorInput.withLock { $0 = writer }
         let flags = fcntl(writer.fileDescriptor, F_GETFL)
         _ = fcntl(writer.fileDescriptor, F_SETFL, flags | O_NONBLOCK)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -7179,9 +7201,9 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
                     case 640: event = .pcm(try read(count))
                     default: throw CocoaError(.fileReadCorruptFile)
                     }
-                    onMain { [weak self] in guard let self, !self.stopped else { return }; self.event(event) }
+                    onMain { [weak self] in guard let self, !self.stopped, !self.suspended, self.worker === worker else { return }; self.event(event) }
                 }
-            } catch { onMain { [weak self] in guard let self, !self.stopped else { return }; self.failed("Speech detector disconnected.") } }
+            } catch { onMain { [weak self] in guard let self, !self.stopped, !self.suspended, self.worker === worker else { return }; self.failed("Speech detector disconnected.") } }
         }
         return writer
     }
@@ -7223,42 +7245,60 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
         passages.append(contentsOf: window.dropFirst(passages.count).map(Passage.init))
         let passage = passages[0]
-        var nextWord = 0, outstanding = 0, started = false
+        playbackBase = 0; playedThrough = 0
+        var nextWord = 0, outstanding = 0, scheduledThrough = 0, started = false, announced = false
         func checkEnd() {
-            guard passage.complete, outstanding == 0, self.passages.first === passage else { return }
-            passage.deliver = nil; self.passages.removeFirst()
+            guard !self.suspended, passage.complete, outstanding == 0, self.passages.first === passage else { return }
+            self.schedulePassage = nil; passage.deliver = nil; self.passages.removeFirst()
             self.timer?.invalidate(); self.player.stop(); finished()
         }
         func enqueue(_ buffer: AVAudioPCMBuffer?) {
-            guard !self.stopped, self.passages.first === passage else { return }
-            guard let buffer else { checkEnd(); return }
+            guard !self.stopped, !self.suspended, self.passages.first === passage else { return }
+            guard var buffer else { checkEnd(); return }
+            let skip = max(0, self.playbackBase - scheduledThrough)
+            scheduledThrough += Int(buffer.frameLength)
+            let end = scheduledThrough, generation = self.scheduleGeneration
+            guard skip < Int(buffer.frameLength) else { return }
+            if skip > 0 {
+                let length = buffer.frameLength - AVAudioFrameCount(skip)
+                let tail = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: length)!
+                tail.frameLength = length
+                let stride = Int(buffer.format.streamDescription.pointee.mBytesPerFrame)
+                for (source, destination) in zip(UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList), UnsafeMutableAudioBufferListPointer(tail.mutableAudioBufferList)) {
+                    memcpy(destination.mData!, source.mData!.advanced(by: skip * stride), Int(length) * stride)
+                }
+                buffer = tail
+            }
             if !started && self.player.outputFormat(forBus: 0) != buffer.format {
                 self.engine.connect(self.player, to: self.engine.mainMixerNode, format: buffer.format)
             }
-            let first = !started
             started = true; outstanding += 1
             self.player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in
                 onMain { [weak self] in
-                    guard let self, !self.stopped, self.passages.first === passage else { return }
+                    guard let self, !self.stopped, self.scheduleGeneration == generation, self.passages.first === passage else { return }
+                    self.playedThrough = max(self.playedThrough, end)
                     outstanding -= 1; checkEnd()
                 }
             }
             if self.engine.isRunning && !self.paused && !self.player.isPlaying { self.player.play() }
-            if first { self.playbackStarted() }
+            if !announced { announced = true; self.playbackStarted() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.035, repeats: true) { [weak self] _ in
-            guard let self, !self.paused, let rendered = self.player.lastRenderTime,
-                  let time = self.player.playerTime(forNodeTime: rendered) else { return }
+            guard let self, !self.paused, self.player.isPlaying else { return }
+            let frame = self.playbackFrame
             var current: NSRange?
-            while nextWord < passage.words.count, passage.words[nextWord].0 <= Int(time.sampleTime) {
+            while nextWord < passage.words.count, passage.words[nextWord].0 <= frame {
                 current = passage.words[nextWord].1; nextWord += 1
             }
             if let current { highlight(current) }
         }
         passage.deliver = enqueue
-        for buffer in passage.buffers { enqueue(buffer) }
-        passage.buffers.removeAll()
-        if passage.complete { checkEnd() }
+        schedulePassage = {
+            outstanding = 0; scheduledThrough = 0; started = false
+            for buffer in passage.buffers { enqueue(buffer) }
+            if passage.complete { checkEnd() }
+        }
+        schedulePassage?()
         renderNextPassage()
     }
     private var paused = false
@@ -7266,9 +7306,42 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     func resume() {
         guard paused else { return }
         paused = false
-        if engine.isRunning && !passages.isEmpty { player.play() }
+        if engine.isRunning && passages.first?.deliver != nil { player.play() }
+    }
+    func suspend() {
+        guard !suspended else { return }
+        restartEngine = engine.isRunning
+        let cursor = schedulePassage == nil ? nil : playbackFrame
+        suspended = true
+        pause()
+        if let cursor { parkedFrame = max(cursor, playbackFrame) }
+        scheduleGeneration += 1
+        if player.engine != nil { player.stop() }
+        if restartEngine { engine.pause() }
+        inputSince.withLock { $0 = .max }
+        reference.withLock { $0.pcm.removeAll() }
+        closeDetector()
+    }
+    func reactivate(cli: String, play: Bool) throws {
+        guard suspended else { return }
+        if tapped { _ = try listen(cli: cli, duplex: true) }
+        inputSince.withLock { $0 = mach_absolute_time() }
+        if restartEngine { try engine.start() }
+        suspended = false
+        if let parkedFrame {
+            playbackBase = parkedFrame; playedThrough = parkedFrame; self.parkedFrame = nil
+            schedulePassage?()
+        }
+        if play { resume() }
+    }
+    private func closeDetector() {
+        detectorInput.withLock { try? $0?.close(); $0 = nil }
+        detectorLog?.readabilityHandler = nil; detectorLog = nil
+        if let worker, worker.isRunning { worker.terminate() }
+        worker = nil
     }
     func stopPlayback() {
+        parkedFrame = nil; schedulePassage = nil; scheduleGeneration += 1
         paused = false
         passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
         timer?.invalidate(); synth?.stopSpeaking(at: .immediate)
@@ -7285,9 +7358,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         engine.stop()
         removeTaps()
         reference.withLock { $0.archive?.finish(); $0.archive = nil }
-        detectorLog?.readabilityHandler = nil; detectorLog = nil
-        try? input.fileHandleForWriting.close()
-        if worker.isRunning { worker.terminate() }
+        closeDetector()
     }
 }
 
@@ -7654,6 +7725,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var approvalSheet: NSAlert?
     let cli: String
     let recognizer = SFSpeechRecognizer()
+    private var pauseID: UUID?
     var phase: Phase = .idle
     var audio: ReviewAudio?
     private(set) var standby: ReviewAudio?
@@ -7962,6 +8034,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
     var voiceStatus: [String: Any] {
+        if pauseID != nil {
+            return ["active": false, "phase": "paused", "microphone": false, "message": "Conversation paused", "detail": "Conversation paused", "action": "Paused", "interrupt": false]
+        }
         let action = approvalSheet != nil ? "Open chat" : phase == .idle ? "Start voice" : phase == .recording ? "Send voice message" : audio != nil || [.starting, .listening, .decoding].contains(phase) ? "Stop voice" : "Stop reply"
         let label: String
         switch phase {
@@ -7985,7 +8060,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func windowDidBecomeKey(_ notification: Notification) {
         publishVoiceStatus()
         onMain { [weak self] in
-            guard let self, self.window.isKeyWindow, self.audio == nil, self.standby == nil,
+            guard let self, self.pauseID == nil, self.window.isKeyWindow, self.audio == nil, self.standby == nil,
                   AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
             let mic = ReviewAudio()
             mic.conversation = true
@@ -8022,20 +8097,21 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var answering: Bool { phase == .thinking || phase == .speaking }
     private var turnAccepted = false
     private var canListenNext: Bool {
-        audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
+        pauseID == nil && audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
     }
     private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
     private func updateComposerActions() {
-        muteMic.isHidden = audio == nil || audio?.stopped == true || phase == .starting
+        meter.isEnabled = pauseID == nil
+        muteMic.isHidden = pauseID != nil || audio == nil || audio?.stopped == true || phase == .starting
         let action = micMuted ? "Unmute microphone" : "Mute microphone"
         muteMic.image = NSImage(systemSymbolName: micMuted ? "mic.slash.fill" : "mic", accessibilityDescription: nil)
         muteMic.toolTip = action; muteMic.setAccessibilityLabel(action)
         muteMic.contentTintColor = micMuted ? .systemOrange : .secondaryLabelColor
-        pauseReply.isHidden = phase != .speaking
+        pauseReply.isHidden = pauseID != nil || phase != .speaking
         let playbackAction = playbackPaused ? "Resume reply" : "Pause reply"
         pauseReply.image = NSImage(systemSymbolName: playbackPaused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
         pauseReply.toolTip = playbackAction; pauseReply.setAccessibilityLabel(playbackAction)
-        send.isEnabled = acceptsTypedMessage
+        send.isEnabled = pauseID == nil && acceptsTypedMessage
         listenNext.isHidden = !canListenNext
         listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
         listenNext.toolTip = turnDone ? "Skip the rest of this spoken answer" : "Stop this reply"
@@ -8064,7 +8140,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.listening, "Listening")
     }
     @objc func sendTyped() {
-        guard acceptsTypedMessage else { return }
+        guard pauseID == nil, acceptsTypedMessage else { return }
         let text = input.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else { return }
         interruptPlayback()
@@ -8091,9 +8167,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         input.validateEditing(); input.invalidateIntrinsicContentSize()
     }
     @objc func toggle() {
+        guard pauseID == nil else { return }
         if phase == .recording { if recording?.isEmpty == false { endRecording("manual") }; return }
         guard phase == .idle else { stop("Voice off"); return }
         guard beginSession() else { return }
+        openVoiceInput()
+    }
+    private func openVoiceInput() {
         state(.starting, "Starting…")
         window.displayIfNeeded()
         guard let recognizer, recognizer.isAvailable, recognizer.supportsOnDeviceRecognition else { state(.idle, "Enable on-device Dictation in Keyboard settings."); return }
@@ -8139,7 +8219,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.listening, "Listening")
     }
     func receive(_ event: ReviewAudio.Event) {
-        guard audio != nil, !micMuted else { return }
+        guard pauseID == nil, audio != nil, !micMuted else { return }
         switch event {
         case .began where phase == .listening || phase == .decoding || answering:
             if answering && (reading || !playedPassages.isEmpty || turnDone) {
@@ -8463,7 +8543,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         label.paintWord(styled)
     }
     private func playNext() {
-        guard !reading, !heldReply, !playbackPaused else { return }
+        guard pauseID == nil, !reading, !heldReply, !playbackPaused else { return }
         if let audio, !speech.isEmpty {
             let part = speech.removeFirst()
             reading = true; playingPassage = part.text; playingThrough = 0
@@ -8730,20 +8810,49 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         approvals.removeAll()
         if let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window) }
     }
-    func releaseForDictation() -> Bool {
-        guard voiceStatus["active"] as? Bool == true else { return false }
-        window.orderOut(nil)
+    func handleSessionRequest(_ request: Request) -> [String: Any] {
+        if request.command == "conversation_pause", let id = pauseSession() {
+            window.orderOut(nil)
+            return ["status": "ok", "pause_id": id.uuidString]
+        }
+        if request.command == "conversation_resume", let id = request.pause_id, resumeSession(id) {
+            return ["status": "ok", "conversation": voiceStatus]
+        }
+        return ["status": "unhandled"]
+    }
+    func pauseSession() -> UUID? {
+        guard pauseID == nil, voiceStatus["active"] as? Bool == true else { return nil }
+        let id = UUID()
+        pauseID = id
         releaseStandby()
-        stop("Voice off")
-        publishVoiceStatus()
+        if phase == .starting { audio?.stop(); audio = nil } else { audio?.suspend() }
+        discardPendingSpeech()
+        if heldReply { heldReply = false; state(reading ? .speaking : .thinking, reading ? "Speaking" : "Thinking…") }
+        else if phase == .recording || phase == .decoding { state(.listening, "Listening") }
+        caption.orderOut(nil)
+        updateComposerActions()
+        return id
+    }
+    private func discardPendingSpeech() {
+        transcriptionID = nil; transcriptionTask?.cancel(); transcriptionTask = nil
+        decoding?.cancel(); decoding = nil
+        recording = nil; recordedClips.removeAll(); transcripts.removeAll()
+    }
+    func resumeSession(_ id: UUID) -> Bool {
+        guard pauseID == id else { return false }
+        do { try audio?.reactivate(cli: cli, play: !playbackPaused) }
+        catch { stop("Couldn’t resume microphone: " + error.localizedDescription); return false }
+        pauseID = nil
+        if phase == .starting { openVoiceInput() } else if answering { playNext() }
+        updateComposerActions()
         return true
     }
     func stop(_ message: String) {
+        pauseID = nil
         if answering || heldReply { interruptPlayback() }
-        heldReply = false; transcriptionTask?.cancel(); transcriptionTask = nil
-        transcriptionID = nil; recordedClips.removeAll(); transcripts.removeAll()
+        heldReply = false; discardPendingSpeech()
         cancelTurn()
-        decoding?.cancel(); decoding = nil; recording = nil; audio?.stop(); audio = nil
+        audio?.stop(); audio = nil
         state(.idle, message)
     }
     private func chatURL(_ id: UUID) -> URL { saveURL.deletingLastPathComponent().appendingPathComponent(id.uuidString + ".json") }
@@ -10395,13 +10504,12 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control", "conversation_release"].contains(request.command) {
+                    } else if ["conversation_start", "conversation_context", "conversation_toggle", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
-                                if request.command == "conversation_release" {
-                                    let released = overview.currentConversation().releaseForDictation()
-                                    reply.send(["status": released ? "ok" : "unhandled"]); return
+                                if request.command == "conversation_pause" || request.command == "conversation_resume" {
+                                    reply.send(overview.currentConversation().handleSessionRequest(request)); return
                                 }
                                 if request.command == "conversation_status" {
                                     reply.send(["status": "ok", "conversation": overview.conversationStatus]); return
