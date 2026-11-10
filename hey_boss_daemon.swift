@@ -4477,55 +4477,27 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
     }
 }
 
-/// A registered hotkey works in other apps without monitoring their keystrokes
-/// or requiring Accessibility permissions. ⌘⌃⌥⇧I opens native Quick Add.
-final class QuickIssueShortcut {
+final class GlobalShortcut {
     private var hotKey: EventHotKeyRef?
     private var handler: EventHandlerRef?
+    private let signature: OSType
     let open: () -> Void
-    init(open: @escaping () -> Void) {
-        self.open = open
+    init(key: Int, modifiers: Int, signature: OSType, open: @escaping () -> Void) {
+        self.signature = signature; self.open = open
         var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
         let context = Unmanaged.passUnretained(self).toOpaque()
         let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
             guard let event, let context else { return OSStatus(eventNotHandledErr) }
+            let shortcut = Unmanaged<GlobalShortcut>.fromOpaque(context).takeUnretainedValue()
             var identity = EventHotKeyID()
             guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identity) == noErr,
-                  identity.signature == 0x48425149, identity.id == 1 else { return OSStatus(eventNotHandledErr) }
-            Unmanaged<QuickIssueShortcut>.fromOpaque(context).takeUnretainedValue().open()
+                  identity.signature == shortcut.signature, identity.id == 1 else { return OSStatus(eventNotHandledErr) }
+            shortcut.open()
             return noErr
         }, 1, &event, context, &handler)
-        guard installed == noErr else { return }
-        let status = RegisterEventHotKey(UInt32(kVK_ANSI_I), UInt32(cmdKey | controlKey | optionKey | shiftKey), EventHotKeyID(signature: 0x48425149, id: 1), GetApplicationEventTarget(), 0, &hotKey)
-        if status != noErr { NSLog("Hey Boss quick-add shortcut unavailable (%d); use the menu.", status) }
-    }
-    deinit {
-        if let hotKey { UnregisterEventHotKey(hotKey) }
-        if let handler { RemoveEventHandler(handler) }
-    }
-}
-
-/// The browser shortcut uses the same modifiers as native Quick Add, with O.
-/// Carbon registration works across apps without Accessibility permissions.
-final class IssuesShortcut {
-    private var hotKey: EventHotKeyRef?
-    private var handler: EventHandlerRef?
-    let open: () -> Void
-    init(open: @escaping () -> Void) {
-        self.open = open
-        var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        let context = Unmanaged.passUnretained(self).toOpaque()
-        let installed = InstallEventHandler(GetApplicationEventTarget(), { _, event, context in
-            guard let event, let context else { return OSStatus(eventNotHandledErr) }
-            var identity = EventHotKeyID()
-            guard GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID), nil, MemoryLayout<EventHotKeyID>.size, nil, &identity) == noErr,
-                  identity.signature == 0x4842494F, identity.id == 1 else { return OSStatus(eventNotHandledErr) }
-            Unmanaged<IssuesShortcut>.fromOpaque(context).takeUnretainedValue().open()
-            return noErr
-        }, 1, &event, context, &handler)
-        guard installed == noErr else { NSLog("Hey Boss Issues shortcut handler unavailable (%d); use the menu.", installed); return }
-        let status = RegisterEventHotKey(UInt32(kVK_ANSI_O), UInt32(cmdKey | controlKey | optionKey | shiftKey), EventHotKeyID(signature: 0x4842494F, id: 1), GetApplicationEventTarget(), 0, &hotKey)
-        if status != noErr { NSLog("Hey Boss Issues shortcut unavailable (%d); use the menu.", status) }
+        guard installed == noErr else { NSLog("Hey Boss global shortcut handler unavailable (%d).", installed); return }
+        let status = RegisterEventHotKey(UInt32(key), UInt32(modifiers), EventHotKeyID(signature: signature, id: 1), GetApplicationEventTarget(), 0, &hotKey)
+        if status != noErr { NSLog("Hey Boss global shortcut unavailable (%d).", status) }
     }
     deinit {
         if let hotKey { UnregisterEventHotKey(hotKey) }
@@ -4999,8 +4971,8 @@ final class FleetSyncController {
 }
 
 final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSSearchFieldDelegate, NSMenuItemValidation, NSWindowDelegate, NSMenuDelegate {
-    lazy var issuesShortcut = IssuesShortcut { [weak self] in self?.showIssues() }
-    lazy var quickIssueShortcut = QuickIssueShortcut { [weak self] in
+    lazy var issuesShortcut = GlobalShortcut(key: kVK_ANSI_O, modifiers: cmdKey | controlKey | optionKey | shiftKey, signature: 0x4842494F) { [weak self] in self?.showIssues() }
+    lazy var quickIssueShortcut = GlobalShortcut(key: kVK_ANSI_I, modifiers: cmdKey | controlKey | optionKey | shiftKey, signature: 0x48425149) { [weak self] in
         guard let self else { return }; self.quickIssue.open(cli: self.cli, voice: true)
     }
     lazy var quickIssue = NativeQuickIssue(present: present)
@@ -7718,6 +7690,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var approvalSheet: NSAlert?
     let cli: String
     let recognizer = SFSpeechRecognizer()
+    private var backgroundEscape: GlobalShortcut?
     private var pauseID: UUID?
     var phase: Phase = .idle
     var audio: ReviewAudio?
@@ -7750,6 +7723,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     init(cli: String, saveURL: URL = URL.applicationSupportDirectory.appending(path: "Hey Boss/Conversation/current.json")) {
         self.cli = cli; self.saveURL = saveURL
         super.init()
+        for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(updateBackgroundEscape), name: name, object: nil)
+        }
         window.title = "Hey Boss"; window.toolbarStyle = .unified
         let toolbar = NSToolbar(identifier: "VoiceConversation")
         toolbar.delegate = self; toolbar.displayMode = .iconOnly; window.toolbar = toolbar
@@ -8093,7 +8069,20 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         pauseID == nil && audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
     }
     private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
+    @objc private func updateBackgroundEscape() {
+        // In the transcript, sendEvent lets sheets and input methods handle Escape first.
+        guard phase != .idle, pauseID == nil, !window.isKeyWindow, window.attachedSheet?.isKeyWindow != true else {
+            backgroundEscape = nil; return
+        }
+        if backgroundEscape == nil {
+            backgroundEscape = GlobalShortcut(key: kVK_Escape, modifiers: 0, signature: 0x48424345) { [weak self] in
+                guard let self else { return }
+                self.stop(self.audio == nil ? "Reply stopped" : "Voice off")
+            }
+        }
+    }
     private func updateComposerActions() {
+        updateBackgroundEscape()
         meter.isEnabled = pauseID == nil
         muteMic.isHidden = pauseID != nil || audio == nil || audio?.stopped == true || phase == .starting
         let action = micMuted ? "Unmute microphone" : "Mute microphone"
