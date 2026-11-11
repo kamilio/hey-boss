@@ -76,7 +76,7 @@ END;
 pub(crate) fn migrate(db: &Connection) -> Result<()> {
     let exists: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits' AND type='table')
-         AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='commit_reviews')
+         AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='commit_shelf')
          AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_commits_event_sync_insert' AND type='trigger' AND instr(sql,'syncing')>0)",
         [],
         |r| r.get(0),
@@ -605,6 +605,7 @@ pub(crate) fn remove(
                 "DELETE FROM issue_commits WHERE project_id=?1 AND issue_number=?2 AND sha=?3",
                 params![project.id, number, sha],
             )?;
+            super::shelf::detach(db, &project.id, number, &sha)?;
             removed_shas.push(sha);
         }
     }

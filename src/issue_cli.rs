@@ -272,6 +272,9 @@ enum Action {
         #[command(subcommand)]
         command: SettingsAction,
     },
+    /// Project shelf transport used by the g terminal client (JSON on stdin).
+    #[command(hide = true)]
+    Shelf,
     /// Attach, list, or remove first-class pull request links.
     Pr {
         #[command(subcommand)]
@@ -1006,6 +1009,9 @@ impl Options {
                     },
                 },
             },
+            Action::Shelf => Operation::Shelf {
+                operation: serde_json::from_str(&read_text(std::io::stdin(), issues::WIRE_LIMIT)?)?,
+            },
             Action::GlobalSettings { operation } => operation.as_ref().clone(),
             Action::Settings { command } => match command {
                 SettingsAction::Show => Operation::ProjectSettings,
@@ -1726,6 +1732,12 @@ pub fn run(options: &Options) -> Result<()> {
             if title.is_none() && !resolved.title.is_empty() {
                 *title = Some(resolved.title);
             }
+        }
+        if let Operation::Shelf {
+            operation: issues::shelf::Operation::Save { sha, snapshot, .. },
+        } = &mut operation
+        {
+            *snapshot = issues::commit_reviews::capture(&cwd, sha, &project.id)?;
         }
         let request = Request {
             version: 1,

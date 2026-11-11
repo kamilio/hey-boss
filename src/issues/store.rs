@@ -484,7 +484,7 @@ fn list_predicate(search: bool, owner: Option<&str>, unassigned: bool) -> String
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct Issue {
+pub(super) struct Issue {
     #[serde(skip)]
     archive_key: Option<String>,
     number: i64,
@@ -583,7 +583,12 @@ fn row_issue(row: &crate::database::Row<'_>) -> rusqlite::Result<Issue> {
         })?,
     })
 }
-fn get_issue(db: &Connection, project: &str, number: i64, deleted: bool) -> Result<Issue> {
+pub(super) fn get_issue(
+    db: &Connection,
+    project: &str,
+    number: i64,
+    deleted: bool,
+) -> Result<Issue> {
     let issue = db
         .query_row(
             &format!("SELECT {COLUMNS} FROM issues WHERE project_id=?1 AND number=?2"),
@@ -1717,6 +1722,7 @@ impl Store {
             Operation::Artifact { .. }
                 | Operation::Attachment { .. }
                 | Operation::Job { .. }
+                | Operation::Shelf { .. }
                 | Operation::AddCommit { .. }
                 | Operation::RemoveCommit { .. }
         ) || matches!(&r.operation, Operation::CommitReview { operation, .. } if operation.writes())
@@ -2188,6 +2194,9 @@ impl Store {
                 *if_order_version,
                 now,
             )?,
+            Operation::Shelf { operation } => {
+                super::shelf::execute(&tx, &project, operation, actor, now)?
+            }
             Operation::CommitReview {
                 number,
                 commit,
@@ -2806,6 +2815,7 @@ impl Store {
         if !matches!(
             r.operation,
             Operation::Attachment { .. }
+                | Operation::Shelf { .. }
                 | Operation::CommitReview { .. }
                 | Operation::Artifact { .. }
                 | Operation::Batch { .. }

@@ -3293,7 +3293,8 @@ fn commit_review_snapshots_and_laptop_feedback_sync_without_a_checkout() {
     let b = fb.db();
     install(&b, "b").unwrap();
     b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
-    a.execute_batch("INSERT INTO commit_reviews VALUES('p',1,'abcdef0123456789','{\"patch\":\"whole patch\\n\"}','Original message');
+    a.execute_batch("INSERT INTO commit_shelf VALUES('p','abcdef0123456789','raw',1,100);
+        INSERT INTO commit_reviews VALUES('p',1,'abcdef0123456789','{\"patch\":\"whole patch\\n\"}','Original message');
         INSERT INTO commit_review_comments VALUES('comment-a','p',1,'abcdef0123456789','{\"file\":\"x.rs\",\"side\":\"new\",\"line\":1}','exact source','Please fix','human:boss',1,1);").unwrap();
     let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
     let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
@@ -3308,6 +3309,15 @@ fn commit_review_snapshots_and_laptop_feedback_sync_without_a_checkout() {
         )
         .unwrap(),
         "whole patch\n"
+    );
+    assert_eq!(
+        b.query_row(
+            "SELECT raw_commit FROM commit_shelf WHERE project_id='p' AND issue_number=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "raw"
     );
     b.execute_batch("UPDATE commit_reviews SET message='Edited on laptop'; UPDATE commit_review_comments SET body='Changed on laptop',updated_at=2;").unwrap();
     capture_all(&b, &mut eb);

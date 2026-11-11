@@ -7,6 +7,9 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, process::Command};
 
 pub(crate) const SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS commit_shelf(
+ project_id TEXT NOT NULL, sha TEXT NOT NULL, raw_commit TEXT NOT NULL, issue_number INTEGER NOT NULL DEFAULT 0, saved_at INTEGER NOT NULL, PRIMARY KEY(project_id,sha)
+);
 CREATE TABLE IF NOT EXISTS commit_reviews(
  project_id TEXT NOT NULL, issue_number INTEGER NOT NULL, sha TEXT NOT NULL,
  snapshot TEXT NOT NULL CHECK(json_valid(snapshot)), message TEXT NOT NULL,
@@ -156,7 +159,7 @@ pub fn capture(cwd: &Path, sha: &str, repository: &str) -> Result<Option<Snapsho
     validate(&snapshot)?;
     Ok(Some(snapshot))
 }
-fn validate(snapshot: &Snapshot) -> Result<()> {
+pub(super) fn validate(snapshot: &Snapshot) -> Result<()> {
     // Leave room for JSON escaping and the task envelope in the 16 MiB transport.
     if serde_json::to_vec(snapshot)?.len() > 12 * 1024 * 1024 {
         return Err(Error::invalid(
@@ -397,6 +400,17 @@ pub(crate) fn execute(
     now: i64,
 ) -> Result<Value> {
     let sha = resolve(db, &project.id, number, commit)?;
+    execute_sha(db, project, number, &sha, operation, actor, now)
+}
+pub(super) fn execute_sha(
+    db: &Connection,
+    project: &Project,
+    number: i64,
+    sha: &str,
+    operation: &Operation,
+    actor: Option<&Actor>,
+    now: i64,
+) -> Result<Value> {
     let (encoded, current): (String,String) = db.query_row("SELECT snapshot,message FROM commit_reviews WHERE project_id=?1 AND issue_number=?2 AND sha=?3",params![project.id,number,sha],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(|| Error::invalid("No stored patch; attach this commit from its Git checkout with issue commit add"))?;
     let snapshot: Snapshot = serde_json::from_str(&encoded)?;
     let mut result =
@@ -429,7 +443,7 @@ pub(crate) fn execute(
             if db.execute("DELETE FROM commit_review_comments WHERE project_id=?1 AND issue_number=?2 AND sha=?3 AND id=?4 AND body=?5",params![project.id,number,sha,id,previous_body])?==0 { return Err(Error::conflict("Comment changed or was deleted; reload before deleting")); }
         },
     }
-    if operation.writes() {
+    if number > 0 && operation.writes() {
         db.execute(
             "UPDATE issues SET version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2",
             params![project.id, number, now],
