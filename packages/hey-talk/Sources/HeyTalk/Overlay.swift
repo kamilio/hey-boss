@@ -134,6 +134,8 @@ final class Overlay {
     private let editSpelling = NSButton()
     private var addedTerm: String?
     private let confirmation = NSTextField(labelWithString: "")
+    private let chatIcon = NSImageView()
+    private let chatSpinner = NSProgressIndicator()
     private let connecting = NSTextField(labelWithString: "Connecting…")
     private var waitingForAudio = false
     private var connectingDelay: DispatchWorkItem?
@@ -287,6 +289,9 @@ final class Overlay {
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
         pillContent.addSubview(connecting)
+        chatIcon.imageScaling = .scaleProportionallyDown; chatIcon.isHidden = true
+        chatSpinner.style = .spinning; chatSpinner.controlSize = .small; chatSpinner.isDisplayedWhenStopped = false
+        for v in [chatIcon, chatSpinner] { pillContent.addSubview(v) }
         noticeRecordButton.title = ""
         noticeRecordButton.isBordered = false
         noticeRecordButton.setAccessibilityLabel("Start dictation")
@@ -425,8 +430,25 @@ final class Overlay {
         connectingDelay?.cancel(); connectingDelay = nil
         if confirmation.isHidden || next == .recording { clearNotice() }
         self.waitingForAudio = waitingForAudio
-        if let conversation { connecting.stringValue = conversation["message"] as? String ?? "Ready" }
-        connecting.isHidden = conversation == nil
+        connecting.isHidden = true
+        chatSpinner.stopAnimation(nil); chatIcon.isHidden = conversation == nil
+        if let conversation {
+            let symbol: String
+            switch (conversation["phase"] as? String, conversation["message"] as? String) {
+            case _ where conversation["approval"] as? Bool == true: symbol = "hand.raised.fill"
+            case (_, "Microphone muted"), ("idle", _): symbol = "mic.slash"
+            case (_, "Paused"): symbol = "pause.fill"
+            case ("speaking", _): symbol = "speaker.wave.2.fill"
+            case ("listening", _), ("recording", _): symbol = "mic.fill"
+            default: symbol = "hourglass"
+            }
+            chatIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: conversation["message"] as? String)
+            chatIcon.contentTintColor = conversation["approval"] as? Bool == true ? .systemOrange : next == .recording || conversation["phase"] as? String == "listening" ? TalkDesign.active : TalkDesign.accent
+            identity.isHidden = true
+            if next == .processing && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+                chatIcon.isHidden = true; chatSpinner.startAnimation(nil)
+            }
+        }
         phase = next; expanded = next == .recording
         updateModeAppearance()
         wave.update(level: nil)
@@ -627,10 +649,9 @@ final class Overlay {
             if glass.style != style { glass.style = style }
         }
         let showConnecting = !connecting.isHidden
-        let compactVoice = conversation != nil && !expanded
         let labelX: CGFloat = expanded ? 102 : 40
         if showConnecting { connecting.sizeToFit() }
-        let statusWidth = labelX + connecting.frame.width + (compactVoice ? labelX : 12)
+        let statusWidth = labelX + connecting.frame.width + 12
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26 + (editSpelling.isHidden ? 0 : 26)
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
         let showChat = hover && canRevealChat
@@ -693,7 +714,9 @@ final class Overlay {
         autoHalo.path = autoOutline
         CATransaction.commit()
         let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded || showConnecting ? contentOrigin + (compactVoice ? 16 : 9) : leftExtension + (showChat ? 13 : (size.width - 22) / 2)
+        let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (showChat ? 13 : (size.width - 22) / 2)
+        chatIcon.frame = NSRect(x: markX + 2, y: 9, width: 18, height: 18)
+        chatSpinner.frame = NSRect(x: markX + 3, y: 10, width: 16, height: 16)
         chatButton.frame = NSRect(x: 44, y: 3, width: 32, height: 30)
         NSAnimationContext.runAnimationGroup { context in
             context.duration = animate ? duration : 0

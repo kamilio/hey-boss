@@ -17,15 +17,10 @@ final class OverlayTests: XCTestCase {
             overlay.showConversation(["phase": phase, "message": message, "action": "Stop voice"])
             XCTAssertTrue(surface.accessibilityLabel()?.contains(message) == true)
             XCTAssertFalse(surface.accessibilityLabel()?.contains("dictation") == true)
-            let label = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { !$0.isHidden && $0.stringValue == message })
-            if message == "Voice off" || message == "Listening" {
-                try await Task.sleep(for: .milliseconds(350))
-                let icon = try XCTUnwrap(all.first { String(describing: type(of: $0)) == "IdentityView" })
-                let capCenter = label.frame.maxY - label.firstBaselineOffsetFromTop + label.font!.capHeight / 2
-                XCTAssertEqual(capCenter, icon.frame.midY, accuracy: 0.5)
-                XCTAssertEqual(label.frame.midX, surface.bounds.midX, accuracy: 0.5)
-                XCTAssertLessThan(icon.frame.maxX, label.frame.minX)
-            }
+            XCTAssertFalse(all.compactMap { $0 as? NSTextField }.contains { !$0.isHidden && $0.stringValue == message })
+            let icon = all.compactMap { $0 as? NSImageView }.first { !$0.isHidden && $0.image?.accessibilityDescription == message }
+            let spinner = all.compactMap { $0 as? NSProgressIndicator }.first { !$0.isHidden }
+            XCTAssertTrue(icon != nil || spinner != nil)
             XCTAssertTrue(surface.layer?.sublayers?.first { $0.name == "ai-disabled" }?.isHidden == true)
             XCTAssertFalse(panel.canBecomeKey)
         }
@@ -49,35 +44,6 @@ final class OverlayTests: XCTestCase {
         XCTAssertTrue(surface.accessibilityLabel()?.contains("Start dictation") == true)
         overlay.preparing(.listening)
         XCTAssertTrue(surface.accessibilityLabel()?.contains("Opening microphone") == true, "Startup state changes before the delayed Connecting label")
-    }
-
-    @MainActor func testVoicePillFitsEachNewMessageFromItsFirstDisplayedFrame() async throws {
-        let windows = Set(NSApplication.shared.windows.map(\.windowNumber))
-        let overlay = Overlay()
-        overlay.show(true)
-        defer { overlay.show(false) }
-        let panel = try XCTUnwrap(NSApplication.shared.windows.first { !windows.contains($0.windowNumber) && $0.title == "Hey Talk — Recording" })
-        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
-        let all = views(try XCTUnwrap(panel.contentView))
-        let label = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { $0.stringValue == "Connecting…" })
-        let face = try XCTUnwrap(label.superview?.layer)
-        var widths: [CGFloat] = []
-        for (phase, message) in [("listening", "Listening"), ("thinking", "Waiting for microphone permission"), ("recording", "Recording your voice message"), ("idle", "Voice off")] {
-            let reference = NSTextField(labelWithString: message)
-            reference.font = label.font
-            reference.sizeToFit()
-            overlay.showConversation(["phase": phase, "message": message])
-            for _ in 0..<20 {
-                try await Task.sleep(for: .milliseconds(16))
-                let field = try XCTUnwrap(label.layer?.presentation())
-                let capsule = try XCTUnwrap(face.presentation())
-                XCTAssertGreaterThanOrEqual(field.bounds.width, reference.frame.width)
-                XCTAssertGreaterThanOrEqual(field.bounds.height, reference.frame.height)
-                XCTAssertTrue(capsule.bounds.contains(field.frame), "The glass must contain the whole label")
-            }
-            widths.append(face.bounds.width)
-        }
-        XCTAssertGreaterThan(widths[1], widths[0])
     }
 
     @MainActor func testT3ConfirmationIsSmallTemporaryAndLeavesDictationAlone() async throws {
