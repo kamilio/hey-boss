@@ -98,13 +98,15 @@ enum ConversationContext {
         return "https://app.slack.com" + url.path
     }
 
-    private static func slackRoute(_ app: NSRunningApplication, window: AXUIElement) -> String? {
+    static func slackRoute(_ app: NSRunningApplication, window: AXUIElement) -> String? {
         if let field = FocusedInput.read(app: app, forAuto: false), let original = field.window, CFEqual(original, window),
            let doc = field.document, let url = URLComponents(string: doc), url.scheme == "slack",
            let items = url.queryItems, let team = items.first(where: { $0.name == "team" })?.value,
-           let channel = items.first(where: { $0.name == "id" })?.value,
-           let ts = items.first(where: { $0.name == "thread_ts" })?.value {
-            return slackURL("https://app.slack.com/client/" + team + "/" + channel + "/thread/" + channel + "-" + ts)
+           let channel = items.first(where: { $0.name == "id" })?.value {
+            let base = "https://app.slack.com/client/" + team + "/" + channel
+            if let ts = items.first(where: { $0.name == "thread_ts" })?.value { return slackURL(base + "/thread/" + channel + "-" + ts) }
+            // Slack’s DMs tab has no channel ID in the window URL.
+            if SlackTools.route(in: window)?.lastPathComponent == "dms" { return slackURL(base) }
         }
         let route = SlackTools.route(in: window)
         return route.flatMap { slackURL($0.absoluteString) }

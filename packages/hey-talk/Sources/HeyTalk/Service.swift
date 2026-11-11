@@ -431,6 +431,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let view = Overlay()
             view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
+            view.onCatchUp = { [weak self] in
+                do { try self?.speech.catchUp() } catch { self?.speech.onNotice?(error.localizedDescription) }
+            }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleAutoSubmit = { [weak self] in self?.toggleAutoSubmit() }
@@ -693,6 +696,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         }
                     }
                     return
+                case "catch-up":
+                    do { try speech.catchUp() }
+                    catch { speech.onNotice?(error.localizedDescription); throw error }
                 case "pause": speech.pause()
                 case "stop": speech.stop()
                 default:

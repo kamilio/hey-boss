@@ -176,6 +176,7 @@ final class Overlay {
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
     var onOpenAccessibility: (() -> Void)?
+    var onCatchUp: (() -> Void)?
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
     var onToggleAutoSubmit: (() -> Void)?
@@ -572,6 +573,7 @@ final class Overlay {
                 item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
             }
         }
+        menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Conversation"))
         let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
@@ -585,6 +587,7 @@ final class Overlay {
         return menu
     }
     @objc private func openAccessibility() { onOpenAccessibility?() }
+    @objc private func catchUp() { onCatchUp?() }
     @objc private func toggleSpeechMode() { onToggleSpeech?() }
     @objc private func toggleAutoMode() { onToggleAuto?() }
     @objc private func toggleAutoSubmit() { onToggleAutoSubmit?() }

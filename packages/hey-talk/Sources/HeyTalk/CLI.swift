@@ -27,6 +27,7 @@ enum CLI {
     hey-talk correction [on|off|toggle]         Fix punctuation and typos with Luna
     hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
+    hey-talk speech catch-up                  Hear replies since your last message in T3 or Slack
     hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
     hey-talk enter-exceptions sites [add|remove HOST]  Websites that never receive Enter

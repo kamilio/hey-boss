@@ -2,6 +2,27 @@ import Foundation
 import TalkCore
 
 extension SlackTools {
+    static func messagePages(channel: String, thread: String?, deadline: TimeInterval,
+                             call: (String, [String: String]) async throws -> [String: Any],
+                             visit: ([[String: Any]]) throws -> Bool) async throws {
+        var params = ["channel": channel, "limit": "200"], seen = Set<String>()
+        params["ts"] = thread
+        repeat {
+            try Task.checkCancellation()
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw TalkError("Time limit reached.") }
+            let page = try await call(thread == nil ? "conversations.history" : "conversations.replies", params)
+            guard let messages = page["messages"] as? [[String: Any]] else { throw TalkError("Slack returned no history page.") }
+            guard try visit(messages) else { return }
+            let cursor = (page["response_metadata"] as? [String: Any])?["next_cursor"] as? String ?? ""
+            if cursor.isEmpty {
+                guard page["has_more"] as? Bool != true else { throw TalkError("Slack did not return the next page.") }
+                break
+            }
+            guard seen.insert(cursor).inserted else { throw TalkError("Slack repeated a page.") }
+            params["cursor"] = cursor
+        } while true
+    }
+
     /// Route has already been checked against the focused Slack window.
     static func history(_ route: URL, call: (String, [String: String]) async throws -> [String: Any]) async throws -> String {
         let path = route.pathComponents, identity = try await call("auth.test", [:])
@@ -9,12 +30,7 @@ extension SlackTools {
         var lines = [String: String](), parents = [String](), remaining = 256 * 1024
         let deadline = ProcessInfo.processInfo.systemUptime + 75
         func pages(thread: String?) async throws {
-            var params = ["channel": path[3], "limit": "200"], seen = Set<String>()
-            params["ts"] = thread
-            repeat {
-                guard ProcessInfo.processInfo.systemUptime < deadline else { throw TalkError("Time limit reached.") }
-                let page = try await call(thread == nil ? "conversations.history" : "conversations.replies", params)
-                guard let messages = page["messages"] as? [[String: Any]] else { throw TalkError("Slack returned no history page.") }
+            try await messagePages(channel: path[3], thread: thread, deadline: deadline, call: call) { messages in
                 for message in messages {
                     guard let ts = message["ts"] as? String, lines[ts] == nil else { continue }
                     let user = (message["user_profile"] as? [String: Any])?["display_name"] as? String ?? (message["username"] ?? message["user"] ?? message["bot_id"]) as? String ?? "Slack"
@@ -32,14 +48,8 @@ extension SlackTools {
                     guard remaining > 0 else { throw TalkError("256 KiB limit reached.") }
                     if thread == nil, (message["reply_count"] as? Int ?? 0) > 0 { parents.append(ts) }
                 }
-                let cursor = (page["response_metadata"] as? [String: Any])?["next_cursor"] as? String ?? ""
-                if cursor.isEmpty {
-                    guard page["has_more"] as? Bool != true else { throw TalkError("Slack did not return the next page.") }
-                    break
-                }
-                guard seen.insert(cursor).inserted else { throw TalkError("Slack repeated a page.") }
-                params["cursor"] = cursor
-            } while true
+                return true
+            }
         }
         var note = ""
         do {
