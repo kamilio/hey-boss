@@ -5,7 +5,7 @@ root=$(mktemp -d "$PWD/.conversation-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 resources=$(dirname "$2")
 if [ "$(basename "$resources")" = MacOS ]; then resources="$resources/../Resources"; fi
-node tools/conversation_media_checks.mjs "$resources" "$root"
+cargo run --quiet --manifest-path assets/conversation-native/Cargo.toml --example gallery -- "$resources" "$root"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_MEDIA="$root" "$2"
 HEY_BOSS_AUDIT_PILL_ESCAPE="$root/escape" "$2"
 say -v Samantha -o "$root/first.aiff" 'Which fruit is on this page? Answer in one word.'

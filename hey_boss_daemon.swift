@@ -8780,8 +8780,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func startSol() throws {
         guard let resources = Bundle.main.resourceURL else { throw StorageError(description: "The conversation agent is missing. Reinstall Hey Boss.") }
         let child = Process()
-        child.executableURL = resources.appendingPathComponent("node")
-        child.arguments = [resources.appendingPathComponent("conversation-agent.mjs").path, agentStateURL.path]
+        child.executableURL = resources.appendingPathComponent("conversation-agent")
+        child.arguments = [agentStateURL.path]
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         environment["PATH"] = home + "/.local/bin:" + home + "/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")

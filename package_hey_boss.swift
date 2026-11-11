@@ -35,7 +35,15 @@ func agentRevision() throws -> String {
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-visuals.md", "assets/conversation-tools/inspect_window.md", "assets/conversation-tools/hide_media.md", "assets/conversation-tools/show_media.md", "assets/conversation-tools/shell.md", "assets/conversation-tools/batch.md", "assets/conversation-agent.mjs", "assets/conversation-media.mjs", "assets/conversation-dot.mjs", "assets/mermaid-LICENSE", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
+    let rust = "assets/conversation-native"
+    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
+    for folder in ["assets", "assets/conversation-tools"] {
+        inputs += try files.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)
+            .filter { $0.hasSuffix(".md") }.map { folder + "/" + $0 }
+    }
+    inputs += try files.subpathsOfDirectory(atPath: root.appendingPathComponent(rust + "/src").path)
+        .filter { $0.hasSuffix(".rs") }.map { rust + "/src/" + $0 }
+    for name in inputs.sorted() {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
@@ -137,6 +145,28 @@ if CommandLine.arguments[1] == "--cli" {
 let source = URL(fileURLWithPath: CommandLine.arguments[1])
 let app = URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true)
 precondition(app.pathExtension == "app")
+let native = root.appendingPathComponent("assets/conversation-native")
+let target = files.homeDirectoryForCurrentUser.appendingPathComponent(".cache/hey-boss/conversation-target")
+func cargo(_ args: [String]) throws {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["cargo"] + args
+    process.currentDirectoryURL = native
+    var environment = ProcessInfo.processInfo.environment
+    environment["PATH"] = files.homeDirectoryForCurrentUser.path + "/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+    environment["CARGO_NET_GIT_FETCH_WITH_CLI"] = "true"
+    process.environment = environment
+    try process.run(); process.waitUntilExit()
+    require(process.terminationStatus == 0, "Conversation build failed: cargo " + args.joined(separator: " "))
+}
+// Resolve main for each package; fingerprint the revision Cargo actually built.
+try cargo(["generate-lockfile"])
+let lock = try String(contentsOf: native.appendingPathComponent("Cargo.lock"), encoding: .utf8)
+let upstream = lock.components(separatedBy: .newlines).first { $0.hasPrefix("source = \"git+https://github.com/poe-platform/poe-code?branch=main#") }
+let revision = upstream?.split(separator: "#").last?.dropLast()
+require(revision?.count == 40, "Cargo did not resolve the Poe Code revision")
+resolvedAgentRevision = revision.map(String.init)
+try cargo(["build", "--release", "--locked", "--bins", "--target-dir", target.path])
 let contents = app.appendingPathComponent("Contents", isDirectory: true)
 let executables = contents.appendingPathComponent("MacOS", isDirectory: true)
 let resources = contents.appendingPathComponent("Resources", isDirectory: true)
@@ -152,16 +182,19 @@ try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
     .write(to: resources.appendingPathComponent("conversation.md"), options: .atomic)
 try Data(contentsOf: root.appendingPathComponent("assets/conversation-title.md"))
     .write(to: resources.appendingPathComponent("conversation-title.md"), options: .atomic)
-let buildAgent = Process()
-buildAgent.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-buildAgent.arguments = ["node", root.appendingPathComponent("assets/build-conversation-agent.mjs").path, resources.path, try agentRevision()]
-var environment = ProcessInfo.processInfo.environment
-environment["PATH"] = files.homeDirectoryForCurrentUser.path + "/.cargo/bin:" + files.homeDirectoryForCurrentUser.path + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
-buildAgent.environment = environment
-try buildAgent.run(); buildAgent.waitUntilExit()
-require(buildAgent.terminationStatus == 0, "Could not build Poe Agent from GitHub")
-try sign(resources.appendingPathComponent("node"), identifier: "local.hey-boss.agent-node")
-try sign(resources.appendingPathComponent("mmdr"), identifier: "local.hey-boss.mermaid")
+for name in ["conversation-agent", "conversation-diagram"] {
+    let dest = resources.appendingPathComponent(name)
+    if files.fileExists(atPath: dest.path) { try files.removeItem(at: dest) }
+    try files.copyItem(at: target.appendingPathComponent("release/" + name), to: dest)
+    try sign(dest, identifier: "local.hey-boss." + name)
+}
+for name in ["poe-code-LICENSE", "mermaid-LICENSE"] {
+    try Data(contentsOf: root.appendingPathComponent("assets/" + name)).write(to: resources.appendingPathComponent(name), options: .atomic)
+}
+for name in ["node", "mmdr", "poe-agent.mjs", "viz.mjs", "conversation-agent.mjs", "conversation-media.mjs", "conversation-dot.mjs", "poe-agent-revision", "conversation-tools", "conversation-visuals.md"] {
+    let old = resources.appendingPathComponent(name)
+    if files.fileExists(atPath: old.path) { try files.removeItem(at: old) }
+}
 let manifest = try String(contentsOf: root.appendingPathComponent("Cargo.toml"), encoding: .utf8)
 let version = manifest.components(separatedBy: .newlines).first { $0.hasPrefix("version = ") }!.components(separatedBy: "\"")[1]
 let info: [String: Any] = [
