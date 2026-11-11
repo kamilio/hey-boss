@@ -26,14 +26,16 @@ enum Action {
     /// Inspect a stored diff and its review comments.
     Open { sha: String },
     /// Shelve the current branch tip. Linking its task is recommended.
-    Stash {
+    #[command(alias = "stash")]
+    StashCommit {
         /// Refuse to shelve if the displayed branch tip has changed.
         sha: Option<String>,
         #[arg(long)]
         task: Option<i64>,
     },
     /// Cherry-pick a shelf entry into this checkout; keep the saved review.
-    Unstash { sha: String },
+    #[command(alias = "unstash")]
+    ApplyCommit { sha: String },
     /// Attach an existing shelf entry and its discussion to a task.
     Link {
         sha: String,
@@ -147,7 +149,7 @@ fn run() -> Result<()> {
             }
 
             if rows.is_empty() {
-                println!("Shelf is empty. Save a commit with g stash --task NUMBER.");
+                println!("Shelf is empty. Save a commit with g stash-commit SHA --task NUMBER.");
             }
             for e in rows {
                 let task = e["task"]
@@ -191,8 +193,10 @@ fn run() -> Result<()> {
                 return Err("Commit is not available in the shelf or checkout".into());
             }
         }
-        Some(Action::Stash { sha, task }) => println!("{}", checkout::stash(sha.as_deref(), task)?),
-        Some(Action::Unstash { sha }) => println!("{}", checkout::unstash(&sha)?),
+        Some(Action::StashCommit { sha, task }) => {
+            println!("{}", checkout::stash(sha.as_deref(), task)?)
+        }
+        Some(Action::ApplyCommit { sha }) => println!("{}", checkout::unstash(&sha)?),
         Some(Action::Link { sha, task }) => {
             rpc(json!({"command":"link","sha":sha,"task":task}))?;
             println!("Linked to task #{task}");

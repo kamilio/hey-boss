@@ -263,7 +263,7 @@ impl View {
             4
         } else if !self.message.is_empty() {
             3
-        } else if narrow {
+        } else if area.width < 90 {
             2
         } else {
             1
@@ -296,7 +296,7 @@ impl View {
             f.render_widget(block, left);
             if self.entries.is_empty() {
                 f.render_widget(
-                    Paragraph::new("No shelved commits yet.\n\nCtrl+S shelves your branch tip.")
+                    Paragraph::new("No shelved commits yet.\n\nCtrl+S to stash your tip commit.")
                         .wrap(Wrap { trim: false })
                         .style(style(MUTED)),
                     inner,
@@ -367,12 +367,12 @@ impl View {
         let hint = if self.detail {
             "↑↓ lines  ←→ pan  Tab shelf  Ctrl+C comment  Esc back"
         } else {
-            "↑↓ select  Enter review  Ctrl+S shelve  Ctrl+U restore  Ctrl+L link  Esc quit"
+            "↑↓ select  Enter review  Ctrl+S stash-commit  Ctrl+U apply-commit  Ctrl+L link  Esc quit"
         };
         if let Some(p) = self.prompt {
             let label = match p {
-                Prompt::Stash => "Shelve HEAD · task # (recommended; blank for none)",
-                Prompt::Restore => "Cherry-pick selected commit into this branch?",
+                Prompt::Stash => "Stash commit · task # (optional, recommended)",
+                Prompt::Restore => "Apply selected commit here (cherry-pick)?",
                 Prompt::Link => "Link this review to task #",
                 Prompt::Comment => "Comment on the selected line",
             };

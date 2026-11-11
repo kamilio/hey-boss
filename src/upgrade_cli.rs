@@ -804,7 +804,7 @@ fn apply(
             if installed_id(&staged).as_ref() != Some(stamp) {
                 return Err(error("Staged shelf failed build verification"));
             }
-            output(Command::new(staged).args(["stash", "--help"]))?;
+            output(Command::new(staged).args(["stash-commit", "--help"]))?;
         }
         if cfg!(target_os = "macos") {
             // Sign before executing migration or publishing anything. Never

@@ -33,7 +33,7 @@ try{
   for(const [name,value] of [['Allow slower connections',200],['Increase search timeout',250]]){
     writeFileSync(join(cwd,'search.rs'),`const TIMEOUT_MS: u32 = ${value};\n`);
     run('git','commit','-qam',name);
-    if(value===200){run(g,'stash');continue;}
+    if(value===200){run(g,'stash-commit',run('git','rev-parse','HEAD'));continue;}
   }
   const s=await pilot.newSession({command:g,cwd,env,cols:106,rows:27});
   const see=t=>s.waitFor(t,{scope:'screen',timeout:10000});
@@ -45,7 +45,7 @@ try{
   await s.press('Tab');await see('Matches the mobile timeout.');await shot('project-shelf');
   await s.resize(48,23);await s.press('ArrowLeft');await see('Ctrl+L link');assert(!(await s.screen()).contains('Review'));await shot('compact-shelf');
   await s.press('Enter');await see('Matches the mobile timeout.');await shot('compact-review');
-  await s.press('Escape');await see('Commits');await s.press('Control+u');await see('Cherry-pick selected');await s.press('Escape');
+  await s.press('Escape');await see('Commits');await s.press('Control+u');await see('Apply selected commit');await s.press('Escape');
   assert.equal(run('git','log','-1','--format=%s'),'Initialize search');
   await s.press('Escape');assert.equal(await s.waitForExit(),0);
   console.log('Terminal Pilot: empty shelf, task-linked stash, inline comment, navigation, resize and canceled restore passed.');
