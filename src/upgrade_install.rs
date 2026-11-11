@@ -196,6 +196,9 @@ fn companion_bins(binary: &Path, home: &Path) -> Vec<PathBuf> {
             }
         }
     }
+    if shelf_enabled(home) {
+        paths.push(home.join(".local/bin/g"));
+    }
     paths
 }
 
@@ -408,6 +411,14 @@ fn publish_to(
         }
         if installed_id(binary).as_deref() != Some(&receipt.source.build) {
             return Err(error("Installed CLI failed build verification"));
+        }
+        for shelf in companion_bins
+            .iter()
+            .filter(|p| p.file_name().is_some_and(|n| n == "g"))
+        {
+            if receipt.source.shelf.is_none() || installed_id(shelf) != receipt.source.shelf {
+                return Err(error("Installed shelf failed build verification"));
+            }
         }
         shortcut(binary)?;
         output(Command::new(binary).args(["secrets", "install"]))?;
@@ -758,6 +769,12 @@ esac
             !destinations.contains(&home.join(".local/bin/hey-gh")),
             "do not create previously absent alternate installations"
         );
+        let shelf = home.join(".local/bin/g");
+        assert!(!destinations.contains(&shelf));
+        let marker = home.join(".config/hey-boss/git-shelf");
+        fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        fs::write(marker, "").unwrap();
+        assert!(companion_bins(&homebrew, &home).contains(&shelf));
         let local_installation = companion_bins(&home.join(".local/bin/hey-boss"), &home);
         assert_eq!(
             local_installation
@@ -800,6 +817,7 @@ esac
         Receipt {
             generation: 2,
             source: Source {
+                shelf: None,
                 kind: "main".into(),
                 repository: Some("repo".into()),
                 commit: Some("commit".into()),
@@ -881,6 +899,9 @@ esac
             &bin.with_file_name("hey-harvester"),
             "echo old-hey-harvester",
         );
+        script(&built.with_file_name("g"), "echo staged-shelf");
+        script(&bin.with_file_name("g"), "echo old-shelf");
+        let original_shelf = fs::read(bin.with_file_name("g")).unwrap();
         let original = fs::read(&bin).unwrap();
         let state = temp.0.join("state");
         fs::create_dir(&state).unwrap();
@@ -895,6 +916,7 @@ esac
                 app: None,
                 companion: false,
                 companion_bins: vec![
+                    bin.with_file_name("g"),
                     bin.with_file_name("hey-gh"),
                     bin.with_file_name("hey-harvester"),
                 ],
@@ -915,6 +937,7 @@ esac
             "#!/bin/sh\necho old-hey-harvester\n"
         );
         assert_eq!(fs::read(&bin).unwrap(), original);
+        assert_eq!(fs::read(bin.with_file_name("g")).unwrap(), original_shelf);
         assert_eq!(
             fs::read_to_string(bin.with_file_name("hey-gh")).unwrap(),
             "#!/bin/sh\necho old-hey-gh\n"

@@ -38,6 +38,10 @@ const PAYLOAD: &[&str] = &[
     "build.rs",
     "src",
     "skills/hey-boss",
+    "packages/git-shelf/Cargo.toml",
+    "packages/git-shelf/Cargo.lock",
+    "packages/git-shelf/build.rs",
+    "packages/git-shelf/src",
     "packages/hey-gh",
     "packages/hey-boss-http",
     "packages/hey-boss-sync",
@@ -57,7 +61,7 @@ const UPSTREAM: &str = "https://github.com/kamilio/hey-boss.git";
 const MANIFEST: &str = ".hey-boss-source.json";
 // Archives can have older mtimes than artifacts from another snapshot in the
 // shared Cargo target. Refresh every packaged source, including companion crates.
-const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; for source in src packages/hey-boss-sync packages/hey-boss-secrets packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
+const REFRESH_BUILD_INPUTS: &str = "touch \"$upgrade_stage/build.rs\"; for source in src packages/hey-boss-sync packages/hey-boss-secrets packages/git-shelf/src packages/hey-gh/src packages/hey-boss-http/src packages/hey-proxy; do if test -d \"$upgrade_stage/$source\"; then find \"$upgrade_stage/$source\" -type f -exec touch {} +; fi; done";
 
 #[derive(Args)]
 pub struct Options {
@@ -225,8 +229,22 @@ fn collect(root: &Path, path: &Path, files: &mut Vec<PathBuf>) -> io::Result<()>
     Ok(())
 }
 fn build_id(root: &Path) -> io::Result<String> {
+    fingerprint(root, INPUTS)
+}
+fn shelf_id(root: &Path) -> io::Result<String> {
+    fingerprint(
+        root,
+        &[
+            "packages/git-shelf/Cargo.toml",
+            "packages/git-shelf/Cargo.lock",
+            "packages/git-shelf/build.rs",
+            "packages/git-shelf/src",
+        ],
+    )
+}
+fn fingerprint(root: &Path, inputs: &[&str]) -> io::Result<String> {
     let mut files = Vec::new();
-    for name in INPUTS {
+    for name in inputs {
         collect(root, &root.join(name), &mut files)?;
     }
     // build.rs sorts complete relative names, rather than Path components.
@@ -327,6 +345,10 @@ fn snapshot_at(
                 "build.rs",
                 "src",
                 "skills/hey-boss",
+                "packages/git-shelf/Cargo.toml",
+                "packages/git-shelf/Cargo.lock",
+                "packages/git-shelf/build.rs",
+                "packages/git-shelf/src",
                 "packages/hey-gh",
                 "packages/hey-boss-http",
                 "packages/hey-boss-sync",
@@ -366,10 +388,13 @@ fn snapshot_at(
         }
     } else {
         let before = build_id(&root)?;
+        let shelf_before = shelf_id(&root)?;
         for name in PAYLOAD {
             copy_tree(&root.join(name), &destination.join(name))?;
         }
-        if before != build_id(destination)?
+        if shelf_before != shelf_id(destination)?
+            || shelf_before != shelf_id(&root)?
+            || before != build_id(destination)?
             || before != build_id(&root)?
             || git(&root, &["rev-parse", "HEAD"]).ok() != commit
         {
@@ -387,6 +412,7 @@ fn snapshot_at(
         .map(str::to_owned)
         .collect();
     let source = Source {
+        shelf: Some(shelf_id(destination)?),
         kind: kind.into(),
         repository: repository(&root),
         commit,
@@ -399,8 +425,22 @@ fn snapshot_at(
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct Installation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shelf_build: Option<String>,
     build: Option<String>,
     receipt: Option<Receipt>,
+}
+impl Installation {
+    fn matches_build(&self, source: &Source) -> bool {
+        self.build.as_deref() == Some(&source.build)
+            && self
+                .shelf_build
+                .as_ref()
+                .is_none_or(|v| Some(v) == source.shelf.as_ref())
+    }
+}
+fn shelf_enabled(home: &Path) -> bool {
+    home.join(".config/hey-boss/git-shelf").is_file()
 }
 fn installed_id(binary: &Path) -> Option<String> {
     let bytes = output(Command::new(binary).arg("--version")).ok()?;
@@ -419,7 +459,10 @@ fn inspect_unlocked(binary: &Path, state: &Path) -> io::Result<Installation> {
     } else {
         None
     };
+    let home = home()?;
     Ok(Installation {
+        shelf_build: shelf_enabled(&home)
+            .then(|| installed_id(&home.join(".local/bin/g")).unwrap_or_else(|| "missing".into())),
         build: installed_id(binary),
         receipt,
     })
@@ -466,6 +509,7 @@ fn target_inspect(host: &str, binary: &Path) -> io::Result<Installation> {
             let bytes = output(ssh(host)?.arg("if test -f \"$HOME/.local/share/hey-boss/upgrade-receipt.json\"; then exit 1; fi; \"$HOME/.local/bin/hey-boss\" --version"))?;
             let version = String::from_utf8_lossy(&bytes);
             Ok(Installation {
+                shelf_build: None,
                 build: version
                     .split("(build ")
                     .nth(1)
@@ -595,7 +639,7 @@ fn remote_install(
     // archive or compiling a guard; the destination still checks under its lock.
     authorize(source, current.receipt.as_ref(), observed)?;
     if !force
-        && current.build.as_deref() == Some(&source.build)
+        && current.matches_build(&source)
         && current
             .receipt
             .as_ref()
@@ -705,13 +749,18 @@ fn apply(
     force: bool,
 ) -> io::Result<Installation> {
     let source: Source = json(&snapshot.join(MANIFEST))?;
-    if build_id(snapshot)? != source.build {
+    if build_id(snapshot)? != source.build
+        || source
+            .shelf
+            .as_ref()
+            .is_some_and(|id| shelf_id(snapshot).as_ref().ok() != Some(id))
+    {
         return Err(error("Received source does not match its provenance"));
     }
     let state = state()?;
     let installed = ordered_install(&state, &source, observed, |previous_receipt| {
         let previous = inspect_unlocked(binary, &state)?;
-        if previous.build.as_deref() == Some(&source.build)
+        if previous.matches_build(&source)
             && !force
             && previous
                 .receipt
@@ -727,7 +776,7 @@ fn apply(
             source: installed_source,
             installed_at: now(),
         };
-        if previous.build.as_deref() == Some(&source.build) && !force {
+        if previous.matches_build(&source) && !force {
             // Identical inputs at a newer commit need only advance provenance,
             // without compiling Swift or restarting healthy services.
             write_json(&state.join("upgrade-receipt.json"), &receipt)?;
@@ -735,6 +784,28 @@ fn apply(
         }
         let target = home()?.join(".cache/hey-boss/build");
         let built = build(snapshot, &target)?;
+        if shelf_enabled(&home()?) {
+            let stamp=source.shelf.as_ref().ok_or_else(||error("This source archive lacks the optional shelf; stage it with an updated installer"))?;
+            let manifest = snapshot.join("packages/git-shelf/Cargo.toml");
+            output(
+                Command::new(home()?.join(".cargo/bin/cargo"))
+                    .args([
+                        "build",
+                        "--quiet",
+                        "--release",
+                        "--locked",
+                        "--manifest-path",
+                    ])
+                    .arg(manifest)
+                    .env("CARGO_TARGET_DIR", &target)
+                    .env("GIT_SHELF_BUILD_ID", stamp),
+            )?;
+            let staged = built.with_file_name("g");
+            if installed_id(&staged).as_ref() != Some(stamp) {
+                return Err(error("Staged shelf failed build verification"));
+            }
+            output(Command::new(staged).args(["stash", "--help"]))?;
+        }
         if cfg!(target_os = "macos") {
             // Sign before executing migration or publishing anything. Never
             // replace a working installation with an ad-hoc permission identity.
@@ -817,7 +888,7 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
             entry.installed_build = before.build.clone();
             entry.before = Some(before.clone());
             if options.check {
-                entry.status = if before.build.as_deref() == Some(&source.build) {
+                entry.status = if before.matches_build(&source) {
                     "current"
                 } else {
                     "outdated"
@@ -834,7 +905,7 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
                     );
                 }
                 let installed = if !options.force
-                    && before.build.as_deref() == Some(&source.build)
+                    && before.matches_build(&source)
                     && before
                         .receipt
                         .as_ref()
@@ -852,7 +923,7 @@ fn rollout(options: &Options, binary: &Path) -> io::Result<i32> {
                         || remote_apply(&temp.0, &host, observed, options.force),
                     )?
                 };
-                if installed.build.as_deref() != Some(&source.build)
+                if !installed.matches_build(&source)
                     || !installed
                         .receipt
                         .as_ref()
@@ -1086,6 +1157,7 @@ mod tests {
 
     fn installation(source: Source, generation: u64) -> Installation {
         Installation {
+            shelf_build: None,
             build: Some(source.build.clone()),
             receipt: Some(Receipt {
                 source,
@@ -1093,6 +1165,18 @@ mod tests {
                 installed_at: now(),
             }),
         }
+    }
+
+    #[test]
+    fn enrolled_shelf_must_match_before_skipping_a_release() {
+        let mut state = installation(source("current", &["current"], "main"), 1);
+        let mut source = state.receipt.as_ref().unwrap().source.clone();
+        source.shelf = Some("shelf-current".into());
+        assert!(state.matches_build(&source));
+        state.shelf_build = Some("missing".into());
+        assert!(!state.matches_build(&source));
+        state.shelf_build = Some("shelf-current".into());
+        assert!(state.matches_build(&source));
     }
 
     #[test]
@@ -1128,6 +1212,7 @@ mod tests {
             ),
             (
                 Installation {
+                    shelf_build: None,
                     build: current.build.clone(),
                     receipt: None,
                 },
@@ -1310,6 +1395,7 @@ mod tests {
 
     fn source(commit: &str, ancestors: &[&str], kind: &str) -> Source {
         Source {
+            shelf: None,
             kind: kind.into(),
             repository: Some("repo".into()),
             commit: Some(commit.into()),
@@ -1417,6 +1503,7 @@ mod tests {
             if [
                 "src",
                 "skills/hey-boss",
+                "packages/git-shelf/src",
                 "packages/hey-gh",
                 "packages/hey-boss-http",
                 "packages/hey-boss-sync",

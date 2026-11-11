@@ -33,10 +33,10 @@ try{
   const shot=async name=>{await s.waitForQuiet(120);if(output){mkdirSync(output,{recursive:true});await renderTerminalPng((await s.screen()).rawLines.join('\n'),{output:join(output,name+'.png')});}};
   await see('Allow slower connections');await s.press('Control+s');await see('recommended');await s.type('1');await s.press('Enter');await see('Shelved');
   // Refresh preserves the existing selection. Select the newly saved commit.
-  await s.press('ArrowUp');await see('250;');await s.press('Enter');await s.press('PageDown');
+  await s.press('ArrowUp');await s.waitForQuiet(150);if(!(await s.screen()).contains('250;'))await s.press('ArrowDown');await see('250;');await s.press('Enter');await s.press('PageDown');
   await s.press('Control+c');await see('Comment on the selected line');await s.type('Matches the mobile timeout.');await s.press('Enter');await see('Comment saved');
   await s.press('Tab');await see('Matches the mobile timeout.');await shot('project-shelf');
-  await s.resize(48,23);await s.press('ArrowUp');await see('Ctrl+L link');assert(!(await s.screen()).contains('Review'));await shot('compact-shelf');
+  await s.resize(48,23);await s.press('ArrowLeft');await see('Ctrl+L link');assert(!(await s.screen()).contains('Review'));await shot('compact-shelf');
   await s.press('Enter');await see('Matches the mobile timeout.');await shot('compact-review');
   await s.press('Escape');await see('Commits');await s.press('Control+u');await see('Cherry-pick selected');await s.press('Escape');
   assert.equal(run('git','log','-1','--format=%s'),'Initialize search');

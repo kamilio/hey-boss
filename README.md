@@ -710,6 +710,8 @@ saved locally before finalization; reconnection reconciles the atomic transactio
 so a lost commit reply cannot duplicate a handoff. Explicit approval decisions,
 manual blocks and human ownership remain respected. Retrying grants no permissions.
 
+The optional [Rust commit shelf](packages/git-shelf/README.md) shares saved commits and task reviews across a project's worktrees. Run `g` to browse.
+
 ## Initializing a project
 
 Run `hey-boss project init` in its checkout. Choose pull requests and worktrees,

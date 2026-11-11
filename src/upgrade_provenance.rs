@@ -8,6 +8,8 @@ pub struct Source {
     pub commit: Option<String>,
     pub ancestors: Vec<String>,
     pub build: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shelf: Option<String>,
 }
 
 impl Source {
@@ -72,6 +74,7 @@ mod tests {
 
     fn source(commit: &str, ancestors: &[&str], kind: &str) -> Source {
         Source {
+            shelf: None,
             kind: kind.into(),
             repository: Some("repo".into()),
             commit: Some(commit.into()),
