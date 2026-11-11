@@ -1,4 +1,5 @@
 import AppKit
+import NaturalLanguage
 import TalkCore
 
 enum CatchUpSource: Equatable {
@@ -32,24 +33,61 @@ struct SpokenRecap: Encodable {
     let lastMessage: String
     let replies: String
 
-    func summarize() async throws -> String {
+    @MainActor func summarize(onSentence: (String) throws -> Void) async throws {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         guard let url = bundle.url(forResource: "catch_up", withExtension: "md") else { throw TalkError("Reinstall Hey Talk to restore the recap prompt.") }
         var request = try ProxyResponses.request()
         request.timeoutInterval = 45
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model":"gpt-6-luna", "store":false, "reasoning":["effort":"none"], "max_output_tokens":800,
+            "model":"gpt-6-luna", "store":false, "stream":true, "reasoning":["effort":"none"], "max_output_tokens":800,
             "instructions":try String(contentsOf: url, encoding: .utf8), "input":String(decoding: try JSONEncoder().encode(self), as: UTF8.self)])
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200,
-              let body = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              body["status"] as? String == "completed", let items = body["output"] as? [[String: Any]] else {
-            throw TalkError("Couldn’t prepare a recap. Try Catch Up again.")
+        let (bytes, response) = try await URLSession.shared.bytes(for: request)
+        guard let http = response as? HTTPURLResponse else { throw TalkError("The recap service is unavailable.") }
+        guard (200..<300).contains(http.statusCode) else { throw TalkError("The recap service returned HTTP \(http.statusCode).") }
+        var stream = RecapStream()
+        for try await line in bytes.lines where line.hasPrefix("data:") {
+            try Task.checkCancellation()
+            let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+            if data == "[DONE]" { break }
+            if try stream.receive(data, onSentence: onSentence) { return }
         }
-        let text = items.filter { $0["type"] as? String == "message" }.flatMap { $0["content"] as? [[String: Any]] ?? [] }
-            .filter { $0["type"] as? String == "output_text" }.compactMap { $0["text"] as? String }
-            .joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { throw TalkError("No spoken recap was returned.") }
-        return text
+        throw TalkError("The recap connection closed before the response finished.")
+    }
+}
+
+struct RecapStream {
+    private let sentences = NLTokenizer(unit: .sentence)
+    private var pending = ""
+    private var emitted = false
+
+    mutating func receive(_ data: String, onSentence: (String) throws -> Void) throws -> Bool {
+        guard let event = try JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any] else {
+            throw TalkError("Invalid recap stream.")
+        }
+        switch event["type"] as? String {
+        case "response.output_text.delta":
+            pending += event["delta"] as? String ?? ""
+            // Keep the last fragment until the tokenizer sees the next sentence:
+            // a delta ending in a period might be half of a decimal or abbreviation.
+            while !pending.isEmpty {
+                sentences.string = pending
+                let range = sentences.tokenRange(at: pending.startIndex)
+                guard !range.isEmpty, pending[range.upperBound...].contains(where: { !$0.isWhitespace }) else { break }
+                let sentence = pending[range].trimmingCharacters(in: .whitespacesAndNewlines)
+                pending = String(pending[range.upperBound...].drop(while: \.isWhitespace))
+                if !sentence.isEmpty { try onSentence(sentence); emitted = true }
+            }
+        case "response.completed":
+            let rest = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !rest.isEmpty { try onSentence(rest); emitted = true }
+            guard emitted else { throw TalkError("The recap service returned no spoken text.") }
+            return true
+        case "error", "response.failed":
+            throw TalkError("The recap service failed while generating the response.")
+        case "response.incomplete":
+            throw TalkError("The recap service stopped before it finished the response.")
+        default: break
+        }
+        return false
     }
 }

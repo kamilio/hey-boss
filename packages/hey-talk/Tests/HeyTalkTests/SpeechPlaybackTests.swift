@@ -98,6 +98,26 @@ final class SpeechPlaybackTests: XCTestCase {
         overlay.showCaption(text: passage, state: .playing)
         try check(9.5, "Friday", exact: true)
     }
+    @MainActor func testStreamCanDrainAndResumeWithoutReplayingEarlierSentences() throws {
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let player = SpeechPlayback(engine: engine, output: output)
+        try player.start("First 🌱.", streaming: true)
+        engine.replies[0](.success(SpeechAudio(samples: [0], sampleRate: 10)))
+        drain()
+        output.completions[0]()
+        XCTAssertTrue(player.active)
+        player.togglePause()
+        try player.append("Next step.")
+        engine.replies[1](.success(SpeechAudio(samples: [0], sampleRate: 10)))
+        drain()
+        player.finishStream()
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertEqual(player.text, "First 🌱. Next step.")
+        XCTAssertEqual(engine.requests, ["First 🌱.", "Next step."])
+        player.togglePause()
+        output.completions[1]()
+        XCTAssertFalse(player.active)
+    }
     @MainActor func testPlaybackStartsBeforeWholePassageAndOnlyBuffersTwoChunks() throws {
         let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
         let playback = SpeechPlayback(engine: engine, output: output)

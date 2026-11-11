@@ -158,7 +158,9 @@ extension SpeechOverlayTests {
         let lens = try XCTUnwrap(field.subviews.first { $0 is SpeechWordLens })
         XCTAssertTrue(field.visibleRect.contains(NSPoint(x: lens.frame.midX, y: lens.frame.midY)))
         let frame = panel.frame
-        overlay.showCaption(text: text, state: .paused)
+        overlay.showCaption(text: text + " There is another update.", state: .paused)
+        XCTAssertTrue(field.visibleRect.contains(NSPoint(x: lens.frame.midX, y: lens.frame.midY)),
+                      "Appending a streamed sentence must not scroll away from the paused word")
         XCTAssertEqual(panel.frame, frame)
         XCTAssertFalse(panel.canBecomeKey)
         XCTAssertTrue(all.compactMap { $0 as? NSButton }.contains { !$0.isHidden && $0.accessibilityLabel() == "Resume Catch Up" })

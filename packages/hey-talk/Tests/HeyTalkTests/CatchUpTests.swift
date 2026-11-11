@@ -2,6 +2,31 @@ import XCTest
 @testable import HeyTalk
 
 final class CatchUpTests: XCTestCase {
+    func testStreamEmitsCompleteSentencesBeforeCompletionWithoutSplittingDecimals() throws {
+        var stream = RecapStream()
+        var sentences = [String]()
+        func event(_ type: String, _ delta: String = "") throws -> Bool {
+            let data = try JSONSerialization.data(withJSONObject: ["type":type, "delta":delta])
+            return try stream.receive(String(decoding: data, as: UTF8.self)) { sentences.append($0) }
+        }
+        _ = try event("response.reasoning_summary_text.delta", "Ignore this.")
+        _ = try event("response.output_text.delta", "Revenue grew 3.")
+        XCTAssertTrue(sentences.isEmpty)
+        _ = try event("response.output_text.delta", "5 percent. Jo")
+        XCTAssertEqual(sentences, ["Revenue grew 3.5 percent."])
+        _ = try event("response.output_text.delta", " will follow up")
+        XCTAssertTrue(try event("response.completed"))
+        XCTAssertEqual(sentences, ["Revenue grew 3.5 percent.", "Jo will follow up"])
+    }
+
+    func testIncompleteResponseDoesNotSpeakAnUnfinishedThought() throws {
+        var stream = RecapStream()
+        var spoken = [String]()
+        _ = try stream.receive(#"{"type":"response.output_text.delta","delta":"It passed. But the"}"#) { spoken.append($0) }
+        XCTAssertThrowsError(try stream.receive(#"{"type":"response.incomplete"}"#) { spoken.append($0) })
+        XCTAssertEqual(spoken, ["It passed."])
+    }
+
     func testT3ReadsOnlyAssistantTextAfterLastHumanMessage() throws {
         func row(_ type: String, _ text: String, _ author: String = "agent") -> [String: Any] {
             ["item": ["type": type, "text": text, "createdBy": author]]

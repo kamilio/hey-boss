@@ -139,7 +139,7 @@ Explicit “new line” or `\n` commands produce line breaks in corrected text.
 
 ## Read aloud
 
-In an open T3 thread or Slack conversation, tap **B** on the 8BitDo Micro or choose **Catch Up** from the pill menu. Hey Talk sends your last message and the replies since then to Hey Proxy for a short spoken recap. T3 uses assistant messages; Slack uses the open thread, DM, or channel. The floating caption highlights the recap as it plays and follows you between apps. Tap **B** again in the same conversation to pause or resume, or hold it for Escape. If nobody has replied, there’s nothing to play.
+In an open T3 thread or Slack conversation, tap **B** on the 8BitDo Micro or choose **Catch Up** from the pill menu. Hey Talk sends your last message and the replies since then to Hey Proxy for a short spoken recap. Speech starts with the first complete sentence while the rest streams in. T3 uses assistant messages; Slack uses the open thread, DM, or channel. The floating caption highlights the recap as it plays and follows you between apps. Tap **B** again in the same conversation to pause or resume, or hold it for Escape. If nobody has replied, there’s nothing to play.
 
 In T3, hover over a paragraph for a faint glass outline and a small **Listen**
 capsule fixed beside the paragraph. The whole capsule is clickable and brightens
