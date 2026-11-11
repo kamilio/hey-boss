@@ -32,7 +32,11 @@ pub fn resolve(invocation: &Invocation, bare: bool) -> Result<Option<Invocation>
     };
     let mut args = invocation.args.clone();
     for _ in 0..16 {
-        let mut current = Invocation::parse(args)?;
+        let mut current = if bare {
+            Invocation::native(args)
+        } else {
+            Invocation::parse(args)?
+        };
         current.auth = invocation.auth;
         let Some(expansion) = aliases.get(current.root()) else {
             return Ok(Some(current));

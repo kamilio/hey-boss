@@ -241,7 +241,12 @@ fn main() {
         args.remove(0);
     }
     let native_args = args.clone();
-    let invocation = match cli_route::Invocation::parse(args) {
+    let parsed = if bare {
+        Ok(cli_route::Invocation::native(args))
+    } else {
+        cli_route::Invocation::parse(args)
+    };
+    let invocation = match parsed {
         Ok(invocation) => invocation,
         Err(error) => {
             eprintln!("hey-gh: {error}");

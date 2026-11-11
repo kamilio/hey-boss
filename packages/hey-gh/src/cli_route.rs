@@ -19,6 +19,19 @@ pub struct Invocation {
 }
 
 impl Invocation {
+    pub fn native(args: Vec<OsString>) -> Self {
+        let command = positional_indices(&args)
+            .first()
+            .copied()
+            .unwrap_or(args.len());
+        Self {
+            args,
+            auth: Auth::User,
+            cached: false,
+            command,
+        }
+    }
+
     pub fn parse(mut args: Vec<OsString>) -> Result<Self> {
         let mut auth = Auth::Auto;
         let mut index = 0;
