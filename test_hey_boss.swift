@@ -5245,6 +5245,7 @@ func auditConversation(_ root: String) {
 @available(macOS 26, *)
 @MainActor func auditConversationMedia(_ root: String) async {
     let folder = URL(fileURLWithPath: root)
+    try! Data(#"{"messages":[{"text":"Read my diagram","speaker":"You"}]}"#.utf8).write(to: folder.appendingPathComponent("current.json"))
     let ui = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: folder.appendingPathComponent("current.json"))
     // Only fixture windows are shareable for the screenshot audit.
     ui.caption.sharingType = .readOnly; ui.caption.imagePanel.sharingType = .readOnly
@@ -5284,8 +5285,8 @@ func auditConversation(_ root: String) {
         }
         await snapshot("media-" + String(i + 1))
         let caption = ui.caption, panel = caption.imagePanel
-        let text = ["Review can send a draft back for revision.", "The agent shows the diagram before replying.", "This is the desktop app.", "Building takes the largest share of time.", "It starts with a seed.", "Each release moves through these stages."][i]
-        let word = ["revision", "diagram", "desktop", "largest", "seed", "stages"][i]
+        let text = ["Follow the request from your app to the API server.", "The agent shows the diagram before replying.", "This is the desktop app.", "Building takes the largest share of time.", "It starts with a seed.", "Each release moves through these stages."][i]
+        let word = ["request", "diagram", "desktop", "largest", "seed", "stages"][i]
         caption.display(text, word: (text as NSString).range(of: word))
         precondition(caption.isVisible && !caption.isKeyWindow && caption.ignoresMouseEvents)
         precondition(caption.frame.width == panel.frame.width && caption.frame.minX == panel.frame.minX && panel.frame.minY == caption.frame.maxY + 8)
@@ -5318,10 +5319,15 @@ func auditConversation(_ root: String) {
     ui.caption.display("Keep speaking.", word: NSRange(location: 0, length: 4))
     ui.caption.media.close.performClick(nil)
     precondition(!ui.caption.imagePanel.isVisible && ui.caption.isVisible)
-    precondition(ui.media.isHidden && ui.window.frame.size == original.size)
+    precondition(!ui.media.isHidden && ui.media.close.isHidden && ui.window.frame.size == original.size)
     ui.event(["ConversationMedia": fixtures[0]])
     ui.stop("Ready")
-    precondition(ui.media.isHidden && !ui.caption.imagePanel.isVisible && !ui.caption.isVisible)
+    precondition(!ui.media.isHidden && !ui.caption.imagePanel.isVisible && !ui.caption.isVisible)
+    let reopened = VoiceConversation(cli: ui.cli, saveURL: folder.appendingPathComponent("current.json"))
+    let cards = reopened.turns.arrangedSubviews.compactMap { $0 as? ConversationMediaView }
+    precondition(cards.count == fixtures.count + 1 && cards.allSatisfy { $0.picture.image != nil && $0.close.isHidden })
+    precondition(!reopened.caption.imagePanel.isVisible && reopened.rows.count == ui.rows.count)
+    reopened.window.close()
     ui.window.close()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_LIVE"] == "1" {
         let path = folder.appendingPathComponent("release.dot")
