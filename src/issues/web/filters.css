@@ -63,19 +63,3 @@
   .issue-filter-option { min-height: 44px; }
   .issue-filter-menu-footer { display: none; }
 }
-
-#issue-batch-dialog { width:min(540px,calc(100vw - 24px)); max-height:calc(100dvh - 24px); overflow:auto; }
-#issue-batch-form { padding:20px; }
-#issue-batch-form .dialog-heading { padding:0 0 12px; }
-#issue-batch-form .dialog-footer { padding:12px 0 0; background:transparent; align-items:center; gap:8px; flex-wrap:wrap; }
-#batch-action { min-height:36px; }
-#batch-label { margin-top:6px; }
-#batch-count { display:block; margin-right:auto; font-size:12px; color:var(--muted); }
-#batch-rows { max-height:30dvh; overflow:auto; border-block:1px solid var(--line); }
-.batch-all, #batch-rows label { display:flex; align-items:center; gap:8px; padding:7px 4px; font-size:13px; cursor:pointer; }
-#batch-rows label:hover { background:var(--surface); }
-#batch-rows label span, #batch-help { color:var(--muted); }
-#batch-rows label span { font-variant-numeric:tabular-nums; }
-#issue-batch-form input[type="checkbox"] { flex:none; accent-color:var(--accent); }
-#issue-batch-form .field-label { margin-top:12px; }
-#batch-help { font-size:12px; line-height:1.5; }

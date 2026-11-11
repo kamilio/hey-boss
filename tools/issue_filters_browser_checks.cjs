@@ -42,7 +42,7 @@ let web;
     'Preserve filters in shared links',
     'Retire the old assignment selector',
   ];
-  for (const [index,title] of titles.entries()) await api({action:'create',title,body:'Isolated filter verification.',draft:index === 2,labels:[index === 2 ? 'interface' : 'reliability', 'needs & review']});
+  for (const [index,title] of titles.entries()) await api({action:'create',title,body:'Isolated filter verification.',draft:index === 2,labels:[index === 2 ? 'interface' : index === 7 ? 'deleted only' : 'reliability', 'needs & review']});
   for (const number of [4,6]) await api({action:'block',number,comment:'Waiting for a decision.',force:false});
   for (const number of [5,6]) await api({action:'set_blockers',number,blockers:[3],force:false});
   await api({action:'close',number:7,force:false});
@@ -78,8 +78,10 @@ let web;
       };
       await page.goto(url('open'));
       await expect([1,2,3]);
+      assert.equal(await page.getByRole('button',{name:/^(Batch actions|Unassign .* from Boss)$/}).count(), 0);
       await page.getByRole('link',{name:'Filter by draft issues'}).click(); await expect([3]);
-      await choose('created_by','human:qa'); await expect([3]);
+      await page.locator('.issue-author-link').click();
+      assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('created_by'), 'human:qa'); await expect([3]);
       await page.reload(); await expect([3]);
       await preset('draft').click(); await expect([2,3]);
       await page.getByRole('button',{name:'Remove Created by filter'}).click(); await expect([1,2,3]);
@@ -165,28 +167,8 @@ let web;
         await page.keyboard.press('Escape');
         if (process.env.FILTER_SCREENSHOTS) await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-${scheme}-${width}.png`)});
       }
-      // A label can outlive its last active issue; find it again in Deleted.
-      const tag = 'migration bug findings ' + engine.name();
-      const batch = () => page.getByRole('button',{name:'Batch actions',exact:true}).click();
-      const applyBatch = async () => {
-        await page.locator('#batch-submit').click();
-        await page.locator('#issue-batch-dialog').waitFor({state:'hidden'});
-      };
-      await page.goto(url('open')); await expect([1,2,3]);
-      await batch();
-      assert.ok(await page.locator('#batch-submit').isDisabled());
-      await page.locator('#batch-rows input[value="3"]').check();
-      await page.locator('#batch-label').fill(tag); await applyBatch();
-      await choose('label',tag); await expect([3]);
-      await batch(); await page.locator('#batch-all').check();
-      await page.locator('#batch-action').selectOption('delete'); await applyBatch(); await expect([]);
-      await page.goto(url('deleted')); await expect([3,8]);
-      await choose('label',tag); await expect([3]);
-      await batch(); await page.locator('#batch-all').check();
-      assert.equal(await page.locator('#batch-action').inputValue(),'restore');
-      await applyBatch(); await expect([]);
-      await page.goto(url('open')); await expect([1,2,3]);
-      await choose('label',tag); await expect([3]);
+      await page.goto(url('deleted')); await expect([8]);
+      await choose('label','deleted only'); await expect([8]);
       assert.deepEqual(errors, [], 'No browser exceptions');
       console.log(`${engine.name()}: presets, combinations, lookup, history, keyboard, copy command, light/dark and four widths passed`);
       await context.close();

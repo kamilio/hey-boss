@@ -771,8 +771,6 @@ hey-boss issue delete --match-label "migration bug findings"
 hey-boss issue restore --match-label "migration bug findings"
 ```
 
-In the Issues page, open **Batch actions**, select individual matches or **Select all**, then add a label or move the selection to Deleted. To undo, filter the Deleted tab by that label and choose **Restore issues**. Labels, drafts, comments, and history are preserved.
-
 Matchers default to open issues; restore always selects from Deleted. Combine `--match-draft`, `--match-state`, repeated
 `--match-label` (all required), `--match-search` (literal title/body text),
 `--match-assignee`, or `--match-unassigned`. Selection happens at the authority
