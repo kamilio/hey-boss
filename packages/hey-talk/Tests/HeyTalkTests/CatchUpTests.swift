@@ -23,7 +23,9 @@ final class CatchUpTests: XCTestCase {
         var stream = RecapStream()
         var spoken = [String]()
         _ = try stream.receive(#"{"type":"response.output_text.delta","delta":"It passed. But the"}"#) { spoken.append($0) }
-        XCTAssertThrowsError(try stream.receive(#"{"type":"response.incomplete"}"#) { spoken.append($0) })
+        XCTAssertThrowsError(try stream.receive(#"{"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}"#) { spoken.append($0) }) { error in
+            XCTAssertTrue(error.localizedDescription.contains("output limit"))
+        }
         XCTAssertEqual(spoken, ["It passed."])
     }
 
