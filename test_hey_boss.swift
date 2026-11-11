@@ -5268,8 +5268,11 @@ func auditConversation(_ root: String) {
     }
     for (i, item) in fixtures.enumerated() {
         ui.window.appearance = NSAppearance(named: i.isMultiple(of: 2) ? .aqua : .darkAqua)
+        if i == 0 { ui.window.orderOut(nil) }
         ui.event(["ConversationMedia": item])
-        ui.window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        if i == 0 { precondition(!ui.window.isVisible, "Pill media must not open the transcript") }
+        precondition(ui.voiceStatus["mediaID"] as? String != nil)
+        ui.window.orderFrontRegardless()
         precondition(ui.window.isVisible && !ui.media.isHidden && ui.media.title.stringValue == item["title"] as? String)
         precondition(ui.media.viewport.contentSize.height > 100 && ui.input.bounds.width > 150 && ui.scroll.bounds.height > 60)
         ui.state(.thinking, "Thinking…"); ui.state(.idle, "Voice off")
@@ -5278,6 +5281,7 @@ func auditConversation(_ root: String) {
             precondition(ui.media.viewport.documentVisibleRect.minY < 2, "Tall media opens at the top")
         }
         await snapshot("media-" + String(i + 1))
+        try! JSONSerialization.data(withJSONObject: ui.pillMedia!).write(to: folder.appendingPathComponent("pill-" + String(i + 1) + ".json"))
     }
     let image = ui.media.picture.image!
     ui.event(["ConversationMedia": ["data": "YWJj"]])
