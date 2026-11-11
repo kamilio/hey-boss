@@ -17,20 +17,88 @@ pub(super) fn validate(
             Some(
                 MatchingChange::Move { .. }
                     | MatchingChange::Edit { draft: true }
+                    | MatchingChange::Labels { .. }
+                    | MatchingChange::Restore
                     | MatchingChange::Delete
             )
         )
         || matcher.numbers.iter().any(|n| *n < 1)
-        || matcher.state.as_deref() == Some("deleted")
+        || (matcher.state.as_deref() == Some("deleted"))
+            != matches!(change, Some(MatchingChange::Restore))
     {
         return Err(Error::invalid(
-            "Matching batches require filters, one move, draft or delete change, and a nonnegative order guard; explicit edits cannot be combined",
+            "Matching batches require filters, a valid change (only restore selects deleted issues), and a nonnegative order guard; explicit edits cannot be combined",
         ));
+    }
+    if let Some(MatchingChange::Labels {
+        add_labels,
+        remove_labels,
+    }) = change
+    {
+        labels(add_labels)?;
+        labels(remove_labels)?;
+        if (add_labels.is_empty() && remove_labels.is_empty())
+            || add_labels.iter().any(|l| remove_labels.contains(l))
+        {
+            return Err(Error::invalid(
+                "Specify labels to add or remove, without overlap",
+            ));
+        }
     }
     let mut read = request.clone();
     read.operation = matcher.list();
     read.request_id = None;
     super::validate(&read)
+}
+
+pub(super) fn select(
+    db: &Connection,
+    project: &Project,
+    matcher: &IssueMatcher,
+    archived_only: bool,
+) -> Result<Vec<(i64, i64, String, Option<String>, bool)>> {
+    let Operation::List {
+        state,
+        assignee,
+        unassigned,
+        labels,
+        search,
+        ..
+    } = matcher.list()
+    else {
+        unreachable!()
+    };
+    let archived =
+        super::super::archive::search_bodies(db, &project.id, &state, search.as_deref())?;
+    let predicate = list_predicate(search.is_some(), assignee.as_deref(), unassigned);
+    let mut query = db.prepare(&format!("SELECT number,sort_order,state,assignee,draft FROM issues WHERE {predicate} AND (?7='[]' OR number IN (SELECT value FROM json_each(?7))) AND (NOT ?10 OR draft) AND (NOT ?11 OR archive_key IS NOT NULL) ORDER BY sort_order,number"))?;
+    let selected = query
+        .query_map(
+            params![
+                project.id,
+                state,
+                assignee,
+                unassigned,
+                search,
+                serde_json::to_string(&labels)?,
+                serde_json::to_string(&matcher.numbers)?,
+                0,
+                serde_json::to_string(&archived)?,
+                matcher.draft,
+                archived_only
+            ],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, bool>(4)?,
+                ))
+            },
+        )?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(selected)
 }
 
 pub(super) fn execute(
@@ -52,45 +120,7 @@ pub(super) fn execute(
             "Issue order changed. Refresh the list and try again.",
         ));
     }
-    let Operation::List {
-        state,
-        assignee,
-        unassigned,
-        labels,
-        search,
-        ..
-    } = matcher.list()
-    else {
-        unreachable!()
-    };
-    let archived =
-        super::super::archive::search_bodies(db, &project.id, &state, search.as_deref())?;
-    let predicate = list_predicate(search.is_some(), assignee.as_deref(), unassigned);
-    let mut query = db.prepare(&format!("SELECT number,sort_order,state,assignee,draft FROM issues WHERE {predicate} AND (?7='[]' OR number IN (SELECT value FROM json_each(?7))) ORDER BY sort_order,number"))?;
-    let selected = query
-        .query_map(
-            params![
-                project.id,
-                state,
-                assignee,
-                unassigned,
-                search,
-                serde_json::to_string(&labels)?,
-                serde_json::to_string(&matcher.numbers)?,
-                0,
-                serde_json::to_string(&archived)?
-            ],
-            |r| {
-                Ok((
-                    r.get::<_, i64>(0)?,
-                    r.get::<_, i64>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<String>>(3)?,
-                    r.get::<_, bool>(4)?,
-                ))
-            },
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let selected = select(db, project, matcher, false)?;
     let mut skipped = Vec::new();
     let mut changed = 0;
     match change {
@@ -166,6 +196,40 @@ pub(super) fn execute(
                     &json!({"before":{"draft":draft,"state":state},"after":{"draft":true,"state":"open"}}),
                 )?;
                 changed += 1;
+            }
+        }
+        MatchingChange::Labels { .. } | MatchingChange::Restore => {
+            for (number, ..) in &selected {
+                let operation = match change {
+                    MatchingChange::Labels {
+                        add_labels,
+                        remove_labels,
+                    } => Operation::Edit {
+                        number: *number,
+                        draft: None,
+                        title: None,
+                        body: None,
+                        add_labels: add_labels.clone(),
+                        remove_labels: remove_labels.clone(),
+                        if_version: None,
+                    },
+                    _ => Operation::Restore { number: *number },
+                };
+                match mutate(db, project, actor, &operation, now) {
+                    Ok(result) => changed += usize::from(result["changed"] == true),
+                    Err(error)
+                        if matches!(
+                            error.code.as_str(),
+                            "conflict"
+                                | "fleet_reserved"
+                                | "fleet_allocation_missing"
+                                | "fleet_allocation_expired"
+                        ) =>
+                    {
+                        skipped.push(json!({"number":number,"reason":error.message}))
+                    }
+                    Err(error) => return Err(error),
+                }
             }
         }
         MatchingChange::Delete => {

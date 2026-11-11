@@ -242,11 +242,14 @@ pub enum BatchAssignment {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, clap::Args)]
 #[serde(deny_unknown_fields)]
 pub struct IssueMatcher {
-    #[arg(long = "match-state", value_parser = ["active", "open", "blocked", "ready", "closed", "all"])]
+    #[arg(long = "match-state", value_parser = ["active", "open", "blocked", "ready", "closed", "all", "deleted"])]
     pub state: Option<String>,
     #[serde(default)]
     #[arg(long = "match-label")]
     pub labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[arg(id = "match_draft", long = "match-draft")]
+    pub draft: bool,
     #[arg(long = "match-search")]
     pub search: Option<String>,
     #[arg(long = "match-assignee", conflicts_with = "unassigned")]
@@ -260,7 +263,8 @@ pub struct IssueMatcher {
 }
 impl IssueMatcher {
     pub fn is_empty(&self) -> bool {
-        self.state.is_none()
+        !self.draft
+            && self.state.is_none()
             && self.labels.is_empty()
             && self.search.is_none()
             && self.assignee.is_none()
@@ -296,9 +300,18 @@ pub enum QueueEnd {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MatchingChange {
-    Move { to: QueueEnd },
-    Edit { draft: bool },
+    Move {
+        to: QueueEnd,
+    },
+    Edit {
+        draft: bool,
+    },
+    Labels {
+        add_labels: Vec<String>,
+        remove_labels: Vec<String>,
+    },
     Delete,
+    Restore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
