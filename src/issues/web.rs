@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 
+#[path = "web/code_reviews.rs"]
+mod code_reviews;
 #[path = "web/errors.rs"]
 mod errors;
 mod lan;
@@ -795,6 +797,15 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             )),
             "/admin.css" => Some(("text/css; charset=utf-8", crate::admin::STYLE.as_bytes())),
             "/" | "/issues" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
+            "/code-reviews" => Some((
+                "text/html; charset=utf-8",
+                include_bytes!("web/code-reviews.html"),
+            )),
+            "/code-reviews.css" => Some(("text/css", include_bytes!("web/code-reviews.css"))),
+            "/code-reviews.js" => Some((
+                "application/javascript",
+                include_bytes!("web/code-reviews.js"),
+            )),
             "/merged-prs" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/merged-prs.html"),
@@ -960,6 +971,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/workers"
                     | "/agents"
                     | "/agents/session"
+                    | "/code-reviews"
                     | "/merged-prs"
                     | "/jobs"
                     | "/runs"
@@ -1112,6 +1124,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if request.method() == &Method::Post
         && [
             "/api/errors",
+            "/api/code-reviews/publish",
             "/api/action",
             "/api/jobs/runtime",
             "/api/preview",
@@ -1151,6 +1164,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/code-reviews/publish" {
+            return json_response(code_reviews::publish(app, &bytes)?);
         }
         if path == "/api/pages/files" { return json_response(pages::edit(app, &bytes)?); }
         if path == "/api/prompts/open" {
