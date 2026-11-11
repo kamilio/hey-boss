@@ -49,10 +49,10 @@ public enum Wire {
         throw TalkError("Response exceeds size limit")
     }
     /// The Hey Boss desktop socket ends its JSON reply with EOF.
-    public static func response(from fd: Int32) throws -> Data {
+    public static func response(from fd: Int32, limit: Int = 16_384) throws -> Data {
         let deadline = Date().addingTimeInterval(10)
         var data = Data(), buffer = [UInt8](repeating: 0, count: 4096)
-        while data.count < 16_384 {
+        while data.count < limit {
             try wait(fd, events: Int16(POLLIN), deadline: deadline)
             let n = Darwin.read(fd, &buffer, buffer.count)
             if n < 0 && (errno == EINTR || errno == EAGAIN) { continue }

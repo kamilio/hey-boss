@@ -159,6 +159,8 @@ final class Overlay {
     private var dockRestY: CGFloat?
     private var dockMotion: DockMotion?
     private var phase: Phase = .idle
+    private var media: PillMedia?
+    var onHideMedia: (() -> Void)?
     private var conversation: [String: Any]?
     private var expanded = false
     private var enabled = true
@@ -406,9 +408,21 @@ final class Overlay {
         guard conversation == nil else { return }
         update(next, waitingForAudio: false)
     }
+    func showMedia(_ image: NSImage, title: String, kind: String) {
+        media?.removeFromSuperview()
+        let view = PillMedia(image: image, title: title, kind: kind)
+        view.close.target = self; view.close.action = #selector(hideMedia)
+        media = view; pillContent.addSubview(view)
+        layout(animated: false)
+    }
+    @objc private func hideMedia() { onHideMedia?() }
+    func clearMedia() {
+        guard let media else { return }
+        media.removeFromSuperview(); self.media = nil; layout(animated: false)
+    }
     func showConversation(_ state: [String: Any]?) {
         conversation = state
-        guard let state else { update(.idle); return }
+        guard let state else { clearMedia(); update(.idle); return }
         let name = state["phase"] as? String
         let busy = ["decoding", "thinking", "starting"].contains(name) && state["approval"] as? Bool != true
         let next: Phase = name == "recording" ? .recording : busy ? .processing : .idle
@@ -623,7 +637,7 @@ final class Overlay {
         let animate = animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
         let duration = phase == .recording ? 0.16 : 0.3
         if #available(macOS 26, *), let glass = pill as? NSGlassEffectView {
-            let style: NSGlassEffectView.Style = pasteWait != nil || notice != nil || status != nil || !confirmation.isHidden ? .regular : .clear
+            let style: NSGlassEffectView.Style = media != nil || pasteWait != nil || notice != nil || status != nil || !confirmation.isHidden ? .regular : .clear
             if glass.style != style { glass.style = style }
         }
         let showConnecting = !connecting.isHidden
@@ -637,7 +651,8 @@ final class Overlay {
         chatButton.isEnabled = showChat
         if showChat { chatButton.isHidden = false }
         else if !animate || !canRevealChat { chatButton.isHidden = true }
-        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
+        let drawing = media?.preferredSize(on: (panel.screen ?? NSScreen.main)?.visibleFrame ?? NSRect(x: 0, y: 0, width: 900, height: 640))
+        let size = drawing.map { NSSize(width: max($0.width, statusWidth), height: $0.height + 36) } ?? pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : showChat ? NSSize(width: 84, height: 36) : TalkDesign.idleSize)
         // Status messages grow only the right edge of the window, keeping the recording control still.
         let baseWidth = max(200, size.width + 96, size.width + 2 * leftExtension + 16)
@@ -718,10 +733,11 @@ final class Overlay {
         correctionIndicator.position = CGPoint(x: markX + 23, y: 26)
         submitIndicator.position = CGPoint(x: markX + 23, y: 10)
         CATransaction.commit()
+        if let drawing { media?.frame = NSRect(x: 0, y: 36, width: size.width, height: drawing.height) }
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         status?.frame.origin = NSPoint(x: leftExtension + size.width, y: 0)
         noticeRecordButton.isHidden = notice == nil && status == nil
-        pillContent.setAccessibilityRole(showChat || pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
+        pillContent.setAccessibilityRole(media != nil || showChat || pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(conversation?["action"] as? String ?? (phase == .recording ? "Stop dictation" : "Start dictation"))
     }
