@@ -4500,14 +4500,18 @@ func auditSpeechHelper() {
     guard let voice = ReaderVoice() else { preconditionFailure("Install Hey Talk before testing the shared speech helper") }
     defer { voice.stop() }
     for text in ["Hello there. This paragraph can now be read aloud.", "Your appointment is on November 5th at 9:15 p.m. Add one and a half teaspoons of salt."] {
-        var done = false
-        voice.generate(text) { buffer, words in
+        var done = false, receivedAudio = false
+        voice.generate(text, audio: { buffer, words in
+            precondition(!receivedAudio && !done, "Deliver audio exactly once, before alignment")
             guard let buffer else { preconditionFailure("Shared speech helper did not produce audio") }
             precondition(buffer.format.sampleRate == 24_000)
             precondition(buffer.frameLength > 1_000 && !words.isEmpty)
             precondition((0..<Int(buffer.frameLength)).contains { abs(buffer.floatChannelData![0][$0]) > 0.01 })
+            receivedAudio = true
+        }, timing: { _ in
+            precondition(receivedAudio, "Timing must not gate audio delivery")
             done = true
-        }
+        })
         let deadline = Date().addingTimeInterval(30)
         while !done && Date() < deadline { RunLoop.current.run(until: Date().addingTimeInterval(0.02)) }
         precondition(done, "Timed out waiting for the installed speech helper")
