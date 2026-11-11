@@ -440,6 +440,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onEditVocabulary = { [weak self] term in self?.editVocabulary(term) }
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onStartConversation = { [weak self] in self?.startConversation() }
+            view.onPauseListening = { [weak self] paused in self?.controlConversation(paused ? "pause_listening" : "resume_listening") }
             view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
             view.onChatWithContext = { [weak self] in self?.chatWithContext() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }

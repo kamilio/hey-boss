@@ -4610,6 +4610,21 @@ func auditDictationHandoff(_ root: String) {
     try! audio.engine.start() // Output only; never attach the live microphone.
     chat.connect(audio)
     precondition(chat.beginSession())
+    precondition(chat.muteMic.accessibilityLabel() == "Pause listening")
+    chat.muteMic.performClick(nil)
+    chat.receive(.began); chat.receive(.pcm(Data(count: 640))); chat.receive(.ended)
+    precondition(chat.recording == nil && chat.phase == .listening && chat.voiceStatus["listeningPaused"] as? Bool == true)
+    precondition(chat.muteMic.accessibilityLabel() == "Resume listening")
+    precondition([Int16(731)].withUnsafeBufferPointer { audio.microphoneFrame($0)[0] } == 0)
+    chat.muteMic.performClick(nil)
+    let opening = Data(repeating: 17, count: 640)
+    chat.receive(.began); chat.receive(.pcm(opening))
+    chat.setListeningPaused(true); chat.setListeningPaused(true)
+    chat.receive(.pcm(Data(count: 640))); chat.receive(.ended)
+    precondition(chat.recording == opening && chat.phase == .recording)
+    chat.setListeningPaused(false); chat.setListeningPaused(false)
+    chat.receive(.began); chat.receive(.pcm(opening))
+    precondition(chat.recording == opening + opening && chat.voiceStatus["listeningPaused"] as? Bool == false)
     // In the cross-process test, Hey Talk drives these same transitions
     // through its request transport. Standalone runs exercise the core directly.
     let peer = ProcessInfo.processInfo.environment["HEY_BOSS_HANDOFF_PEER"] != nil

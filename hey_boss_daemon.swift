@@ -5294,6 +5294,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if action == "show" { chat.show() }
         else if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
         else if action == "stop" { chat.stop("Microphone off") }
+        else if action == "pause_listening" || action == "resume_listening" { chat.setListeningPaused(action == "pause_listening") }
         else if action == "interrupt" { chat.listenForNextTurn() }
         else { chat.toggle() }
         return true
@@ -8183,7 +8184,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         if next != .speaking || playbackPaused { caption.orderOut(nil) }
         if next == .idle { sessionLock = nil }
-        phase = next; status.stringValue = micMuted && next == .listening && message == "Listening" ? "Microphone muted" : message
+        phase = next; status.stringValue = micMuted && (next == .listening || next == .recording) ? "Listening paused" : message
         meter.show(next)
         let voiceAction = voiceStatus["action"] as! String
         meter.isEnabled = true
@@ -8203,16 +8204,26 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         switch phase {
         case .idle: label = "Voice off"
         case .starting: label = "Starting…"
-        case .listening: label = micMuted ? "Microphone muted" : "Listening"
-        case .recording: label = "Recording"
+        case .listening: label = micMuted ? "Listening paused" : "Listening"
+        case .recording: label = micMuted ? "Listening paused" : "Recording"
         case .decoding: label = "Transcribing…"
         case .thinking: label = "Thinking…"
         case .speaking: label = playbackPaused ? "Paused" : "Speaking"
         }
-        return ["active": window.isKeyWindow || phase != .idle, "phase": phase.rawValue,
+        var result: [String: Any] = ["active": window.isKeyWindow || phase != .idle, "phase": phase.rawValue,
                 "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
+        if canPauseListening { result["listeningPaused"] = micMuted }
+        return result
+    }
+    private var canPauseListening: Bool {
+        pauseID == nil && approvalSheet == nil && audio?.stopped == false && (phase == .listening || phase == .recording)
+    }
+    func setListeningPaused(_ paused: Bool) {
+        guard canPauseListening, micMuted != paused else { return }
+        audio?.muteInput(paused)
+        state(phase, phase == .recording ? "Recording" : "Listening")
     }
     private func publishVoiceStatus() {
         guard Bundle.main.bundleIdentifier == "local.hey-boss.desktop" else { return }
@@ -8277,8 +8288,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         updateBackgroundEscape()
         meter.isEnabled = pauseID == nil
         muteMic.isHidden = pauseID != nil || audio == nil || audio?.stopped == true || phase == .starting
-        let action = micMuted ? "Unmute microphone" : "Mute microphone"
-        muteMic.image = NSImage(systemSymbolName: micMuted ? "mic.slash.fill" : "mic", accessibilityDescription: nil)
+        let action = canPauseListening ? (micMuted ? "Resume listening" : "Pause listening") : (micMuted ? "Unmute microphone" : "Mute microphone")
+        let symbol = canPauseListening ? (micMuted ? "play.fill" : "pause.fill") : (micMuted ? "mic.slash.fill" : "mic")
+        muteMic.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
         muteMic.toolTip = action; muteMic.setAccessibilityLabel(action)
         muteMic.contentTintColor = micMuted ? .systemOrange : .secondaryLabelColor
         pauseReply.isHidden = pauseID != nil || phase != .speaking
@@ -8299,13 +8311,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func toggleMute() {
         guard let audio, !audio.stopped, phase != .starting else { return }
+        if phase == .listening || phase == .recording { setListeningPaused(!micMuted); return }
         audio.muteInput(!micMuted)
-        if micMuted, phase == .recording {
-            recording = nil
-            state(.decoding, "Transcribing…")
-            transcribeNext()
-        } else if phase == .listening { state(.listening, "Listening") }
-        else { updateComposerActions() }
+        updateComposerActions()
     }
     @objc func listenForNextTurn() {
         guard canListenNext else { return }
