@@ -4,9 +4,25 @@ set -euo pipefail
 g=$1
 hb=$2
 fixture=$(mktemp -d "$PWD/.shelf-check.XXXXXX")
-trap 'rm -rf "$fixture"' EXIT
 export HEY_BOSS_ISSUE_DB="$fixture/issues.db" HEY_BOSS_FLEET_STATE="$fixture/fleet" HEY_BOSS_AGENT_ID=human:shelf-test
 unset HEY_BOSS_ISSUE_HOST HEY_BOSS_ISSUE_PROJECT
+db_key=$(printf %s "$HEY_BOSS_ISSUE_DB" | shasum -a 256 | cut -c1-24)
+socket="/tmp/hey-boss-db-$(id -u)/$db_key"
+"$hb" fleet companion >"$fixture/service.log" 2>&1 &
+service=$!
+cleanup() {
+    kill "$service" 2>/dev/null || true
+    wait "$service" 2>/dev/null || true
+    rm -f "$socket.sock" "$socket.lock" "$socket.startup" "$socket.log"
+    rm -rf "$fixture"
+}
+trap cleanup EXIT
+for ((i=0;i<200;i++)); do
+    [[ -S "$socket.sock" ]] && break
+    kill -0 "$service" || exit 1
+    sleep 0.05
+done
+test -S "$socket.sock"
 mkdir "$fixture/bin"
 ln -s "$hb" "$fixture/bin/hey-boss"
 export PATH="$fixture/bin:$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1

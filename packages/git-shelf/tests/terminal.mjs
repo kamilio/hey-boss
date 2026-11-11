@@ -1,8 +1,11 @@
 // Run after npm ci in worker-tui. Optional final argument retains screen PNGs.
 import { TerminalPilot } from '../../../worker-tui/node_modules/terminal-pilot/dist/index.js';
 import { renderTerminalPng } from '../../../worker-tui/node_modules/terminal-png/dist/index.js';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync, spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { once } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join, resolve } from 'node:path';
 import assert from 'node:assert/strict';
 const [g,hb,output]=process.argv.slice(2).map(p=>resolve(p));
@@ -11,8 +14,12 @@ mkdirSync(cwd);mkdirSync(join(root,'bin'));symlinkSync(hb,join(root,'bin','hey-b
 const env={...process.env,TERM:'xterm-256color',PATH:join(root,'bin')+':'+process.env.PATH,HEY_BOSS_ISSUE_DB:join(root,'db'),HEY_BOSS_FLEET_STATE:join(root,'fleet'),HEY_BOSS_AGENT_ID:'human:shelf-test',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'};
 env.NO_COLOR="";env.CLICOLOR_FORCE="1";delete env.HEY_BOSS_ISSUE_HOST;delete env.HEY_BOSS_ISSUE_PROJECT;
 const run=(cmd,...args)=>execFileSync(cmd,args,{cwd,env,encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+const socket="/tmp/hey-boss-db-"+process.getuid()+"/"+createHash("sha256").update(env.HEY_BOSS_ISSUE_DB).digest("hex").slice(0,24);
 const pilot=await TerminalPilot.launch();
+const service=spawn(hb,["fleet","companion"],{cwd,env,stdio:"ignore"}), ended=once(service,"exit");
 try{
+  for(let i=0;i<200&&!existsSync(socket+".sock");i++){assert.equal(service.exitCode,null);await delay(50);}
+  assert(existsSync(socket+".sock"));
   run('git','init','-qb','main');run('git','config','user.name','Sam');run('git','config','user.email','shelf@example.invalid');
   run('git','remote','add','origin','https://github.com/example/catalog.git');
   run(hb,'project','init','--yes','--prs','false','--worktree','true');
@@ -42,4 +49,4 @@ try{
   assert.equal(run('git','log','-1','--format=%s'),'Initialize search');
   await s.press('Escape');assert.equal(await s.waitForExit(),0);
   console.log('Terminal Pilot: empty shelf, task-linked stash, inline comment, navigation, resize and canceled restore passed.');
-}finally{await pilot.close();rmSync(root,{recursive:true,force:true});}
+}finally{await pilot.close();service.kill("SIGTERM");await ended;for(const ext of [".sock",".lock",".startup",".log"])rmSync(socket+ext,{force:true});rmSync(root,{recursive:true,force:true});}
