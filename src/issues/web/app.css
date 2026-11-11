@@ -2316,6 +2316,7 @@ details[open] > .activity-summary .activity-chevron { transform: rotate(90deg); 
   color: inherit;
   text-decoration: none;
 }
+.list-label-filter:hover .draft-badge,
 .list-label-filter:hover .label {
   box-shadow: 0 0 0 1px currentColor;
 }

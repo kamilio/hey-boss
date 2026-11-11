@@ -28,11 +28,25 @@ test('launch and blocked refinements intersect before pagination', () => {
   assert.equal(filters.matches({...issues[1], deleted_at:123}, {blocked:'hold'}), false);
 });
 
+test('only the draft URL filter selects issues with the draft flag', () => {
+  const issues = [{draft:true}, {draft:false}, {}];
+  for (const [query, count] of [['draft=1',1], ['',3], ['draft=other',3]]) {
+    assert.equal(issues.filter(issue => filters.matches(issue, filters.read(new URLSearchParams(query)))).length, count);
+  }
+});
+
+test('Created by filters by the original author independently of assignment and draft', () => {
+  const route = filters.read(new URLSearchParams({created_by:'human:boss',draft:'1'}));
+  assert.equal(filters.matches({created_by:'human:boss',draft:true}, route), true);
+  assert.equal(filters.matches({created_by:'human:boss',draft:false}, route), false);
+  assert.equal(filters.matches({created_by:'agent:other',assignee:'human:boss',draft:true}, route), false);
+});
+
 test('presets appear in every section and toggle independently', () => {
   for (const state of ['open', 'blocked', 'ready', 'closed', 'deleted', 'all']) {
     const route = {state, owner:'all', min_launches:'', search:'keep', label:'bug'};
     const presets = filters.presets(route);
-    assert.equal(presets.length, state === 'blocked' ? 3 : 2);
+    assert.equal(presets.length, state === 'blocked' ? 4 : 3);
     const launches = presets.find(p => p.key === 'min_launches');
     const boss = presets.find(p => p.key === 'owner');
     Object.assign(route, filters.toggle(route, launches), filters.toggle(route, boss));
