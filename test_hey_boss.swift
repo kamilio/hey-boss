@@ -5246,6 +5246,8 @@ func auditConversation(_ root: String) {
 @MainActor func auditConversationMedia(_ root: String) async {
     let folder = URL(fileURLWithPath: root)
     let ui = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: folder.appendingPathComponent("current.json"))
+    // Only fixture windows are shareable for the screenshot audit.
+    ui.caption.sharingType = .readOnly; ui.caption.imagePanel.sharingType = .readOnly
     let fixtures = try! JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("media.json"))) as! [[String: Any]]
     let original = ui.window.frame
     ui.append("Can you show me how it works?", from: "You")
@@ -5271,7 +5273,7 @@ func auditConversation(_ root: String) {
         if i == 0 { ui.window.orderOut(nil) }
         ui.event(["ConversationMedia": item])
         if i == 0 { precondition(!ui.window.isVisible, "Pill media must not open the transcript") }
-        precondition(ui.voiceStatus["mediaID"] as? String != nil)
+        precondition(ui.caption.imagePanel.isVisible && !ui.caption.isVisible && !ui.caption.imagePanel.isKeyWindow)
         ui.window.orderFrontRegardless()
         precondition(ui.window.isVisible && !ui.media.isHidden && ui.media.title.stringValue == item["title"] as? String)
         precondition(ui.media.viewport.contentSize.height > 100 && ui.input.bounds.width > 150 && ui.scroll.bounds.height > 60)
@@ -5281,7 +5283,31 @@ func auditConversation(_ root: String) {
             precondition(ui.media.viewport.documentVisibleRect.minY < 2, "Tall media opens at the top")
         }
         await snapshot("media-" + String(i + 1))
-        try! JSONSerialization.data(withJSONObject: ui.pillMedia!).write(to: folder.appendingPathComponent("pill-" + String(i + 1) + ".json"))
+        let caption = ui.caption, panel = caption.imagePanel
+        let text = ["Review can send a draft back for revision.", "The agent shows the diagram before replying.", "This is the desktop app.", "Building takes the largest share of time.", "It starts with a seed.", "Each release moves through these stages."][i]
+        let word = ["revision", "diagram", "desktop", "largest", "seed", "stages"][i]
+        caption.display(text, word: (text as NSString).range(of: word))
+        precondition(caption.isVisible && !caption.isKeyWindow && caption.ignoresMouseEvents)
+        precondition(caption.frame.width == panel.frame.width && caption.frame.minX == panel.frame.minX && panel.frame.minY == caption.frame.maxY + 8)
+        precondition(caption.line.attributedStringValue.attribute(.backgroundColor, at: (caption.line.stringValue as NSString).range(of: word).location, effectiveRange: nil) != nil)
+        try! await Task.sleep(for: .milliseconds(250))
+        let content = try! await SCShareableContent.currentProcess
+        let bounds = panel.frame.union(caption.frame).insetBy(dx: -12, dy: -12)
+        let canvas = CGContext(data: nil, width: Int(bounds.width), height: Int(bounds.height), bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        for window in [caption as NSWindow, panel] {
+            let filter = SCContentFilter(desktopIndependentWindow: content.windows.first { $0.windowID == UInt32(window.windowNumber) }!)
+            let config = SCStreamConfiguration(); config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+            config.width = Int(window.frame.width); config.height = Int(window.frame.height)
+            let shot = try! await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+            let rect = window.frame.offsetBy(dx: -bounds.minX, dy: -bounds.minY)
+            canvas.draw(shot, in: rect)
+            let pixel = canvas.data!.assumingMemoryBound(to: UInt8.self) + (Int(bounds.height - rect.midY) * canvas.bytesPerRow + Int(rect.midX) * 4)
+            precondition(pixel[3] > 128, "Empty caption or image capture")
+        }
+        let pairImage = canvas.makeImage()!
+        try! NSBitmapImageRep(cgImage: pairImage).representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent("pair-" + String(i + 1) + ".png"))
+        caption.orderOut(nil)
+        precondition(panel.isVisible, "The image must stay between spoken passages")
     }
     let image = ui.media.picture.image!
     ui.event(["ConversationMedia": ["data": "YWJj"]])
@@ -5289,11 +5315,13 @@ func auditConversation(_ root: String) {
     ui.window.setContentSize(.init(width: 450, height: 520))
     ui.media.toggleFit(); await snapshot("media-compact-fit")
     precondition(ui.media.picture.frame.width <= ui.media.viewport.contentSize.width)
-    ui.event(["ConversationMedia": [:] as [String: String]])
+    ui.caption.display("Keep speaking.", word: NSRange(location: 0, length: 4))
+    ui.caption.media.close.performClick(nil)
+    precondition(!ui.caption.imagePanel.isVisible && ui.caption.isVisible)
     precondition(ui.media.isHidden && ui.window.frame.size == original.size)
     ui.event(["ConversationMedia": fixtures[0]])
     ui.stop("Ready")
-    precondition(ui.media.isHidden)
+    precondition(ui.media.isHidden && !ui.caption.imagePanel.isVisible && !ui.caption.isVisible)
     ui.window.close()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_LIVE"] == "1" {
         let path = folder.appendingPathComponent("release.dot")
