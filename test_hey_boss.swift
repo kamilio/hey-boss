@@ -3930,12 +3930,22 @@ func auditSubscriptionQuota() {
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"error","updated_at":2000}"#.utf8)))
     precondition(showsRefreshFailure() && ui.rows[0].reading?.data?.windows.count == 1, "Structured failures preserve limits and show the refresh failure")
     ui.refresh()
-    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"claude","id":"default"}]}"#.utf8)))
-    replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"claude","id":"default"},"state":"error","error":"Claude OAuth authorization rejected (HTTP 400); run hey-proxy claude-login"}"#.utf8)))
-    let authLabels = ui.body.subviews.flatMap { $0.subviews }.compactMap { $0 as? NSTextField }
-    precondition(authLabels.contains { $0.stringValue == "Sign in required" && $0.toolTip?.contains("claude-login") == true })
-
-    ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"claude","id":"work"}]}"#.utf8)))
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"claude","id":"work"},"state":"error","error":"Claude OAuth authorization rejected (HTTP 400); run hey-proxy claude-login"}"#.utf8)))
+    let signIn = ui.body.subviews.flatMap { $0.subviews }.compactMap { $0 as? NSButton }.first { $0.title == "Sign in…" }
+    precondition(signIn != nil, "Rejected authorization offers browser sign-in")
+    let login = FileManager.default.temporaryDirectory.appendingPathComponent("quota-login-" + UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: login) }
+    try! Data(#"""
+    #!/bin/sh
+    [ "$#" = 4 ] && [ "$1" = proxy ] && [ "$2" = claude-login ] && [ "$3" = --account ] && [ "$4" = work ]
+    """#.utf8).write(to: login)
+    try! FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: login.path)
+    ui.cli = login.path
+    signIn!.performClick(nil)
+    let loginDeadline = Date().addingTimeInterval(3)
+    while replies.isEmpty && Date() < loginDeadline { RunLoop.main.run(until: Date().addingTimeInterval(0.02)) }
+    precondition(replies.count == 1 && calls.last == ["--accounts"], "Successful sign-in refreshes quota")
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
     precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
     ui.refresh()

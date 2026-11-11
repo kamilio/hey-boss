@@ -4688,6 +4688,8 @@ final class SubscriptionQuotaController: NSObject {
     var cli: String?
     var rows: [SubscriptionQuotaRow] = []
     var message = "Checking subscriptions…"
+    var signingIn: SubscriptionQuotaAccount?
+    var failedSignIn: SubscriptionQuotaAccount?
     var loading = false
     var lastLoaded: Date?
     var timer: Timer?
@@ -4738,7 +4740,7 @@ final class SubscriptionQuotaController: NSObject {
     func close() {} // Keep the cache warm while the menu is closed.
     deinit { timer?.invalidate() }
     @objc func refresh() {
-        guard !loading else { return }
+        guard !loading, signingIn == nil else { return }
         loading = true; message = "Checking subscriptions…"; render()
         request(["--accounts"]) { [weak self] result in
             guard let self else { return }
@@ -4784,10 +4786,33 @@ final class SubscriptionQuotaController: NSObject {
         }
         render()
     }
+    var executable: String? {
+        let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
+        return paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+    }
+    func signIn(_ account: SubscriptionQuotaAccount) {
+        guard signingIn == nil, !loading else { return }
+        guard let executable else { failedSignIn = account; render(); return }
+        signingIn = account; failedSignIn = nil; render()
+        content.enclosingMenuItem?.menu?.cancelTracking()
+        queue.addOperation {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: executable)
+            process.arguments = ["proxy", "claude-login"] + (account.id == "default" ? [] : ["--account", account.id])
+            process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+            let success: Bool
+            do { try process.run(); process.waitUntilExit(); success = process.terminationStatus == 0 }
+            catch { success = false }
+            onMain {
+                self.signingIn = nil
+                if success { self.refresh() }
+                else { self.failedSignIn = account; self.render() }
+            }
+        }
+    }
     func request(_ args: [String], completion: @escaping (Result<Data, Error>) -> Void) {
         if let runner { runner(args, completion); return }
-        let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
-        guard let executable = paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) else {
+        guard let executable else {
             completion(.failure(StorageError(description: "CLI unavailable"))); return
         }
         queue.addOperation {
@@ -4811,7 +4836,7 @@ final class SubscriptionQuotaController: NSObject {
         }
     }
     func render() {
-        refreshButton.isEnabled = !loading
+        refreshButton.isEnabled = !loading && signingIn == nil
         subtitle.stringValue = "Subscription quota"
         let origin = scroll.contentView.bounds.origin
         body.subviews.forEach { $0.removeFromSuperview() }
@@ -4837,10 +4862,17 @@ final class SubscriptionQuotaController: NSObject {
             name.frame = NSRect(x: 12, y: 10, width: cardWidth - 108, height: 19); card.addSubview(name)
             let failed = !loading && !row.message.isEmpty
             let signIn = failed && row.message.contains("authorization rejected") && row.message.contains("claude-login")
-            let statusText = signIn ? "Sign in required" : failed ? "Refresh failed" : reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
-            let status = label(statusText, size: 10, weight: .medium, color: failed ? .systemOrange : fresh ? .systemTeal : .secondaryLabelColor)
-            if failed { status.toolTip = row.message }
-            status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
+            if signIn {
+                let button = ActionButton(signingIn == row.account ? "Signing in…" : "Sign in…", frame: NSRect(x: cardWidth - 100, y: 6, width: 88, height: 25), style: .link) { [weak self] in self?.signIn(row.account) }
+                button.isEnabled = signingIn == nil
+                button.toolTip = "Sign in to Claude in your browser"
+                card.addSubview(button)
+            } else {
+                let statusText = failed ? "Refresh failed" : reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
+                let status = label(statusText, size: 10, weight: .medium, color: failed ? .systemOrange : fresh ? .systemTeal : .secondaryLabelColor)
+                if failed { status.toolTip = row.message }
+                status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
+            }
             var rowY: CGFloat = 38
             if showSpend {
                 let spend = reading?.data?.extra_usage?.spend
@@ -4879,7 +4911,7 @@ final class SubscriptionQuotaController: NSObject {
             }
             let footnote: String
             if signIn {
-                footnote = "Run hey-boss proxy claude-login" + (row.account.id == "default" ? "" : " --account " + row.account.id)
+                footnote = signingIn == row.account ? "Finish signing in with your browser." : failedSignIn == row.account ? "Sign-in didn’t finish. Try again." : "Sign in to update your Claude quota."
             } else if let reading {
                 if windows.isEmpty { footnote = reading.state == "disabled" ? "Connect this account with hey-proxy." : "Provider has not reported limits." }
                 else if reading.data?.availability_unknown == true { footnote = "Availability uncertain · last known limits" }
