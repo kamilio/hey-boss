@@ -44,6 +44,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     } }
     private var overlay: Overlay?
     private var conversation: [String: Any]?
+    private var pillMediaID: String?
     private var conversationLevel = 0.0
     private var conversationRevision = 0
     private var openingConversation = false
@@ -277,7 +278,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         defer { close(fd) }
         try Wire.write(Wire.json(request), to: fd, timeout: 5)
         shutdown(fd, SHUT_WR)
-        let reply = try JSONSerialization.jsonObject(with: Wire.response(from: fd)) as? [String: Any]
+        let reply = try JSONSerialization.jsonObject(with: Wire.response(from: fd, limit: request["command"] as? String == "conversation_media" ? 17 * 1024 * 1024 : 16_384)) as? [String: Any]
         return reply
     }
     @objc private func conversationChanged(_ notification: Notification) {
@@ -318,6 +319,23 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         let previous = conversation != nil
         conversation = next; conversationLevel = 0
+        let id = next?["mediaID"] as? String
+        if id != pillMediaID {
+            pillMediaID = id
+            if let id {
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let payload = try? self.chatRequest(["command": "conversation_media", "title": id, "sync": false])
+                    let bytes = (payload?["data"] as? String).flatMap { Data(base64Encoded: $0) }
+                    DispatchQueue.main.async {
+                        guard self.pillMediaID == id else { return }
+                        guard payload?["id"] as? String == id, let bytes, let image = NSImage(data: bytes) else {
+                            self.pillMediaID = nil; self.overlay?.clearMedia(); return
+                        }
+                        self.overlay?.showMedia(image, title: payload?["title"] as? String ?? "Image", kind: payload?["kind"] as? String ?? "Image")
+                    }
+                }
+            } else { overlay?.clearMedia() }
+        }
         if next != nil || previous {
             overlay?.showConversation(next)
             if next == nil { overlay?.update(session.phase) }
@@ -440,6 +458,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onEditVocabulary = { [weak self] term in self?.editVocabulary(term) }
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onStartConversation = { [weak self] in self?.startConversation() }
+            view.onHideMedia = { [weak self] in self?.controlConversation("hide_media") }
             view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
             view.onChatWithContext = { [weak self] in self?.chatWithContext() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }

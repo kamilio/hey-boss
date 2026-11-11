@@ -289,7 +289,7 @@ final class Reply {
         channel = DispatchIO(type: .stream, fileDescriptor: fd, queue: .global(qos: .userInitiated)) { _ in Darwin.close(fd) }
     }
     func send(_ response: [String: Any]) {
-        guard let bytes = try? JSONSerialization.data(withJSONObject: response) else { channel.close(); return }
+        guard let bytes = try? JSONSerialization.data(withJSONObject: response, options: .withoutEscapingSlashes) else { channel.close(); return }
         let data = bytes.withUnsafeBytes { DispatchData(bytes: $0) }
         channel.write(offset: 0, data: data, queue: .global(qos: .userInitiated)) { [self] done, _, _ in
             if done { channel.close() }
@@ -5280,7 +5280,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
         if !NSWorkspace.shared.open(config) { NSLog("Could not open machine config") }
     }
     #if canImport(FoundationModels)
-    private var conversationWindow: NSObject?
+    private(set) var conversationWindow: NSObject?
     @available(macOS 26, *)
     @objc func showConversation() {
         currentConversation().show()
@@ -5290,8 +5290,9 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @available(macOS 26, *)
     func controlConversation(_ action: String?) -> Bool {
         guard let chat = conversationWindow as? VoiceConversation, chat.voiceStatus["active"] as? Bool == true else { return false }
-        if chat.window.attachedSheet != nil, action != "stop" { chat.show(); return true }
-        if action == "show" { chat.show() }
+        if chat.window.attachedSheet != nil, action != "stop", action != "hide_media" { chat.show(); return true }
+        if action == "hide_media" { chat.hideMedia() }
+        else if action == "show" { chat.show() }
         else if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
         else if action == "stop" { chat.stop("Microphone off") }
         else if action == "interrupt" { chat.listenForNextTurn() }
@@ -7580,7 +7581,7 @@ final class ConversationCaption: NSPanel {
         line.frame = NSRect(x: 18, y: 14, width: frame.width - 36, height: 26)
         face.addSubview(line); contentView = face
     }
-    func display(_ text: String, word: NSRange) {
+    func display(_ text: String, word: NSRange, aboveMedia: Bool = false) {
         guard word.length > 0, NSMaxRange(word) <= text.utf16.count else { return }
         if passage != text || typesetter == nil {
             passage = text; page = NSRange()
@@ -7601,9 +7602,10 @@ final class ConversationCaption: NSPanel {
             styled.addAttributes([.backgroundColor: NSColor(srgbRed: 0.30, green: 0.28, blue: 0.53, alpha: 1), .foregroundColor: NSColor.white, .underlineStyle: NSUnderlineStyle.single.rawValue], range: relative)
         }
         line.attributedStringValue = styled
-        if !isVisible, let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main {
-            setFrameOrigin(NSPoint(x: screen.visibleFrame.midX - frame.width / 2, y: screen.visibleFrame.minY + 80))
-            orderFrontRegardless()
+        if let screen = (isVisible ? self.screen : NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })) ?? NSScreen.main {
+            let origin = NSPoint(x: screen.visibleFrame.midX - frame.width / 2, y: aboveMedia ? screen.visibleFrame.maxY - frame.height - 20 : screen.visibleFrame.minY + 80)
+            if frame.origin != origin { setFrameOrigin(origin) }
+            if !isVisible { orderFrontRegardless() }
         }
     }
 }
@@ -7637,6 +7639,7 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
     private final class Paper: NSView { override var isFlipped: Bool { true } }
     private let paper = Paper()
     private var vector: WKWebView?
+    var didRenderPDF: ((Data) -> Void)?
     private var drawing: WKNavigation?
     private var fit = false
 
@@ -7711,7 +7714,7 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
         let config = WKPDFConfiguration(); config.rect = webView.bounds
         webView.createPDF(configuration: config) { [weak self] result in
             guard let self, webView === self.vector, navigation === self.drawing else { return }
-            if case .success(let pdf) = result, let image = NSImage(data: pdf) { self.picture.image = image }
+            if case .success(let pdf) = result, let image = NSImage(data: pdf) { self.picture.image = image; self.didRenderPDF?(pdf) }
             self.vector = nil; self.drawing = nil
         }
     }
@@ -7723,6 +7726,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     let media = ConversationMediaView()
     private var mediaHeight: NSLayoutConstraint!
+    private(set) var pillMedia: [String: String]?
     private var compactFrame: NSRect?
     lazy var caption = ConversationCaption()
     let historyList = NSTableView()
@@ -8157,10 +8161,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case .thinking: label = "Thinking…"
         case .speaking: label = playbackPaused ? "Paused" : "Speaking"
         }
-        return ["active": window.isKeyWindow || phase != .idle, "phase": phase.rawValue,
+        var state: [String: Any] = ["active": window.isKeyWindow || phase != .idle || pillMedia != nil, "phase": phase.rawValue,
                 "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
+        state["mediaID"] = pillMedia?["id"]; return state
     }
     private func publishVoiceStatus() {
         guard Bundle.main.bundleIdentifier == "local.hey-boss.desktop" else { return }
@@ -8672,7 +8677,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let speaksCount = part.text.utf16.count != part.span.length
             audio.speak(part.text, following: speech.prefix(3).map(\.text), highlight: { [weak self] word in
                 guard let self, NSMaxRange(word) <= part.text.utf16.count else { return }
-                if self.phase == .speaking, !self.playbackPaused { self.caption.display(part.text, word: word) }
+                if self.phase == .speaking, !self.playbackPaused { self.caption.display(part.text, word: word, aboveMedia: self.pillMedia != nil) }
                 self.playingThrough = NSMaxRange(word)
                 let span = speaksCount ? part.span : NSRange(location: part.span.location + word.location, length: word.length)
                 if self.lit?.0 !== part.label || self.lit?.1 != span { self.highlight(part.label, span) }
@@ -8752,6 +8757,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func hideMedia() {
         guard !media.isHidden else { return }
+        pillMedia = nil; media.didRenderPDF = nil; publishVoiceStatus()
         media.isHidden = true; media.clear(); mediaHeight.constant = 0
         if let frame = compactFrame, !window.styleMask.contains(.fullScreen) { window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true) }
         compactFrame = nil
@@ -8775,9 +8781,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             window.setFrame(frame, display: true)
         }
         mediaHeight.constant = max(180, image.size.height + 90)
+        pillMedia = ["id": UUID().uuidString, "title": title, "kind": kind, "data": encoded]; publishVoiceStatus()
+        media.didRenderPDF = { [weak self] pdf in
+            guard let self, pdf.count <= 12 * 1024 * 1024 else { return }
+            self.pillMedia = ["id": UUID().uuidString, "title": title, "kind": kind, "data": pdf.base64EncodedString()]
+            self.publishVoiceStatus()
+        }
         media.display(image, title: title, kind: kind, svg: kind == "Image" ? nil : encoded)
         window.contentView?.layoutSubtreeIfNeeded()
-        if !window.isVisible { window.orderFrontRegardless() }
         revealLatest()
     }
     func event(_ envelope: [String:Any]) {
@@ -10664,12 +10675,18 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
+                    } else if ["conversation_start", "conversation_context", "conversation_media", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
                                 if request.command == "conversation_pause" || request.command == "conversation_resume" {
                                     reply.send(overview.currentConversation().handleSessionRequest(request)); return
+                                }
+                                if request.command == "conversation_media" {
+                                    let media = (overview.conversationWindow as? VoiceConversation)?.pillMedia
+                                    let result = media?["id"] == request.title ? media : nil
+                                    DispatchQueue.global(qos: .userInitiated).async { reply.send(result ?? [:]) }
+                                    return
                                 }
                                 if request.command == "conversation_status" {
                                     reply.send(["status": "ok", "conversation": overview.conversationStatus]); return
