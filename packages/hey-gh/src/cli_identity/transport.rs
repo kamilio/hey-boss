@@ -307,6 +307,17 @@ fn personal_read(method: &reqwest::Method, path: &str) -> bool {
             || path.ends_with("/notifications"))
 }
 
+pub(crate) async fn forward_review_app(
+    client: &reqwest::Client,
+    request: Request<Body>,
+    url: url::Url,
+    token: String,
+) -> std::result::Result<Response<Body>, String> {
+    let mut state = Transport::new("github.com".into(), token).map_err(|e| e.to_string())?;
+    state.client = client.clone();
+    forward(&state, request, url, true).await
+}
+
 async fn forward(
     state: &Transport,
     request: Request<Body>,
