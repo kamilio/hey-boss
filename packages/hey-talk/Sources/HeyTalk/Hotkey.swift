@@ -129,7 +129,7 @@ enum Paste {
                         completion: @escaping (String, PasteBlockReason?) -> Void) {
         var previousState: String?
         func check() -> PasteBlockReason? {
-            let front = NSWorkspace.shared.frontmostApplication
+            let front = FocusedInput.keyboardApp
             var reason = PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
                 targetIsSelf: target?.processIdentifier == getpid(), targetIsFrontmost: target != nil && front?.processIdentifier == target?.processIdentifier)
             var state = reason?.rawValue ?? "ready"
@@ -154,7 +154,7 @@ enum Paste {
             Task { @MainActor in
                 guard let field = originalField, let target else { completion("history", .clearUnavailable); return }
                 func focused() -> AXUIElement? {
-                    guard isCurrent(), target.isActive, let input = FocusedInput.read(app: target, forAuto: false), input == field else { return nil }
+                    guard isCurrent(), FocusedInput.keyboardApp == target, let input = FocusedInput.read(app: target, forAuto: false), input == field else { return nil }
                     return input.element
                 }
                 guard let editor = focused(), let value = SpeechAX.value(editor, "AXValue") as? String else { completion("history", .clearUnavailable); return }

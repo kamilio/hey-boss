@@ -465,7 +465,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     @objc private func toggleOverlay() { showOverlay(!overlayEnabled) }
     @objc private func updateSubmitIndicator() {
         let active = session.phase == .recording || session.phase == .processing
-        let app = active ? target : NSWorkspace.shared.frontmostApplication
+        let app = active ? target : FocusedInput.keyboardApp
         let requested = !active || (paste && (pressEnter || (automatic != nil && session.phase == .recording)))
         let followsFocus = session.phase == .recording && automatic?.followsFocus == true
         let host = active && !followsFocus ? recordingHost : BrowserPage.host(in: app)
@@ -573,7 +573,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
     }
     private func toggleAutoSubmit() {
-        guard let app = NSWorkspace.shared.frontmostApplication, let bundleID = app.bundleIdentifier else { return }
+        guard let app = FocusedInput.keyboardApp, let bundleID = app.bundleIdentifier else { return }
         do {
             if BrowserPage.isBrowser(app) {
                 guard !enterExceptions.bundleIDs.contains(bundleID) else {
@@ -832,7 +832,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
         clearAutomatic()
         automatic = focusedInput.map { AutoRecording(target: $0, followsFocus: $0.app.bundleIdentifier != "com.t3tools.t3code") }
-        target = focusedInput?.app ?? NSWorkspace.shared.frontmostApplication
+        target = focusedInput?.app ?? FocusedInput.keyboardApp
         slackTeam = paste && correctionSettings.enabled ? SlackTools.route(target)?.pathComponents[2] : nil
         recordingHost = BrowserPage.host(in: target)
         targetName = target?.localizedName
@@ -873,7 +873,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let pid = target.processIdentifier
             let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
             self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput] in
-                guard !Task.isCancelled, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+                guard !Task.isCancelled, FocusedInput.keyboardApp?.processIdentifier == pid,
                       !isT3 || startingInput?.isFocused() == true else { return (nil, 0) }
                 let started = ProcessInfo.processInfo.systemUptime
                 let text = AppContext.capture(pid: pid)

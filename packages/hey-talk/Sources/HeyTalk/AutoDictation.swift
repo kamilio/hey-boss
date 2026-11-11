@@ -91,7 +91,10 @@ struct FocusedInput: Equatable {
         guard document == other.document else { return "document_changed" }
         guard composerLabel == other.composerLabel else { return "composer_changed" }
         // T3 and Slack remount editors when returning to a conversation.
-        return CFEqual(element, other.element) || (window != nil && document != nil && composerLabel != nil) ? nil : "element_changed"
+        if CFEqual(element, other.element) { return nil }
+        guard window != nil, composerLabel != nil, let document,
+              document.hasPrefix("slack://channel?") || document.hasPrefix("t3code://") else { return "element_changed" }
+        return nil
     }
     private static func equal(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
         if let lhs, let rhs { return CFEqual(lhs, rhs) }
@@ -101,6 +104,14 @@ struct FocusedInput: Equatable {
         guard enabled, editable, subrole != "AXSecureTextField", ["AXTextField", "AXTextArea"].contains(role) else { return false }
         // T3's search, rename, and settings fields must not open the microphone.
         return !forAuto || bundleID != "com.t3tools.t3code" || (role == "AXTextArea" && (label == "Message" || label.hasPrefix("Message ")))
+    }
+    // Nonactivating panels can own the keyboard while their host app is in the background.
+    static var keyboardApp: NSRunningApplication? {
+        guard AXIsProcessTrusted() else { return NSWorkspace.shared.frontmostApplication }
+        guard let app = axElement(AXUIElementCreateSystemWide(), kAXFocusedApplicationAttribute) else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(app, &pid) == .success else { return nil }
+        return NSRunningApplication(processIdentifier: pid)
     }
     static func read(app: NSRunningApplication, forAuto: Bool = true) -> Self? {
         guard AXIsProcessTrusted(), let bundleID = app.bundleIdentifier else { return nil }
@@ -141,18 +152,19 @@ struct FocusedInput: Equatable {
             if let url = url as? String { document = url; break }
             ancestor = axElement(current, kAXParentAttribute)
         }
+        let window = axElement(field, kAXWindowAttribute)
         if slack {
             guard let route = document, !threadReply || threadInput != nil,
-                  let link = slackLink(route, threadInput: threadInput) else { return nil }
-            document = link
+                  let destination = slackDestination(route, threadInput: threadInput),
+                  destination != route || (window != nil && !label.isEmpty) else { return nil }
+            document = destination
         }
-        let window = axElement(field, kAXWindowAttribute)
         let t3 = bundleID == "com.t3tools.t3code"
         guard !t3 || (window != nil && document?.isEmpty == false) else { return nil }
         let composer = slack || (t3 && role == "AXTextArea" && classes.contains("composer-tiptap"))
         return Self(app: app, element: field, window: window, document: document, composerLabel: composer && !label.isEmpty ? label : nil)
     }
-    static func slackLink(_ route: String, threadInput: String?) -> String? {
+    static func slackDestination(_ route: String, threadInput: String?) -> String? {
         guard let url = URL(string: route), url.scheme == "https", url.host == "app.slack.com" else { return nil }
         let path = url.pathComponents
         guard path.count >= 4, path[1] == "client", path[2].wholeMatch(of: #/^[TE][A-Z0-9]+$/#) != nil else { return nil }
@@ -161,6 +173,8 @@ struct FocusedInput: Equatable {
             guard let match = threadInput.wholeMatch(of: #/^([CDG][A-Z0-9]+)-([0-9]{10}\.[0-9]{6})-thread-list-Thread_input$/#) else { return nil }
             return prefix + match.1 + "&thread_ts=" + match.2
         }
+        // Slack's DMs view shares one URL across recipients. Only the same live editor may match.
+        if path.count == 4, path[3] == "dms" { return route }
         guard path[3].wholeMatch(of: #/^[CDG][A-Z0-9]+$/#) != nil else { return nil }
         return prefix + path[3]
     }
@@ -279,11 +293,11 @@ struct FocusedInput: Equatable {
         return matches.count == 1 ? matches[0] : nil
     }
     func isFocused() -> Bool {
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == app.processIdentifier else { return false }
+        guard Self.keyboardApp?.processIdentifier == app.processIdentifier else { return false }
         return Self.read(app: app, forAuto: false) == self
     }
     static func current(bundleIDs: [String]) -> Self? {
-        guard let app = NSWorkspace.shared.frontmostApplication, bundleIDs.contains(app.bundleIdentifier ?? "") else { return nil }
+        guard let app = keyboardApp, bundleIDs.contains(app.bundleIdentifier ?? "") else { return nil }
         return read(app: app)
     }
     private static func value(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -336,7 +350,7 @@ final class InputFocusMonitor {
         publish(nil)
     }
     func refresh() {
-        guard !suspended, AXIsProcessTrusted(), let app = NSWorkspace.shared.frontmostApplication,
+        guard !suspended, AXIsProcessTrusted(), let app = FocusedInput.keyboardApp,
               bundleIDs.contains(app.bundleIdentifier ?? "") else {
             detach(); publish(nil); return
         }

@@ -69,26 +69,32 @@ final class AutoDictationTests: XCTestCase {
         func field(_ element: AXUIElement, _ route: String?, _ label: String?, window: AXUIElement? = nil) -> FocusedInput {
             FocusedInput(app: app, element: element, window: window ?? first, document: route, composerLabel: label)
         }
-        let start = field(first, "/thread/A", "Message A")
-        XCTAssertEqual(start, field(other, "/thread/A", "Message A"))
-        XCTAssertNotEqual(start, field(first, "/thread/B", "Message A"))
-        XCTAssertNotEqual(start, field(other, "/thread/A", nil))
-        XCTAssertNotEqual(start, field(first, "/thread/A", "Message B"))
-        XCTAssertNotEqual(start, field(other, "/thread/A", "Message A", window: other))
+        let start = field(first, "t3code://app/#/thread/A", "Message A")
+        XCTAssertEqual(start, field(other, "t3code://app/#/thread/A", "Message A"))
+        XCTAssertNotEqual(start, field(first, "t3code://app/#/thread/B", "Message A"))
+        XCTAssertNotEqual(start, field(other, "t3code://app/#/thread/A", nil))
+        XCTAssertNotEqual(start, field(first, "t3code://app/#/thread/A", "Message B"))
+        XCTAssertNotEqual(start, field(other, "t3code://app/#/thread/A", "Message A", window: other))
         XCTAssertNotEqual(field(first, nil, "Message A"), field(other, nil, "Message A"))
+        let dms = "https://app.slack.com/client/T123/dms"
+        XCTAssertEqual(field(first, dms, "Message A"), field(first, dms, "Message A"))
+        XCTAssertNotEqual(field(first, dms, "Message A"), field(other, dms, "Message A"))
+        XCTAssertNotEqual(field(first, dms, "Message A"), field(first, dms, "Message B"))
     }
 
     func testSlackDestinationSeparatesChannelDraftsAndIndividualThreadReplies() {
         let channel = "https://app.slack.com/client/T123/C456"
         let inbox = "https://app.slack.com/client/T123/activity-inbox"
-        XCTAssertEqual(FocusedInput.slackLink(channel, threadInput: nil), "slack://channel?team=T123&id=C456")
-        XCTAssertEqual(FocusedInput.slackLink("https://app.slack.com/client/E123/D456", threadInput: nil), "slack://channel?team=E123&id=D456")
+        XCTAssertEqual(FocusedInput.slackDestination(channel, threadInput: nil), "slack://channel?team=T123&id=C456")
+        XCTAssertEqual(FocusedInput.slackDestination("https://app.slack.com/client/E123/D456", threadInput: nil), "slack://channel?team=E123&id=D456")
+        let dms = "https://app.slack.com/client/T123/dms"
+        XCTAssertEqual(FocusedInput.slackDestination(dms, threadInput: nil), dms)
         let reply = "C456-1234567890.123456-thread-list-Thread_input"
-        XCTAssertEqual(FocusedInput.slackLink(inbox, threadInput: reply), "slack://channel?team=T123&id=C456&thread_ts=1234567890.123456")
-        XCTAssertNotEqual(FocusedInput.slackLink(channel, threadInput: nil), FocusedInput.slackLink(channel, threadInput: reply))
-        XCTAssertNil(FocusedInput.slackLink(inbox, threadInput: nil))
-        XCTAssertNil(FocusedInput.slackLink(channel, threadInput: "unknown"))
-        XCTAssertNil(FocusedInput.slackLink("https://example.org/client/T123/C456", threadInput: nil))
+        XCTAssertEqual(FocusedInput.slackDestination(inbox, threadInput: reply), "slack://channel?team=T123&id=C456&thread_ts=1234567890.123456")
+        XCTAssertNotEqual(FocusedInput.slackDestination(channel, threadInput: nil), FocusedInput.slackDestination(channel, threadInput: reply))
+        XCTAssertNil(FocusedInput.slackDestination(inbox, threadInput: nil))
+        XCTAssertNil(FocusedInput.slackDestination(channel, threadInput: "unknown"))
+        XCTAssertNil(FocusedInput.slackDestination("https://example.org/client/T123/C456", threadInput: nil))
     }
 
     func testOnlyExactT3ThreadRoutesCanReopenAComposer() {
