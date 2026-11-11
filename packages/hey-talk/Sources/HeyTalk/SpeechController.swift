@@ -31,10 +31,40 @@ final class SpeechController {
     var onActivityChanged: ((Bool) -> Void)?
     var onAllowedChanged: ((Bool) -> Void)?
     var onNotice: ((String) -> Void)?
-    var active: Bool { playback.active }
+    private var recapSource: CatchUpSource?
+    private var preparing: Task<Void, Never>?
+    var active: Bool { preparing != nil || playback.active }
+
+    func catchUp() throws {
+        guard !sleeping else { throw TalkError("Unlock this Mac before reading aloud.") }
+        let source = try CatchUpSource.current()
+        if recapSource == source {
+            if preparing != nil { stop() } else { playback.togglePause() }
+            return
+        }
+        guard willPlay() else { throw TalkError("Finish dictating before reading aloud.") }
+        stop()
+        recapSource = source
+        preparing = Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let passage = try await source.passage()
+                try Task.checkCancellation()
+                let text = try await passage.summarize()
+                try Task.checkCancellation()
+                self.preparing = nil
+                try self.playback.start(text)
+            } catch {
+                guard !Task.isCancelled else { return }
+                self.stop(); self.onNotice?(error.localizedDescription)
+            }
+        }
+        changed()
+    }
     var status: [String: Any] {
         var result = settings.json
-        result["state"] = playback.state.rawValue
+        result["state"] = preparing != nil ? "loading" : playback.state.rawValue
+        if recapSource != nil { result["source"] = "catch-up" }
         result["model"] = SpeechModel.name; result["voice"] = SpeechModel.voice; result["model_ready"] = SpeechModel.available
         result["rate"] = playback.rate; result["overlay"] = overlay.visible
         result["first_audio_ms"] = playback.firstAudioMS
@@ -79,7 +109,7 @@ final class SpeechController {
         stop(); release?.cancel()
     }
     func stop() {
-        revision &+= 1; candidate = nil; reading = nil
+        revision &+= 1; preparing?.cancel(); preparing = nil; recapSource = nil; candidate = nil; reading = nil
         release?.cancel(); playback.stop(); overlay.hide(); sourceHighlight.hide()
     }
     func toggleEnabled() {
@@ -90,6 +120,7 @@ final class SpeechController {
     func pause() { if active && playback.state != .paused { playback.togglePause() } }
     func settingsChanged() { stop(); refresh() }
     func toggle(fromOverlay: Bool = false, completion: @escaping (Result<Void, Error>) -> Void = { _ in }) {
+        if preparing != nil { stop(); completion(.success(())); return }
         if active { playback.togglePause(); completion(.success(())); return }
         let anchor = (fromOverlay || overlay.containsPointer) ? candidate ?? reading : nil
         resolve(point: anchor?.point, preferSelection: true) { [weak self] result in
@@ -116,6 +147,7 @@ final class SpeechController {
     private func refresh() {
         let allowed = !sleeping && settings.bundleIDs.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
         onAllowedChanged?(allowed)
+        if recapSource != nil { return } // A requested recap stays with you when you switch apps.
         guard !sleeping, let app = NSWorkspace.shared.frontmostApplication, settings.allows(app.bundleIdentifier ?? "") else {
             warmedApp = nil
             if active { stop() } else { candidate = nil; overlay.hide(); sourceHighlight.hide() }
@@ -185,7 +217,10 @@ final class SpeechController {
     }
     private func changed() {
         onActivityChanged?(active)
-        if let target = reading ?? candidate {
+        if recapSource != nil {
+            if active { overlay.showCaption(text: preparing == nil ? playback.text : "", state: preparing == nil ? playback.state : .loading) }
+            else { recapSource = nil; overlay.hide() }
+        } else if let target = reading ?? candidate {
             overlay.show(target: target, state: playback.state, rate: playback.rate, fraction: playback.progress, error: playback.error)
         }
         if !active {

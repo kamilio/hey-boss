@@ -49,6 +49,8 @@ final class SpeechOverlay: NSObject {
     private let label = SpeechLabel(labelWithString: "Listen")
     private let idleIcon = SpeechIcon()
     private let progress = SpeechProgress()
+    private let spinner = NSProgressIndicator()
+    private var caption = false
     private let scroll = NSScrollView()
     private let textView = NSTextView()
     private let glass: NSView
@@ -114,6 +116,8 @@ final class SpeechOverlay: NSObject {
         idleIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         face.addSubview(idleIcon)
         face.addSubview(progress)
+        spinner.style = .spinning; spinner.controlSize = .small; spinner.isDisplayedWhenStopped = false
+        face.addSubview(spinner)
         textView.isEditable = false; textView.isSelectable = false; textView.drawsBackground = false
         textView.isRichText = true; textView.textContainerInset = NSSize(width: 0, height: 4)
         textView.isVerticallyResizable = true; textView.isHorizontallyResizable = false
@@ -123,7 +127,50 @@ final class SpeechOverlay: NSObject {
         scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true
         face.addSubview(scroll)
     }
+    // The recap is a speech passage with no source rectangle. Use the same
+    // player controls, text storage, and timed word lens as paragraph playback.
+    func showCaption(text: String, state: SpeechState) {
+        guard let screen = (caption ? panel.screen : nil) ?? NSScreen.main else { return }
+        let area = screen.visibleFrame, width = min(520, area.width - 24)
+        let rect = CGRect(x: (area.midX - width / 2).rounded(), y: area.minY + 80, width: width, height: 54)
+        if !caption || snapshotText != text {
+            let style = NSMutableParagraphStyle(); style.alignment = .center
+            snapshot = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium),
+                                                                     .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
+            textView.subviews.filter { $0 is SpeechWordLens }.forEach { $0.removeFromSuperview() }
+            textView.textStorage?.setAttributedString(snapshot!); snapshotText = text; highlighted = nil
+            scroll.contentView.scroll(to: .zero)
+        }
+        caption = true; drawerOpen = true; target = nil
+        if panel.frame != rect { panel.setFrame(rect, display: true) }
+        panel.appearance = NSAppearance(named: .darkAqua)
+        if #available(macOS 26, *), let glass = glass as? NSGlassEffectView { glass.style = .regular }
+        face.frame = CGRect(origin: .zero, size: rect.size); face.drawer = true
+        label.isHidden = true; disclosure.isHidden = true; speed.isHidden = true; progress.isHidden = true; idleIcon.isHidden = true
+        play.frame = CGRect(x: 7, y: 10, width: 32, height: 34); stop.frame = CGRect(x: width - 39, y: 10, width: 32, height: 34)
+        play.imagePosition = .imageOnly; play.title = ""
+        play.image = NSImage(systemSymbolName: state == .paused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
+        play.toolTip = state == .paused ? "Resume Catch Up" : "Pause Catch Up"; play.setAccessibilityLabel(play.toolTip)
+        play.isHidden = state == .loading; stop.isHidden = false
+        spinner.frame = CGRect(x: text.isEmpty ? width / 2 - 8 : 15, y: 19, width: 16, height: 16)
+        if state == .loading { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
+        scroll.isHidden = text.isEmpty; scroll.hasVerticalScroller = false
+        scroll.frame = CGRect(x: 43, y: 14, width: width - 86, height: 26)
+        textView.textContainerInset = .zero
+        textView.frame.size.width = scroll.contentSize.width
+        if let container = textView.textContainer, let layout = textView.layoutManager {
+            container.containerSize = NSSize(width: scroll.contentSize.width, height: .greatestFiniteMagnitude)
+            layout.ensureLayout(for: container)
+            textView.frame.size.height = layout.usedRect(for: container).height + scroll.bounds.height
+        }
+        if !panel.isVisible { panel.orderFrontRegardless() }
+    }
     func show(target: SpeechTarget, state: SpeechState, rate: Float, fraction: Double, error: String?) {
+        if caption {
+            caption = false; snapshotText = nil; panel.appearance = nil
+            spinner.stopAnimation(nil); play.isHidden = false; label.isHidden = false
+            textView.textContainerInset = NSSize(width: 0, height: 4); scroll.hasVerticalScroller = true
+        }
         let active = [.loading, .playing, .paused].contains(state)
         let expanded = active || state == .failed
         if active && (!lastState.isActive || snapshotText != target.text) {
@@ -208,9 +255,13 @@ final class SpeechOverlay: NSObject {
         }
         highlighted = next?.range; highlightedWord = next?.word ?? false
         if let next, NSMaxRange(next.range) <= storage.length {
-            textView.scrollRangeToVisible(next.range)
+            if !caption { textView.scrollRangeToVisible(next.range) }
             guard let layout = textView.layoutManager, let container = textView.textContainer else { return }
             let glyphs = layout.glyphRange(forCharacterRange: next.range, actualCharacterRange: nil)
+            if caption, glyphs.length > 0 {
+                let row = layout.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+                scroll.contentView.scroll(to: CGPoint(x: 0, y: floor(row.minY))); scroll.reflectScrolledClipView(scroll.contentView)
+            }
             let origin = textView.textContainerOrigin
             layout.enumerateLineFragments(forGlyphRange: glyphs) { _, _, _, line, _ in
                 let part = NSIntersectionRange(line, glyphs)
@@ -241,7 +292,7 @@ final class SpeechOverlay: NSObject {
         let y = min(max(anchor.maxY - size.height, visible.minY + 8), visible.maxY - size.height - 8)
         return CGRect(origin: CGPoint(x: x, y: y), size: size)
     }
-    func hide() { panel.orderOut(nil); target = nil; pinnedOrigin = nil }
+    func hide() { spinner.stopAnimation(nil); panel.orderOut(nil); target = nil; pinnedOrigin = nil }
     @objc private func playClicked() { onPlay?() }
     @objc private func stopClicked() { onStop?() }
     @objc private func speedClicked() { onSpeed?() }

@@ -78,17 +78,7 @@ final class Correction {
         if canAddVocabularyTerm { tools.append(try tool("add_dictation_vocabulary_term", "term")) }
         if canClear { tools.append(try tool("clear_input")) }
         if let package { tools += try package.definitions(prompt: prompt) }
-        let profile = settings.bedrockProfile
-        let path = profile == nil ? "/v1/responses" : "/bedrock/v1/responses"
-        var request = URLRequest(url: URL(string: "http://127.0.0.1:8080" + path)!)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        let access = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")
-        if FileManager.default.fileExists(atPath: access.path) {
-            let keys = try JSONSerialization.jsonObject(with: Data(contentsOf: access)) as? [String: Any]
-            guard let key = keys?["local"] as? String, !key.isEmpty else { throw TalkError("Hey Proxy’s local access key is invalid.") }
-            request.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
-        }
+        var request = try ProxyResponses.request(profile: settings.bedrockProfile)
         var values: [String: Any] = ["transcript": text, "vocabulary": vocabulary]
         values["recent_commands"] = recent
         if let appContext { values["app_context"] = appContext }
@@ -101,7 +91,7 @@ final class Correction {
             "instructions": try prompt("correction"), "tools": tools, "tool_choice": history.isEmpty ? "required" : "auto", "parallel_tool_calls": false,
             "include": ["reasoning.encrypted_content"], "input": conversation
         ]
-        if profile == nil { body["service_tier"] = "priority" }
+        if settings.bedrockProfile == nil { body["service_tier"] = "priority" }
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
         return request
     }

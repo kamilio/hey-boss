@@ -142,3 +142,25 @@ final class SpeechOverlayTests: XCTestCase {
         XCTAssertTrue(SpeechTargetReader.excluded(role: "AXStaticText", subrole: "", editableAncestor: true))
     }
 }
+
+extension SpeechOverlayTests {
+    @MainActor func testRecapUsesOneFloatingLineAndKeepsTheSpokenWordVisible() throws {
+        let overlay = SpeechOverlay()
+        defer { overlay.hide() }
+        let text = "The build passed. The mobile release is waiting for approval. Mina needs a decision before Friday."
+        overlay.showCaption(text: text, state: .playing)
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { $0.title == "Hey Talk — Read Aloud" && $0.isVisible })
+        let all = views(try XCTUnwrap(panel.contentView))
+        let field = try XCTUnwrap(all.compactMap { $0 as? NSTextView }.first)
+        let words = (text as NSString).range(of: "Friday")
+        overlay.highlight((words, true))
+        let lens = try XCTUnwrap(field.subviews.first { $0 is SpeechWordLens })
+        XCTAssertTrue(field.visibleRect.contains(NSPoint(x: lens.frame.midX, y: lens.frame.midY)))
+        let frame = panel.frame
+        overlay.showCaption(text: text, state: .paused)
+        XCTAssertEqual(panel.frame, frame)
+        XCTAssertFalse(panel.canBecomeKey)
+        XCTAssertTrue(all.compactMap { $0 as? NSButton }.contains { !$0.isHidden && $0.accessibilityLabel() == "Resume Catch Up" })
+    }
+}

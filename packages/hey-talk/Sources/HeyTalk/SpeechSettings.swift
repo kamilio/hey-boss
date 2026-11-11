@@ -9,10 +9,10 @@ struct SpeechSettings {
     func allows(_ bundleID: String) -> Bool { enabled && bundleIDs.contains(bundleID) }
     var json: [String: Any] { ["enabled": enabled, "apps": bundleIDs] }
     static func validate(_ args: [String]) throws {
-        if args.isEmpty || (args.count == 1 && ["on", "off", "target", "play", "pause", "stop"].contains(args[0])) { return }
+        if args.isEmpty || (args.count == 1 && ["on", "off", "target", "catch-up", "play", "pause", "stop"].contains(args[0])) { return }
         guard args.count == 2, ["add", "remove"].contains(args[0]),
               args[1].range(of: "^[A-Za-z0-9-]+(\\.[A-Za-z0-9-]+)+$", options: .regularExpression) != nil else {
-            throw TalkError("Use speech [on|off|add BUNDLE_ID|remove BUNDLE_ID|target|play|pause|stop]")
+            throw TalkError("Use speech [on|off|add BUNDLE_ID|remove BUNDLE_ID|target|catch-up|play|pause|stop]")
         }
     }
     func command(_ args: [String]) throws {

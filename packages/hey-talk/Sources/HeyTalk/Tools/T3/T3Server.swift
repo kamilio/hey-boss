@@ -53,11 +53,47 @@ actor T3Server {
     }
 
     private func get(_ path: String, environment: String) async throws -> [String: Any] {
-        let request = try await request(path, environment: environment)
+        var request = try await request(path, environment: environment)
+        if path.contains("/history?") { request.timeoutInterval = 30 }
         let (data, response) = try await URLSession.shared.data(for: request)
         guard (response as? HTTPURLResponse)?.statusCode == 200,
               let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw TalkError("T3 could not read the thread.") }
         return value
+    }
+
+    func catchUp(_ id: String, environment: String) async throws -> SpokenRecap {
+        guard UUID(uuidString: id) != nil else { throw TalkError("Invalid T3 thread.") }
+        let path = "/api/orchestration/threads/\(id)"
+        var page = try await get(path + "/bounded?deferWork=1", environment: environment)
+        guard let projection = page["projection"] as? [String: Any],
+              (projection["thread"] as? [String: Any])?["id"] as? String == id,
+              var items = projection["visibleTurnItems"] as? [[String: Any]] else { throw TalkError("T3 could not read this thread.") }
+        var newer = [String](), seen = Set<String>()
+        var cursor = page["historyCursor"] as? String
+        while true {
+            if let passage = try Self.catchUpText(items, newer: &newer) { return passage }
+            guard page["hasMoreHistory"] as? Bool == true else { throw TalkError("No message from you in this thread yet.") }
+            guard let next = cursor, seen.insert(next).inserted else { throw TalkError("T3 could not read earlier messages.") }
+            try Task.checkCancellation()
+            var query = URLComponents()
+            query.queryItems = [URLQueryItem(name: "cursor", value: next), URLQueryItem(name: "view", value: "conversation")]
+            page = try await get(path + "/history?" + query.percentEncodedQuery!, environment: environment)
+            guard let rows = page["items"] as? [[String: Any]] else { throw TalkError("T3 could not read earlier messages.") }
+            items = rows; cursor = page["nextCursor"] as? String
+        }
+    }
+
+    static func catchUpText(_ items: [[String: Any]], newer replies: inout [String]) throws -> SpokenRecap? {
+        for row in items.reversed() {
+            guard let item = row["item"] as? [String: Any] else { continue }
+            if item["type"] as? String == "user_message", (item["createdBy"] as? String ?? "user") == "user" {
+                guard !replies.isEmpty else { throw TalkError("No replies since your last message.") }
+                return SpokenRecap(lastMessage: item["text"] as? String ?? "", replies: replies.reversed().joined(separator: "\n\n"))
+            }
+            if item["type"] as? String == "assistant_message",
+               let text = item["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { replies.append(text) }
+        }
+        return nil
     }
 
     func threads(environment: String) async throws -> [[String: Any]] {
