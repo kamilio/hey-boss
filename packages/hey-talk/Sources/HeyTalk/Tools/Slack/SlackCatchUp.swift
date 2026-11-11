@@ -9,7 +9,7 @@ extension SlackTools {
               let me = identity["user_id"] as? String else { throw TalkError("Different Slack workspace.") }
         let thread = path.count > 5 ? path[5].split(separator: "-").last.map(String.init) : nil
         var lastMessage: String?, replies = [[String: Any]]()
-        try await messagePages(channel: path[3], thread: thread, deadline: ProcessInfo.processInfo.systemUptime + 60, call: call) { page in
+        try await messagePages(channel: path[3], thread: thread, deadline: .infinity, call: call) { page in
             // Channel pages go backwards; thread pages go forwards.
             for message in page {
                 if message["user"] as? String == me, message["subtype"] == nil || message["subtype"] as? String == "file_share" {

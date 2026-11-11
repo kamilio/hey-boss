@@ -134,7 +134,7 @@ final class SpeechOverlay: NSObject {
         let area = screen.visibleFrame, width = min(520, area.width - 24)
         let rect = CGRect(x: (area.midX - width / 2).rounded(), y: area.minY + 80, width: width, height: 54)
         if !caption || snapshotText != text {
-            let extending = caption && snapshotText.map { !$0.isEmpty && text.hasPrefix($0 + " ") } == true
+            let extending = caption && snapshotText.map { !$0.isEmpty && text.hasPrefix($0) } == true
             let origin = extending ? scroll.contentView.bounds.origin : .zero
             let style = NSMutableParagraphStyle(); style.alignment = .center
             snapshot = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium),

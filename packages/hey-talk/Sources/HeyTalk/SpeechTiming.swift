@@ -15,7 +15,6 @@ enum SpeechText {
     static func chunks(_ text: String) throws -> [String] { try segments(text).map(\.text) }
     static func segments(_ text: String) throws -> [SpeechSegment] {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw TalkError("No readable text here") }
-        guard text.utf16.count <= 20_000 else { throw TalkError("Select a shorter passage (up to 20,000 UTF-16 units)") }
         var result: [SpeechSegment] = []
         text.enumerateSubstrings(in: text.startIndex..<text.endIndex, options: .bySentences) { _, range, _, _ in
             var begin = range.lowerBound

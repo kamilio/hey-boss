@@ -31,7 +31,8 @@ final class SpeechTests: XCTestCase {
         XCTAssertTrue(chunks.allSatisfy { $0.count <= 240 && !$0.isEmpty })
         XCTAssertEqual(chunks.joined(separator: " "), text.trimmingCharacters(in: .whitespacesAndNewlines))
         XCTAssertThrowsError(try SpeechText.chunks("  \n"))
-        XCTAssertThrowsError(try SpeechText.chunks(String(repeating: "x", count: 20_001)))
+        let long = String(repeating: "x", count: 24_000)
+        XCTAssertEqual(try SpeechText.chunks(long).joined(), long)
         XCTAssertEqual(try SpeechText.chunks(String(repeating: "🙂", count: 500)).map(\.count), [60, 180, 180, 80])
     }
 
