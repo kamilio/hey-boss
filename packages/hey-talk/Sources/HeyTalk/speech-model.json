@@ -1,0 +1,18 @@
+{
+  "name": "pocket-tts-english-2026-10",
+  "voice": "mary",
+  "files": [
+    {
+      "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/a7056f505a4a8ca72d8b5fb1440071d6f1a35739/languages/english/model.safetensors",
+      "sha256": "4c56cbd171c63e8a26ea61f5d48b8a0cd8f3c51f4652c0ab9a19bfcced8c931d"
+    },
+    {
+      "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/00eac05ed3d16bdc3f6b5d598874019c34a89214/languages/english/tokenizer.json",
+      "sha256": "f498428e1eafee50492f7be13dc9bfafcfc12e508cd0eb1b01c92ecd5d8c6687"
+    },
+    {
+      "url": "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/a3055dcb533cf2ec90458008a01e7cef550bae2a/languages/english/embeddings/mary.safetensors",
+      "sha256": "f05824557190fe66e39837337d65c6c400aa54920bae316e1245eeb4cd447b8b"
+    }
+  ]
+}

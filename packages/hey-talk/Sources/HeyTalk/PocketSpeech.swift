@@ -8,13 +8,13 @@ final class PocketSpeech {
     private let session = URLSession(configuration: .ephemeral)
     private var endpoint: URL?
 
-    func start(model: String) throws {
+    func start(model: String, voice: String) throws {
         let directory = URL(fileURLWithPath: model)
         child.executableURL = ModelPaths.contents.appendingPathComponent("Helpers/pocket-tts")
         child.currentDirectoryURL = directory
         child.arguments = ["serve", "--host", "127.0.0.1", "--port", "0",
             "--config", directory.appendingPathComponent("config.yaml").path,
-            "--default-voice", directory.appendingPathComponent(SpeechModel.voice + ".safetensors").path]
+            "--default-voice", directory.appendingPathComponent(voice + ".safetensors").path]
         child.standardInput = FileHandle.nullDevice; child.standardOutput = FileHandle.nullDevice
         child.standardError = errors
         child.environment = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("DYLD_") }

@@ -182,9 +182,9 @@ Leaving the allowlist, turning the feature off, or starting manual dictation
 stops playback. Auto dictation pauses during reading.
 
 Conversation chat, the document reader, and Hey Talk all use the same installed
-`hey-talk-inference --speech-worker` helper. Model and voice choices live in
-that helper; updating Hey Talk updates speech everywhere. The installer downloads
-the pinned model and Mary embedding once. Playback uses only local files and a
+`hey-talk-inference --speech-worker` helper. To upgrade the model or voice for all of them,
+edit [speech-model.json](Sources/HeyTalk/speech-model.json) and reinstall Hey Talk.
+The installer verifies the pinned downloads; the worker reads the same manifest. Playback uses only local files and a
 loopback-only Pocket TTS process; no Python, cloud service, or account is needed.
 
 ```sh
