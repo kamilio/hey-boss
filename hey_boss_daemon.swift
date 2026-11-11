@@ -6846,10 +6846,13 @@ final class ReaderVoice {
         fill(to: ranges.count, at: text.utf16.count, frame: frames)
         return result
     }
-    func generate(_ text: String, completion: @escaping (AVAudioPCMBuffer?, [(Int, NSRange)]) -> Void) {
-        let timeout = DispatchWorkItem { [weak self] in self?.stop() }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
+    func generate(_ text: String, audio: @escaping (AVAudioPCMBuffer?, [(Int, NSRange)]) -> Void,
+                  timing: @escaping ([(Int, NSRange)]) -> Void) {
         queue.async { [self] in
+            let timeout = DispatchWorkItem { [weak self] in self?.stop() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
+            var delivered = false
+            defer { timeout.cancel() }
             do {
                 if !ready {
                     let status = try message()
@@ -6872,13 +6875,6 @@ final class ReaderVoice {
                     guard let part = try output.fileHandleForReading.read(upToCount: count * 4 - offset), !part.isEmpty else { throw CocoaError(.fileReadUnknown) }
                     part.copyBytes(to: pcm.advanced(by: offset).assumingMemoryBound(to: UInt8.self), count: part.count); offset += part.count
                 }
-                let alignment = try message(), tokens = alignment["tokens"] as? [String] ?? [], times = alignment["timestamps"] as? [Double] ?? []
-                var spoken: [(String, Int)] = []
-                let subwords = tokens.contains { $0.hasPrefix("▁") || $0.hasPrefix(" ") }
-                for (token, seconds) in zip(tokens, times) where seconds >= 0 && seconds < Double(count) / Double(rate) {
-                    if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * Double(rate)))) }
-                    spoken[spoken.count-1].0 += token.trimmingCharacters(in: CharacterSet(charactersIn: "▁ ")).lowercased()
-                }
                 // Trim silence on both edges of each clip. Keep
                 // a short breath and protect quiet consonants near the boundary.
                 let samples = buffer.floatChannelData![0]
@@ -6891,9 +6887,22 @@ final class ReaderVoice {
                     if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
                     buffer.frameLength = AVAudioFrameCount(end - first)
                 } else { first = 0 }
-                let words = Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength), fractions: reading.fractions)
-                onMain { timeout.cancel(); completion(buffer, words) }
-            } catch { onMain { timeout.cancel(); completion(nil, []) } }
+                let estimates = Self.wordTimings(text, [], frames: Int(buffer.frameLength), fractions: reading.fractions)
+                delivered = true
+                onMain { audio(buffer, estimates) }
+                let alignment = try message(), tokens = alignment["tokens"] as? [String] ?? [], times = alignment["timestamps"] as? [Double] ?? []
+                var spoken: [(String, Int)] = []
+                let subwords = tokens.contains { $0.hasPrefix("▁") || $0.hasPrefix(" ") }
+                for (token, seconds) in zip(tokens, times) where seconds >= 0 && seconds < Double(count) / Double(rate) {
+                    if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * Double(rate)))) }
+                    spoken[spoken.count-1].0 += token.trimmingCharacters(in: CharacterSet(charactersIn: "▁ ")).lowercased()
+                }
+                let words = spoken.isEmpty ? estimates : Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength), fractions: reading.fractions)
+                onMain { timing(words) }
+            } catch {
+                if !delivered { onMain { audio(nil, []) } }
+                else { stop() } // Already playing: never repeat this passage in the fallback voice.
+            }
         }
     }
 }
@@ -7239,11 +7248,13 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
         }
         if let readerVoice {
-            readerVoice.generate(passage.utterance.speechString) { [weak self] buffer, words in
+            readerVoice.generate(passage.utterance.speechString, audio: { [weak self] buffer, words in
                 guard let self, !self.stopped, self.rendering === passage else { return }
                 guard let buffer else { readerVoice.stop(); self.readerVoice = nil; systemVoice(); return }
                 passage.words = words; passage.append(buffer); complete()
-            }
+            }, timing: { [weak passage] words in
+                passage?.words = words
+            })
         } else { systemVoice() }
     }
     func speak(_ text: String, following: [String] = [], highlight: @escaping (NSRange) -> Void, finished: @escaping () -> Void) {
