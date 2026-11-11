@@ -220,7 +220,10 @@ fn api_endpoint(invocation: &Invocation) -> String {
         .unwrap_or_default()
 }
 
-fn hostname(invocation: &Invocation, options: &[(String, Option<OsString>)]) -> Result<String> {
+pub(crate) fn hostname(
+    invocation: &Invocation,
+    options: &[(String, Option<OsString>)],
+) -> Result<String> {
     if invocation.root() == "api" && api_endpoint(invocation).starts_with("https://") {
         let host = url_host(&api_endpoint(invocation))?;
         return Ok(

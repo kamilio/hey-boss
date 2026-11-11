@@ -36,6 +36,18 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
     {
         return Ok(None);
     }
+    let options = option_values(&i.args);
+    if i.root() == "api" && url.is_none() {
+        let host = options
+            .iter()
+            .rev()
+            .find(|(k, _)| k == "--hostname")
+            .and_then(|(_, v)| v.as_deref()?.to_str().map(str::to_owned))
+            .or_else(|| std::env::var("GH_HOST").ok());
+        if host.is_some_and(|h| !h.eq_ignore_ascii_case("github.com")) {
+            return Ok(None);
+        }
+    }
     let endpoint = url
         .as_ref()
         .map(|u| u.path())
@@ -78,6 +90,9 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
             .and_then(|(_, v)| v.as_ref()?.to_str().map(str::to_owned))
             .or_else(|| std::env::var("GH_REPO").ok())
     };
+    if is_pr && repo.is_some() && crate::cli_auth::hostname(i, &options)? != "github.com" {
+        return Ok(None);
+    }
     // The standalone utility also runs where the project store is not installed.
     let listing = match Command::new("hey-boss")
         .args(["issue", "--json", "code-review-projects"])
@@ -107,7 +122,7 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
     } else {
         i.auth
     };
-    if graphql || (is_pr && i.subcommand() == "review" && repo.is_none()) {
+    if graphql {
         return Ok(Some(Target {
             repo: String::new(),
             enabled,
@@ -124,7 +139,12 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
             .output()?;
         if !out.status.success() {
             if is_pr {
-                return Ok(None);
+                // Let gh diagnose a missing checkout or invalid flags. Keep its transport guarded.
+                return Ok(Some(Target {
+                    repo: String::new(),
+                    enabled,
+                    auth,
+                }));
             }
             return Err("Cannot resolve repository; specify -R OWNER/REPO or a PR URL".into());
         }
