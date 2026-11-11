@@ -15,13 +15,15 @@ export async function bundle(source, destination) {
     ...['shell', 'memory', 'skills', 'compaction'].map(name =>
       `export {default as ${name}Plugin} from ${JSON.stringify(join(agent, 'plugins/poe-agent-plugin-' + name + '.js'))};`),
     `export {openaiResponsesPlugin} from ${JSON.stringify(join(agent, 'plugins/poe-agent-plugin-openai-responses.js'))};`,
+    `export {renderGraph, settings as graphvizLimits} from ${JSON.stringify(join(source, 'packages/safe-bash-graphviz-engine/dist/index.js'))};`,
     `export {parse as parseYaml} from ${JSON.stringify(join(source, 'node_modules/yaml/dist/index.js'))};`,
   ].join('\n'), resolveDir: source}, bundle: true, platform: 'node', format: 'esm', mainFields: ['module', 'main'],
     outfile: join(destination, 'poe-agent.mjs'), external: ['*.node', '*.wasm'],
     banner: {js: 'import {createRequire as __createRequire} from "node:module"; const require = __createRequire(import.meta.url);'}});
-  for (const name of ['conversation-agent.mjs', 'conversation.md', 'conversation-tools.md']) {
+  for (const name of ['conversation-agent.mjs', 'conversation-media.mjs', 'conversation.md', 'conversation-tools.md']) {
     await copyFile(new URL(name, import.meta.url), join(destination, name));
   }
+  await copyFile(new URL('mermaid-LICENSE', import.meta.url), join(destination, 'mermaid-LICENSE'));
   await copyFile(join(source, 'LICENSE'), join(destination, 'poe-code-LICENSE'));
 }
 
@@ -40,7 +42,11 @@ if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.
     run('npm', ['run', 'build:workspaces', '--', '--workspace=@poe-code/poe-agent']);
     await writeFile(join(source, '.conversation-built'), revision);
   }
+  // Build once per release; the desktop runs without Cargo or a system Mermaid install.
+  const renderer = join(homedir(), '.cache/hey-boss/mermaid');
+  execFileSync('cargo', ['install', '--locked', '--version', '=0.3.1', '--no-default-features', '--features', 'cli', '--root', renderer, 'mermaid-rs-renderer'], {stdio: 'inherit'});
   await bundle(source, resolve(destination));
+  await copyFile(join(renderer, 'bin/mmdr'), join(destination, 'mmdr'));
   await writeFile(join(destination, 'poe-agent-revision'), revision + '\n');
   // Ship the same standalone Node used for the build, independent of GUI PATH.
   await copyFile(process.execPath, join(destination, 'node'));

@@ -1,5 +1,6 @@
 import AVFoundation
 import AppKit
+import ScreenCaptureKit
 import Foundation
 import Darwin
 import ImageIO
@@ -80,6 +81,11 @@ func audit() {
         app.finishLaunching()
         auditDictationHandoff(root)
         return
+    }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_MEDIA"] {
+        app.setActivationPolicy(.regular)
+        Task { @MainActor in await auditConversationMedia(root); exit(0) }
+        app.run(); return
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_POLISH"] {
         app.finishLaunching(); auditChatPolish(root); return
@@ -5236,6 +5242,64 @@ func auditConversation(_ root: String) {
 }
 #endif
 #if canImport(FoundationModels)
+@available(macOS 26, *)
+@MainActor func auditConversationMedia(_ root: String) async {
+    let folder = URL(fileURLWithPath: root)
+    let ui = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: folder.appendingPathComponent("current.json"))
+    let fixtures = try! JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("media.json"))) as! [[String: Any]]
+    let original = ui.window.frame
+    ui.append("Can you show me how it works?", from: "You")
+    func snapshot(_ name: String) async {
+        ui.window.displayIfNeeded()
+        try! await Task.sleep(for: .milliseconds(500))
+        let windows = try! await SCShareableContent.currentProcess.windows
+        let filter = SCContentFilter(desktopIndependentWindow: windows.first { $0.windowID == UInt32(ui.window.windowNumber) }!)
+        let config = SCStreamConfiguration(); config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        config.width = Int(ui.window.frame.width); config.height = Int(ui.window.frame.height)
+        let image = try! await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        try! NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent(name + ".png"))
+    }
+    for (i, item) in fixtures.enumerated() {
+        ui.window.appearance = NSAppearance(named: i.isMultiple(of: 2) ? .aqua : .darkAqua)
+        ui.event(["ConversationMedia": item])
+        ui.window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        precondition(ui.window.isVisible && !ui.media.isHidden && ui.media.title.stringValue == item["title"] as? String)
+        precondition(ui.media.viewport.contentSize.height > 100 && ui.input.bounds.width > 150 && ui.scroll.bounds.height > 60)
+        ui.state(.thinking, "Thinking…"); ui.state(.idle, "Voice off")
+        precondition(!ui.media.isHidden)
+        if ui.media.picture.frame.height > ui.media.viewport.contentSize.height {
+            precondition(ui.media.viewport.documentVisibleRect.minY < 2, "Tall media opens at the top")
+        }
+        await snapshot("media-" + String(i + 1))
+    }
+    let image = ui.media.picture.image!
+    ui.event(["ConversationMedia": ["data": "YWJj"]])
+    precondition(ui.media.picture.image === image)
+    ui.window.setContentSize(.init(width: 450, height: 520))
+    ui.media.toggleFit(); await snapshot("media-compact-fit")
+    precondition(ui.media.picture.frame.width <= ui.media.viewport.contentSize.width)
+    ui.event(["ConversationMedia": [:] as [String: String]])
+    precondition(ui.media.isHidden && ui.window.frame.size == original.size)
+    ui.event(["ConversationMedia": fixtures[0]])
+    ui.stop("Ready")
+    precondition(ui.media.isHidden)
+    ui.window.close()
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_LIVE"] == "1" {
+        let path = folder.appendingPathComponent("release.dot")
+        try! "digraph { Draft -> Review -> Publish }".write(to: path, atomically: true, encoding: .utf8)
+        ui.newLocal(); ui.show()
+        ui.input.stringValue = "Show this diagram file with show_media: " + path.path
+        ui.sendTyped()
+        let deadline = Date().addingTimeInterval(90)
+        while (ui.media.isHidden || ui.phase != .idle) && Date() < deadline { try! await Task.sleep(for: .milliseconds(50)) }
+        precondition(!ui.media.isHidden && ui.phase == .idle && ui.rows.count >= 2, ui.status.stringValue)
+        await snapshot("media-live")
+        ui.window.close()
+        print("PASS live Sol tool call rendered a local DOT file in the native conversation window")
+    }
+    print("PASS conversation media: show, replace, resize, fit, retain, failed replacement, hide and stop")
+}
+
 @available(macOS 26, *)
 func auditWorkspaceChat(_ root: String) {
     let env = ProcessInfo.processInfo.environment
