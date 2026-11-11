@@ -5257,6 +5257,13 @@ func auditConversation(_ root: String) {
         let config = SCStreamConfiguration(); config.showsCursor = false; config.ignoreShadowsSingleWindow = true
         config.width = Int(ui.window.frame.width); config.height = Int(ui.window.frame.height)
         let image = try! await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        // Check the canvas itself. An empty web surface still has a title and controls.
+        let rect = ui.media.viewport.convert(ui.media.viewport.bounds.insetBy(dx: 12, dy: 12), to: nil)
+        let crop = image.cropping(to: CGRect(x: rect.minX, y: ui.window.frame.height - rect.maxY, width: rect.width, height: rect.height))!
+        let sample = CGContext(data: nil, width: 128, height: 96, bitsPerComponent: 8, bytesPerRow: 128, space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue)!
+        sample.draw(crop, in: CGRect(x: 0, y: 0, width: 128, height: 96))
+        let pixels = UnsafeBufferPointer(start: sample.data!.assumingMemoryBound(to: UInt8.self), count: 128 * 96)
+        precondition(Int(pixels.max()!) - Int(pixels.min()!) > 40, name + " has a blank canvas")
         try! NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!.write(to: folder.appendingPathComponent(name + ".png"))
     }
     for (i, item) in fixtures.enumerated() {
