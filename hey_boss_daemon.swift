@@ -3998,7 +3998,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         super.init()
         window.title = "Quick add issue · Hey Boss"; window.delegate = self
         window.isReleasedWhenClosed = false; window.level = .floating
-        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.backgroundColor = .clear; window.isOpaque = false; window.hasShadow = true
         // Reuse the notification surface, including its outer layer clipping:
         // clipping only a blur view leaves the window's backing corners visible.
@@ -4122,9 +4122,15 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
         self.cli = cli
         if voice { voiceOnOpen = true }
         showShortcuts(NSEvent.modifierFlags.contains(.command))
+        func bringForward() {
+            guard present else { return }
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            if !saving { window.makeFirstResponder(input) }
+        }
         if window.isVisible {
             if succeeded { generation += 1; succeeded = false; changed() }
-            window.makeKeyAndOrderFront(nil); if !saving { window.makeFirstResponder(input) }
+            bringForward()
             if voice, ready {
                 voiceOnOpen = false
                 if current == nil, let first = projects.first { selectProject(first); changed() }
@@ -4138,7 +4144,7 @@ final class NativeQuickIssue: NSObject, NSTextViewDelegate, NSTableViewDataSourc
             let width = min(680, bounds.width - 48); window.setContentSize(NSSize(width: width, height: window.frame.height)); layout()
             window.setFrameOrigin(NSPoint(x: bounds.midX - width / 2, y: bounds.maxY - bounds.height * 0.28 - window.frame.height))
         }
-        if present { NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil); window.makeFirstResponder(input) }
+        bringForward()
         request(["projects", "--all", "--json"]) { [weak self] result in
             guard let self, sequence == self.generation else { return }
             do {
@@ -4629,6 +4635,7 @@ struct SubscriptionQuotaReading: Codable {
     var state: String
     let updated_at: Double?
     let data: Usage?
+    let error: String?
     func isFresh(now: Double = Date().timeIntervalSince1970) -> Bool {
         guard state == "ok", let updated_at, updated_at.isFinite,
               updated_at <= now + 60, now - updated_at < 300,
@@ -4753,7 +4760,7 @@ final class SubscriptionQuotaController: NSObject {
                             if reading.data?.windows.isEmpty != false, ["error", "stale"].contains(reading.state), self.rows[index].reading != nil {
                                 self.rows[index].reading?.state = "stale"
                             } else { self.rows[index].reading = reading }
-                            self.rows[index].message = ["error", "stale"].contains(reading.state) ? "Quota unavailable. Try refreshing." : ""
+                            self.rows[index].message = ["error", "stale"].contains(reading.state) ? reading.error ?? "Quota unavailable. Try refreshing." : ""
                         } catch { self.rows[index].reading?.state = "stale"; self.rows[index].message = "Quota unavailable. Try refreshing." }
                         pending -= 1
                         if pending == 0 { self.finish() } else { self.render() }
@@ -4829,7 +4836,8 @@ final class SubscriptionQuotaController: NSObject {
             let name = label(accountTitle, size: 13, weight: .semibold)
             name.frame = NSRect(x: 12, y: 10, width: cardWidth - 108, height: 19); card.addSubview(name)
             let failed = !loading && !row.message.isEmpty
-            let statusText = failed ? "Refresh failed" : reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
+            let signIn = failed && row.message.contains("authorization rejected") && row.message.contains("claude-login")
+            let statusText = signIn ? "Sign in required" : failed ? "Refresh failed" : reading == nil ? (loading ? "Checking" : "Unavailable") : fresh ? "Current" : reading?.state == "disabled" ? "Not connected" : windows.isEmpty ? "Unavailable" : "Last known"
             let status = label(statusText, size: 10, weight: .medium, color: failed ? .systemOrange : fresh ? .systemTeal : .secondaryLabelColor)
             if failed { status.toolTip = row.message }
             status.alignment = .right; status.frame = NSRect(x: cardWidth - 96, y: 12, width: 84, height: 16); card.addSubview(status)
@@ -4870,7 +4878,9 @@ final class SubscriptionQuotaController: NSObject {
                 rowY += 60
             }
             let footnote: String
-            if let reading {
+            if signIn {
+                footnote = "Run hey-boss proxy claude-login" + (row.account.id == "default" ? "" : " --account " + row.account.id)
+            } else if let reading {
                 if windows.isEmpty { footnote = reading.state == "disabled" ? "Connect this account with hey-proxy." : "Provider has not reported limits." }
                 else if reading.data?.availability_unknown == true { footnote = "Availability uncertain · last known limits" }
                 else { footnote = (fresh ? "Updated " : "Last reading · ") + (agentRelativeTime(reading.updated_at) ?? "time unavailable") }
