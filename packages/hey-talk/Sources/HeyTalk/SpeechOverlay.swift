@@ -134,12 +134,14 @@ final class SpeechOverlay: NSObject {
         let area = screen.visibleFrame, width = min(520, area.width - 24)
         let rect = CGRect(x: (area.midX - width / 2).rounded(), y: area.minY + 80, width: width, height: 54)
         if !caption || snapshotText != text {
+            let extending = caption && snapshotText.map { !$0.isEmpty && text.hasPrefix($0 + " ") } == true
+            let origin = extending ? scroll.contentView.bounds.origin : .zero
             let style = NSMutableParagraphStyle(); style.alignment = .center
             snapshot = NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 20, weight: .medium),
                                                                      .foregroundColor: NSColor.labelColor, .paragraphStyle: style])
             textView.subviews.filter { $0 is SpeechWordLens }.forEach { $0.removeFromSuperview() }
             textView.textStorage?.setAttributedString(snapshot!); snapshotText = text; highlighted = nil
-            scroll.contentView.scroll(to: .zero)
+            scroll.contentView.scroll(to: origin)
         }
         caption = true; drawerOpen = true; target = nil
         if panel.frame != rect { panel.setFrame(rect, display: true) }

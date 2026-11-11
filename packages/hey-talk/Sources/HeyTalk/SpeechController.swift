@@ -39,31 +39,38 @@ final class SpeechController {
         guard !sleeping else { throw TalkError("Unlock this Mac before reading aloud.") }
         let source = try CatchUpSource.current()
         if recapSource == source {
-            if preparing != nil { stop() } else { playback.togglePause() }
+            if playback.active { playback.togglePause() } else { stop() }
             return
         }
         guard willPlay() else { throw TalkError("Finish dictating before reading aloud.") }
         stop()
+        release?.cancel(); engine.warm()
         recapSource = source
         preparing = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
                 let passage = try await source.passage()
                 try Task.checkCancellation()
-                let text = try await passage.summarize()
+                try await passage.summarize { sentence in
+                    try Task.checkCancellation()
+                    if self.playback.active { try self.playback.append(sentence) }
+                    else { try self.playback.start(sentence, streaming: true) }
+                }
                 try Task.checkCancellation()
                 self.preparing = nil
-                try self.playback.start(text)
+                self.playback.finishStream()
             } catch {
                 guard !Task.isCancelled else { return }
-                self.stop(); self.onNotice?(error.localizedDescription)
+                self.preparing = nil
+                if self.playback.active { self.playback.finishStream() } else { self.stop() }
+                self.onNotice?(error.localizedDescription)
             }
         }
         changed()
     }
     var status: [String: Any] {
         var result = settings.json
-        result["state"] = preparing != nil ? "loading" : playback.state.rawValue
+        result["state"] = preparing != nil && !playback.active ? "loading" : playback.state.rawValue
         if recapSource != nil { result["source"] = "catch-up" }
         result["model"] = SpeechModel.selected?.name; result["voice"] = SpeechModel.selected?.voice; result["model_ready"] = SpeechModel.selected?.available == true
         result["rate"] = playback.rate; result["overlay"] = overlay.visible
@@ -120,7 +127,7 @@ final class SpeechController {
     func pause() { if active && playback.state != .paused { playback.togglePause() } }
     func settingsChanged() { stop(); refresh() }
     func toggle(fromOverlay: Bool = false, completion: @escaping (Result<Void, Error>) -> Void = { _ in }) {
-        if preparing != nil { stop(); completion(.success(())); return }
+        if preparing != nil && !playback.active { stop(); completion(.success(())); return }
         if active { playback.togglePause(); completion(.success(())); return }
         let anchor = (fromOverlay || overlay.containsPointer) ? candidate ?? reading : nil
         resolve(point: anchor?.point, preferSelection: true) { [weak self] result in
@@ -216,10 +223,13 @@ final class SpeechController {
         }
     }
     private func changed() {
+        if playback.state == .failed { preparing?.cancel(); preparing = nil }
         onActivityChanged?(active)
         if recapSource != nil {
-            if active { overlay.showCaption(text: preparing == nil ? playback.text : "", state: preparing == nil ? playback.state : .loading) }
-            else { recapSource = nil; overlay.hide() }
+            if active {
+                overlay.showCaption(text: playback.active ? playback.text : "", state: playback.active ? playback.state : .loading)
+                overlay.highlight(playback.highlight)
+            } else { recapSource = nil; overlay.hide() }
         } else if let target = reading ?? candidate {
             overlay.show(target: target, state: playback.state, rate: playback.rate, fraction: playback.progress, error: playback.error)
         }

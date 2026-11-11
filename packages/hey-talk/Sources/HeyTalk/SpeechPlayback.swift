@@ -80,6 +80,7 @@ final class SpeechPlayback {
     private(set) var text = ""
     private var next = 0
     private var queued = 0
+    private var streaming = false
     private var generating = false
     private var generation: UInt64 = 0
     private var started: TimeInterval = 0
@@ -114,14 +115,28 @@ final class SpeechPlayback {
         return nil
     }
     init(engine: SpeechEngine, output: SpeechOutput) { self.engine = engine; self.output = output; output.rate = 1.25 }
-    func start(_ text: String) throws {
+    func start(_ text: String, streaming: Bool = false) throws {
         let parts = try SpeechText.segments(text)
         if active { stop() }
         generation &+= 1
         output.stop()
+        self.streaming = streaming
         self.text = text; chunks = parts; timings = [:]; next = 0; queued = 0; completed = 0; generating = false
         error = nil; firstAudioMS = nil; started = ProcessInfo.processInfo.systemUptime
         state = .loading; onChange?(); pump()
+    }
+    func append(_ sentence: String) throws {
+        guard streaming, active else { return }
+        let offset = text.utf16.count + 1
+        let parts = try SpeechText.segments(sentence)
+        text += " " + sentence
+        chunks += parts.map { SpeechSegment(text: $0.text, range: NSRange(location: offset + $0.range.location, length: $0.range.length)) }
+        onChange?(); pump()
+    }
+    func finishStream() {
+        guard streaming else { return }
+        streaming = false
+        if completed == chunks.count { output.stop(); state = .idle; onChange?() }
     }
     func togglePause() {
         guard active else { return }
@@ -134,7 +149,7 @@ final class SpeechPlayback {
     func stop() {
         generation &+= 1
         output.stop(); engine.cancel()
-        chunks = []; timings = [:]; next = 0; queued = 0; generating = false; completed = 0
+        streaming = false; chunks = []; timings = [:]; next = 0; queued = 0; generating = false; completed = 0
         state = .idle; onChange?()
     }
     func fail(_ message: String) {
@@ -161,7 +176,7 @@ final class SpeechPlayback {
                     let start = try self.output.enqueue(audio) { [weak self] in
                         guard let self, self.generation == ticket, self.active else { return }
                         self.queued -= 1; self.completed += 1
-                        if self.completed == self.chunks.count {
+                        if !self.streaming && self.completed == self.chunks.count {
                             self.output.stop(); self.state = .idle; self.onChange?()
                         } else { self.onChange?(); self.pump() }
                     }
