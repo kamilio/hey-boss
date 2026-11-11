@@ -39,7 +39,7 @@ struct SpokenRecap: Encodable {
         var request = try ProxyResponses.request()
         request.timeoutInterval = 45
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model":"gpt-6-luna", "store":false, "stream":true, "reasoning":["effort":"none"], "max_output_tokens":800,
+            "model":"gpt-6-luna", "store":false, "stream":true, "reasoning":["effort":"none"],
             "instructions":try String(contentsOf: url, encoding: .utf8), "input":String(decoding: try JSONEncoder().encode(self), as: UTF8.self)])
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TalkError("The recap service is unavailable.") }
@@ -85,6 +85,11 @@ struct RecapStream {
         case "error", "response.failed":
             throw TalkError("The recap service failed while generating the response.")
         case "response.incomplete":
+            let response = event["response"] as? [String: Any]
+            let details = response?["incomplete_details"] as? [String: Any]
+            if details?["reason"] as? String == "max_output_tokens" {
+                throw TalkError("The recap reached the service’s output limit.")
+            }
             throw TalkError("The recap service stopped before it finished the response.")
         default: break
         }
