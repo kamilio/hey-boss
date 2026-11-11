@@ -157,7 +157,7 @@ pub fn stash(expected: Option<&str>, task: Option<i64>) -> Result<String> {
     // Lock HEAD at the expected SHA before touching the index. Two concurrent
     // shelves cannot remove two tips. read-tree refuses obstructing local files.
     let mut txn = Command::new("git")
-        .args(["update-ref", "-m", "g stash", "--stdin"])
+        .args(["update-ref", "-m", "g stash-commit", "--stdin"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;

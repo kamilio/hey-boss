@@ -12,13 +12,14 @@ Run `g` in a checkout to browse the project shelf. All its worktrees see the
 same commits. Enter opens the selected review; use the arrows to select a diff
 line and Ctrl+C to comment. Narrow terminals show one pane at a time.
 
-- `g stash --task 123`: save the current branch tip, attach the task, and remove
+- `g stash-commit SHA --task 123`: save the current branch tip, attach the task, and remove
   the tip only after verifying that the stored patch reproduces its Git tree.
   Omit the task to shelve without one; use `g link SHA --task 123` later.
-  An optional SHA from `g list` guards against shelving a different tip.
+  Capture the SHA with `git rev-parse HEAD` after committing. Passing it
+  guards against shelving a different tip; omitting it selects the current tip.
 - `g open SHA`: read the saved diff and review comments. Local commits that
   haven't been shelved open in Git's normal diff viewer.
-- `g unstash SHA`: cherry-pick into the current worktree. Conflicts use normal
+- `g apply-commit SHA`: cherry-pick into the current worktree. Conflicts use normal
   Git resolution: stage the fixes and run `git cherry-pick --continue`, or use
   `git cherry-pick --abort`. The saved commit and comments stay on the shelf.
 

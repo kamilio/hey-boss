@@ -44,9 +44,9 @@ git -C "$fixture/clone" config user.email test@example.invalid
 echo apple > fruit
 git commit -qam Apples
 tip=$(git rev-parse HEAD)
-if "$g" stash --task 999; then exit 1; fi
+if "$g" stash-commit --task 999; then exit 1; fi
 test "$(git rev-parse HEAD)" = "$tip"
-"$g" stash
+"$g" stash-commit
 test "$(git rev-parse HEAD)" = "$base"
 cd "$fixture/b"
 "$g" list | grep Apples
@@ -56,17 +56,17 @@ cd "$fixture/b"
 "$g" open "$tip" | grep 'Try pears'
 echo pears > fruit && git commit -qam Pears
 other=$(git rev-parse HEAD)
-if "$g" unstash "$tip"; then exit 1; fi
+if "$g" apply-commit "$tip"; then exit 1; fi
 test -n "$(git ls-files -u)"
 git cherry-pick --abort
 test "$(git rev-parse HEAD)" = "$other"
 test "$(cat fruit)" = pears
-if "$g" unstash "$tip"; then exit 1; fi
+if "$g" apply-commit "$tip"; then exit 1; fi
 echo resolved > fruit && git add fruit && git -c core.editor=true cherry-pick --continue
 test "$(cat fruit)" = resolved
 cd "$fixture/clone"
 ! git cat-file -e "$tip" 2>/dev/null || exit 1
-"$g" unstash "$tip"
+"$g" apply-commit "$tip"
 test "$(cat fruit)" = apple
 "$g" list | grep Apples
 cd "$fixture/a"
@@ -74,22 +74,22 @@ cd "$fixture/a"
 echo 'proposal' > notes && git add notes && git commit -qm Notes
 notes=$(git rev-parse HEAD)
 echo editing >> notes
-if "$g" stash; then exit 1; fi
+if "$g" stash-commit; then exit 1; fi
 git add notes
-if "$g" stash; then exit 1; fi
+if "$g" stash-commit; then exit 1; fi
 test "$(git rev-parse HEAD)" = "$notes"
 git restore --staged --worktree notes
-if "$g" stash "$base"; then exit 1; fi
-"$g" stash "$notes" --task 1
+if "$g" stash-commit "$base"; then exit 1; fi
+"$g" stash-commit "$notes" --task 1
 # Ignored as well as ordinary untracked files are protected.
 echo notes >> .git/info/exclude
 echo 'private scratch' > notes
-if "$g" unstash "$notes"; then exit 1; fi
+if "$g" apply-commit "$notes"; then exit 1; fi
 test "$(cat notes)" = 'private scratch'
 test "$(git rev-parse HEAD)" = "$base"
 rm notes
 echo 'keep this' > scratch
-"$g" unstash "$notes"
+"$g" apply-commit "$notes"
 test "$(cat scratch)" = 'keep this'
 "$hb" issue commit remove 1 "$notes" >/dev/null
 "$g" open "$notes" | grep 'proposal'
@@ -107,7 +107,7 @@ for kind in rename delete binary; do
   esac
   git commit -qam "$kind incoming"
   incoming=$(git rev-parse HEAD)
-  "$g" stash "$incoming"
+  "$g" stash-commit "$incoming"
   test "$(git rev-parse HEAD)" = "$common"
   case "$kind" in
     rename) git mv fruit pear;;
@@ -116,7 +116,7 @@ for kind in rename delete binary; do
   esac
   git commit -qam "$kind local"
   before=$(git rev-parse HEAD)
-  if "$g" unstash "$incoming"; then exit 1; fi
+  if "$g" apply-commit "$incoming"; then exit 1; fi
   test -n "$(git ls-files -u)"
   git cherry-pick --abort
   test "$(git rev-parse HEAD)" = "$before"
@@ -130,6 +130,6 @@ git rm -q fruit && git commit -qm 'Remove fruit'
 removed=$(git rev-parse HEAD)
 echo fruit >> .git/info/exclude
 echo mine > fruit
-if "$g" stash; then exit 1; fi
+if "$g" stash-commit; then exit 1; fi
 test "$(git rev-parse HEAD)" = "$removed"
 test "$(cat fruit)" = mine
