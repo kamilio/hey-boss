@@ -7601,7 +7601,7 @@ final class ConversationCaption: NSPanel {
                 ?? (isVisible ? self.screen : nil)
                 ?? screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
         let area = screen.visibleFrame, drawing = media.picture.image?.size
-        let width = min(area.width - 24, max(464, min(1080, (drawing?.width ?? 0) + 56)))
+        let width = min(area.width - 24, max(464, (drawing?.width ?? 0) + 56))
         let y = area.minY + min(80, area.height * 0.12)
         let rect = NSRect(x: (area.midX - width / 2).rounded(), y: y.rounded(), width: width, height: 54)
         if frame != rect { setFrame(rect, display: true) }
@@ -7725,8 +7725,9 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
         guard let size = picture.image?.size, size.width > 0, size.height > 0 else { return }
         let area = viewport.contentSize
         let fitScale = max(0, min(1, (area.width - 32) / size.width, (area.height - 32) / size.height))
-        zoom.isHidden = fitScale >= 1
-        let scale = fit ? fitScale : 1
+        // A small width adjustment is easier to read than a clipped final label.
+        zoom.isHidden = fitScale >= 0.90
+        let scale = fit || zoom.isHidden ? fitScale : 1
         let image = NSSize(width: size.width * scale, height: size.height * scale)
         paper.setFrameSize(NSSize(width: max(image.width + 32, area.width), height: max(image.height + 32, area.height)))
         picture.frame = NSRect(x: (paper.frame.width - image.width) / 2, y: (paper.frame.height - image.height) / 2, width: image.width, height: image.height)
@@ -7772,8 +7773,9 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
-    let media = ConversationMediaView()
-    private var mediaHeight: NSLayoutConstraint!
+    private(set) var media = ConversationMediaView()
+    private struct Visual: Codable { let id: UUID; let afterMessage: Int; let title: String; let kind: String }
+    private var visuals: [Visual] = []
     private var compactFrame: NSRect?
     lazy var caption = ConversationCaption()
     let historyList = NSTableView()
@@ -7861,6 +7863,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var draftText: String?
         let directory: URL?
         let thread: String?
+        var visuals: [Visual]?
         var activities: [ToolActivity]?
         var interruptedAfter: PlaybackInterruption?
     }
@@ -7949,7 +7952,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let voiceStatus = NSStackView(views: [muteMic, pauseReply, status, listenNext])
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
-        for view in [media,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
+        for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
         contextChip.bezelStyle = .accessoryBarAction; contextChip.imagePosition = .imageLeading
         contextChip.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
         contextChip.font = .systemFont(ofSize: 12, weight: .medium); contextChip.lineBreakMode = .byTruncatingTail
@@ -7958,10 +7961,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         entry.orientation = .vertical; entry.alignment = .leading; entry.spacing = 6
         for view in [entry,send,meter,voiceStatus] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
-            media.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor),
-            media.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), media.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
-            media.heightAnchor.constraint(lessThanOrEqualTo: body.heightAnchor, multiplier: 0.61),
-            scroll.topAnchor.constraint(equalTo: media.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
+            scroll.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
             turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
             dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
@@ -7971,10 +7971,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
-        mediaHeight = media.heightAnchor.constraint(equalToConstant: 0); mediaHeight.priority = .defaultHigh; mediaHeight.isActive = true
-        media.close.target = self; media.close.action = #selector(hideMedia)
         caption.media.close.target = self; caption.media.close.action = #selector(hideMedia)
-        media.didRenderVector = { [weak self] image in self?.caption.media.picture.image = image }
         refreshScope(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
@@ -8133,14 +8130,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             restoreError = nil
             library.selected = id; clearTurns(); input.stringValue = ""
             apply(saved); try writeLibrary(); refreshHistory()
-        } catch { refreshHistory(); status.stringValue = "Couldn’t open that conversation: " + error.localizedDescription }
+        } catch { refreshHistory(); status.isHidden = false; status.stringValue = "Couldn’t open that conversation: " + error.localizedDescription }
     }
     private var recordingsURL: URL { saveURL.deletingLastPathComponent().appendingPathComponent("Recordings") }
     @objc private func showRecordings() {
         do {
             try FileManager.default.createDirectory(at: recordingsURL, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             NSWorkspace.shared.open(recordingsURL)
-        } catch { status.stringValue = error.localizedDescription }
+        } catch { status.isHidden = false; status.stringValue = error.localizedDescription }
     }
     func refreshScope() {
         let menu = NSMenu()
@@ -8177,6 +8174,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
+        visuals.removeAll(); media = ConversationMediaView()
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
@@ -8189,7 +8187,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         meter.show(next)
         let voiceAction = voiceStatus["action"] as! String
         meter.isEnabled = true
-        meter.toolTip = voiceAction
+        status.isHidden = next != .idle || ["Ready", "Voice off", "Microphone off", "Reply stopped"].contains(message)
+        meter.toolTip = status.stringValue + " · " + voiceAction
         meter.setAccessibilityLabel(voiceAction)
         meter.setAccessibilityValue(status.stringValue)
         updateComposerActions()
@@ -8804,11 +8803,30 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var data = try JSONSerialization.data(withJSONObject: command); data.append(10); try writer.write(contentsOf: data)
     }
     @objc func hideMedia() {
-        guard !media.isHidden else { return }
-        caption.hideMedia()
-        media.isHidden = true; media.clear(); mediaHeight.constant = 0
+        guard compactFrame != nil else { return }
+        caption.hideMedia(); media.close.isHidden = true
         if let frame = compactFrame, !window.styleMask.contains(.fullScreen) { window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true) }
         compactFrame = nil
+    }
+    private var visualDirectory: URL {
+        saveURL.deletingLastPathComponent().appending(path: "Media/" + library.selected.uuidString)
+    }
+    private func appendVisual(_ visual: Visual, image: NSImage, bytes: Data, live: Bool) {
+        if visual.kind == "Mermaid" { image.size = NSSize(width: image.size.width * 1.4, height: image.size.height * 1.4) }
+        media.close.isHidden = true
+        let card = ConversationMediaView()
+        media = card
+        turns.addArrangedSubview(card)
+        card.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
+        card.heightAnchor.constraint(equalToConstant: min(440, max(170, image.size.height + 94))).isActive = true
+        card.close.isHidden = !live; card.close.target = self; card.close.action = #selector(hideMedia)
+        if live {
+            card.didRenderVector = { [weak self, weak card] vector in
+                guard let self, self.media === card, self.caption.imagePanel.isVisible else { return }
+                self.caption.media.picture.image = vector
+            }
+        }
+        card.display(image, title: visual.title, kind: visual.kind, svg: visual.kind == "Image" ? nil : bytes.base64EncodedString())
     }
     private func showMedia(_ data: [String: Any]) throws {
         guard let encoded = data["data"] as? String else { hideMedia(); return }
@@ -8818,6 +8836,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             throw StorageError(description: "Couldn’t display this image. Use a supported image or diagram file.")
         }
         let title = data["title"] as? String ?? "Image", kind = data["kind"] as? String ?? "Image"
+        let visual = Visual(id: UUID(), afterMessage: messages.count, title: title, kind: kind)
+        try FileManager.default.createDirectory(at: visualDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let url = visualDirectory.appendingPathComponent(visual.id.uuidString)
+        try bytes.write(to: url, options: .atomic)
+        visuals.append(visual)
+        guard save(unfinishedWorkspace: directory != nil) else {
+            visuals.removeLast(); try? FileManager.default.removeItem(at: url)
+            throw StorageError(description: "Couldn’t save this image in the chat.")
+        }
+        appendVisual(visual, image: image, bytes: bytes, live: true)
         let original = compactFrame ?? window.frame; compactFrame = original
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
         let side = split.splitViewItems.first?.isCollapsed == true ? 0 : split.splitViewItems.first?.viewController.view.frame.width ?? 0
@@ -8828,8 +8856,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                                y: min(max(screen.minY, window.frame.maxY - height), screen.maxY - height), width: width, height: height)
             window.setFrame(frame, display: true)
         }
-        mediaHeight.constant = max(180, image.size.height + 90)
-        media.display(image, title: title, kind: kind, svg: kind == "Image" ? nil : encoded)
         window.contentView?.layoutSubtreeIfNeeded()
         caption.showMedia(image, title: title, kind: kind)
         revealLatest()
@@ -9083,11 +9109,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, activities: activities, interruptedAfter: interruptedAfter)
+                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter)
                 try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
             }
             try writeLibrary(); return true
-        } catch { status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
+        } catch { status.isHidden = false; status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
     }
     private func apply(_ saved: Saved) {
         directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
@@ -9097,10 +9123,21 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if value.state == "Running" { value.state = "Interrupted" }
             return value
         }
+        visuals = saved.visuals ?? []
+        func restoreVisuals(after count: Int) {
+            for visual in visuals where visual.afterMessage == count {
+                let url = visualDirectory.appendingPathComponent(visual.id.uuidString)
+                if let bytes = try? Data(contentsOf: url), let image = NSImage(data: bytes) {
+                    appendVisual(visual, image: image, bytes: bytes, live: false)
+                } else { turns.addArrangedSubview(NSTextField(labelWithString: "Image unavailable: " + visual.title)) }
+            }
+        }
+        restoreVisuals(after: 0)
         for message in saved.messages {
             append(message.text, from: message.speaker, capture: message.capture)
             messages[messages.count - 1].interruptedAfter = message.interruptedAfter
             for activity in activities where activity.afterMessage == messages.count { renderTool(activity) }
+            restoreVisuals(after: messages.count)
         }
         refreshScope()
         state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : "Voice off")
