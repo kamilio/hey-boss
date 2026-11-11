@@ -64,6 +64,7 @@ const FIELDS: &[&str] = &[
     "worktree_enabled",
     "drafts_enabled",
     "artifacts_enabled",
+    "code_reviews_enabled",
 ];
 
 pub(super) fn snapshot(settings: &Value) -> Value {

@@ -491,3 +491,131 @@ fn project_resources_can_be_disabled_independently_without_losing_content() {
     let other = projects.iter().find(|p| p["id"] == "named:Other").unwrap();
     assert_eq!(other["artifacts_enabled"], true);
 }
+
+#[test]
+fn code_reviews_are_opt_in_and_survive_other_settings_edits() {
+    let f = Fixture::new();
+    let base = [
+        "issue",
+        "--project",
+        "Atlas",
+        "--agent",
+        "human:qa",
+        "--json",
+        "settings",
+    ];
+    f.json(&[
+        "project",
+        "init",
+        "--project",
+        "Atlas",
+        "--prs",
+        "true",
+        "--worktree",
+        "false",
+        "--yes",
+        "--json",
+    ]);
+    let run = |suffix: &[&str]| f.json(&[base.as_slice(), suffix].concat());
+    assert_eq!(run(&["show"])["code_reviews_enabled"], false);
+    assert_eq!(
+        run(&["set", "--code-reviews-enabled"])["code_reviews_enabled"],
+        true
+    );
+    assert_eq!(run(&["set", "--no-drafts"])["code_reviews_enabled"], true);
+    assert_eq!(
+        run(&["set", "--no-code-reviews"])["code_reviews_enabled"],
+        false
+    );
+}
+
+#[test]
+fn review_queue_pins_edits_and_publication_to_the_submitted_revision() {
+    use serde_json::json;
+    use std::io::Write;
+    use std::process::Stdio;
+    let f = Fixture::new();
+    f.json(&[
+        "project",
+        "init",
+        "--project",
+        "Atlas",
+        "--prs",
+        "true",
+        "--worktree",
+        "false",
+        "--yes",
+        "--json",
+    ]);
+    let call = |op: Value| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            .args([
+                "issue",
+                "--project",
+                "Atlas",
+                "--agent",
+                "human:qa",
+                "--json",
+                "code-review",
+            ])
+            .env("HEY_BOSS_ISSUE_DB", f.db())
+            .env("HEY_BOSS_FLEET_STATE", f.0.join("fleet"))
+            .current_dir(&f.0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(op.to_string().as_bytes())
+            .unwrap();
+        let o = child.wait_with_output().unwrap();
+        serde_json::from_slice::<Value>(&o.stdout).unwrap()
+    };
+    assert_eq!(call(json!({"command":"list"}))["ok"], false);
+    f.json(&[
+        "issue",
+        "--project",
+        "Atlas",
+        "--agent",
+        "human:qa",
+        "--json",
+        "settings",
+        "set",
+        "--code-reviews-enabled",
+    ]);
+    let head = "a".repeat(40);
+    let record = json!({"command":"record","number":22,"head":head,"title":"Fix the clock","comments":[{"path":"time.rs","side":"RIGHT","line":12,"body":"Check rollover.","snippet":"+ reset();"}]});
+    let r = call(record.clone());
+    assert_eq!(r["review"]["stage"], "draft", "{r}");
+    let id = &r["review"]["id"];
+    let cid = &r["review"]["comments"][0]["id"];
+    let mut wrong = record.clone();
+    wrong["head"] = json!("b".repeat(40));
+    wrong["verdict"] = json!("APPROVE");
+    assert_eq!(call(wrong)["ok"], false);
+    let submitted = call(
+        json!({"command":"record","number":22,"head":head,"title":"Fix the clock","comments":[],"verdict":"REQUEST_CHANGES","body":"Check the rollover case."}),
+    );
+    assert_eq!(&submitted["review"]["id"], id);
+    let edit = json!({"command":"edit","id":id,"version":2,"comment":cid,"body":"Add a regression test for rollover."});
+    assert_eq!(
+        call(edit.clone())["review"]["comments"][0]["body"],
+        edit["body"]
+    );
+    assert_eq!(call(edit)["ok"], false);
+    let digest = call(json!({"command":"view","id":id}))["review"]["digest"].clone();
+    assert_eq!(
+        call(json!({"command":"claim_publication","id":id,"version":3,"digest":"outdated"}))["ok"],
+        false
+    );
+    let claim = json!({"command":"claim_publication","id":id,"version":3,"digest":digest});
+    assert_eq!(call(claim.clone())["review"]["stage"], "publishing");
+    assert_eq!(call(claim)["ok"], false);
+    assert_eq!(
+        call(json!({"command":"rejected_publication","id":id,"version":4}))["review"]["stage"],
+        "submitted"
+    );
+}

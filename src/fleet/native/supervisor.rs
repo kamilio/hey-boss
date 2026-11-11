@@ -1873,6 +1873,7 @@ impl Supervisor {
                         | crate::issues::Operation::AddCommit { .. }
                         | crate::issues::Operation::RemoveCommit { .. }
                         | crate::issues::Operation::Shelf { .. }
+                        | crate::issues::Operation::CodeReview { .. }
                         | crate::issues::Operation::CommitReview { .. }
                 ) && !matches!(&request.operation, crate::issues::Operation::Create { attachments, .. } if !attachments.is_empty())
                 {
