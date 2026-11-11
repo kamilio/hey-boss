@@ -4,6 +4,7 @@ import {dirname, isAbsolute, join} from 'node:path';
 import {createInterface} from 'node:readline';
 import {pathToFileURL} from 'node:url';
 import {createConnection} from 'node:net';
+import {prepareMedia, mediaSchema} from './conversation-media.mjs';
 import {randomUUID} from 'node:crypto';
 import {agent, shellPlugin, memoryPlugin, skillsPlugin, compactionPlugin, openaiResponsesPlugin, parseYaml} from './poe-agent.mjs';
 
@@ -42,13 +43,13 @@ export function interruptedHistory(messages) {
       content: 'Interrupted before the result was saved. The command may have run.'}))]);
 }
 
-export async function createConversation({home = homedir(), statePath, emit, fetchImpl = fetch}) {
+export async function createConversation({home = homedir(), statePath, emit, display, fetchImpl = fetch}) {
   const cwd = await conversationRoot(home);
   const loginShell = await conversationShell(home);
   await mkdir(cwd, {recursive: true});
   await mkdir(dirname(statePath), {recursive: true, mode: 0o700});
   const base = (await readFile(new URL('./conversation.md', import.meta.url), 'utf8')).trim();
-  const [guidance, shellDescription, batchDescription, windowDescription] = (await readFile(new URL('./conversation-tools.md', import.meta.url), 'utf8')).trim().split('\n\n');
+  const [guidance, shellDescription, batchDescription, windowDescription, showDescription, hideDescription] = (await readFile(new URL('./conversation-tools.md', import.meta.url), 'utf8')).trim().split('\n\n');
   const stored = await optionalFile(statePath);
   let history = stored === undefined ? undefined : interruptedHistory(JSON.parse(stored).messages);
   async function checkpoint(messages) {
@@ -148,7 +149,13 @@ export async function createConversation({home = homedir(), statePath, emit, fet
             emit({ToolCompleted: {id, output: {...input, aggregatedOutput: message}, failed: true}});
             throw new Error(message);
           } finally { socket.destroy(); }
-        }});
+        }},
+        {name: 'show_media', description: showDescription, inputSchema: mediaSchema, async call(args, ctx) {
+          const media = await prepareMedia(args, cwd, ctx.signal); ctx.signal.throwIfAborted();
+          await display(media, ctx.signal); return 'Showing: ' + media.title;
+        }},
+        {name: 'hide_media', description: hideDescription, inputSchema: {type: 'object', properties: {}, additionalProperties: false},
+          async call(_, ctx) { await display({}, ctx.signal); return 'Media hidden.'; }});
     try {
       for await (const event of runner.stream(turn, {signal, baseSystemPrompt: base, resume: {messages: interruptedHistory(history ?? legacy)},
         fetch: (url, init) => fetchImpl(url, {...init, body: JSON.stringify({...JSON.parse(init.body), store: false, text: {verbosity: 'low'}})})})) {
@@ -173,10 +180,23 @@ if (process.argv[1] && import.meta.url === pathToFileURL(await realpath(process.
   process.on('SIGTERM', () => { controller.abort(); input.close(); });
   process.on('SIGINT', () => { controller.abort(); input.close(); });
   try {
-    const run = await createConversation({statePath: process.argv[2], emit});
+    const displays = new Map();
+    async function display(media, signal) {
+      const id = randomUUID(), deadline = AbortSignal.any([signal, AbortSignal.timeout(15000)]);
+      try {
+        await new Promise((ok, fail) => {
+          deadline.throwIfAborted();
+          deadline.addEventListener('abort', () => fail(deadline.reason), {once: true});
+          displays.set(id, error => error ? fail(new Error(error)) : ok());
+          emit({ConversationMedia: {id, ...media}});
+        });
+      } finally { displays.delete(id); }
+    }
+    const run = await createConversation({statePath: process.argv[2], emit, display});
     let pending = Promise.resolve();
     for await (const line of lines) {
       const request = JSON.parse(line);
+      if (request.mediaResult) { displays.get(request.mediaResult.id)?.(request.mediaResult.error); continue; }
       pending = pending.then(() => run(request, controller.signal)).catch(error => {
         if (!controller.signal.aborted) emit({error: error.message});
       });

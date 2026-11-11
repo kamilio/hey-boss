@@ -7627,10 +7627,105 @@ final class ConversationWindow: NSWindow {
     }
 }
 
+/// The canvas keeps a diagram at reading size; Fit gives an overview of the whole drawing.
+final class ConversationMediaView: NSView, WKNavigationDelegate {
+    let title = NSTextField(labelWithString: "")
+    let kind = NSTextField(labelWithString: "")
+    let zoom = NSButton(), close = NSButton()
+    let viewport = NSScrollView()
+    let picture = NSImageView()
+    private final class Paper: NSView { override var isFlipped: Bool { true } }
+    private let paper = Paper()
+    private var vector: WKWebView?
+    private var drawing: WKNavigation?
+    private var fit = false
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true; layer?.cornerRadius = 12; layer?.masksToBounds = true; layer?.borderWidth = 1
+        kind.font = .systemFont(ofSize: 10, weight: .bold); kind.textColor = .secondaryLabelColor
+        title.font = .systemFont(ofSize: 15, weight: .semibold); title.lineBreakMode = .byTruncatingTail
+        zoom.bezelStyle = .accessoryBarAction; zoom.controlSize = .small; zoom.target = self; zoom.action = #selector(toggleFit)
+        close.bezelStyle = .accessoryBarAction; close.isBordered = false
+        close.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Hide media")
+        close.contentTintColor = .secondaryLabelColor; close.toolTip = "Hide media"
+        viewport.contentView = FlippedClip(); viewport.backgroundColor = .white
+        viewport.hasVerticalScroller = true; viewport.hasHorizontalScroller = true; viewport.autohidesScrollers = true
+        viewport.scrollerStyle = .overlay; viewport.documentView = paper
+        picture.imageScaling = .scaleAxesIndependently; paper.addSubview(picture)
+        for view in [kind, title, zoom, close, viewport] { addSubview(view) }
+        isHidden = true
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let hit = super.hitTest(point)
+        if let vector, let hit, hit === vector || hit.isDescendant(of: vector) { return viewport.contentView }
+        return hit
+    }
+    override func updateLayer() {
+        layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        layer?.borderColor = NSColor.separatorColor.cgColor
+    }
+    override var wantsUpdateLayer: Bool { true }
+    override func layout() {
+        super.layout()
+        let w = bounds.width, h = bounds.height
+        close.frame = NSRect(x: w - 40, y: h - 42, width: 28, height: 28)
+        zoom.sizeToFit(); zoom.setFrameOrigin(NSPoint(x: close.frame.minX - zoom.frame.width - 6, y: h - 28 - zoom.frame.height / 2))
+        let width = max(0, zoom.frame.minX - 30)
+        kind.frame = NSRect(x: 16, y: h - 23, width: width, height: 14)
+        title.frame = NSRect(x: 16, y: h - 45, width: width, height: 21)
+        viewport.frame = NSRect(x: 1, y: 1, width: max(0, w - 2), height: max(0, h - 57))
+        guard let size = picture.image?.size, size.width > 0, size.height > 0 else { return }
+        let area = viewport.contentSize
+        let fitScale = max(0, min(1, (area.width - 32) / size.width, (area.height - 32) / size.height))
+        zoom.isHidden = fitScale >= 1
+        let scale = fit ? fitScale : 1
+        let image = NSSize(width: size.width * scale, height: size.height * scale)
+        paper.setFrameSize(NSSize(width: max(image.width + 32, area.width), height: max(image.height + 32, area.height)))
+        picture.frame = NSRect(x: (paper.frame.width - image.width) / 2, y: (paper.frame.height - image.height) / 2, width: image.width, height: image.height)
+        vector?.frame = picture.frame
+    }
+    func clear() {
+        vector?.removeFromSuperview(); vector = nil; drawing = nil; picture.image = nil
+    }
+    @objc func toggleFit() { fit.toggle(); updateZoom() }
+    private func updateZoom() {
+        zoom.title = fit ? "Actual Size" : "Fit"; zoom.toolTip = fit ? "View at actual size" : "Fit entire image"
+        needsLayout = true; layoutSubtreeIfNeeded()
+        viewport.contentView.scroll(to: .init(x: 0, y: 0)); viewport.reflectScrolledClipView(viewport.contentView)
+    }
+    func display(_ image: NSImage, title: String, kind: String, svg: String?) {
+        picture.image = image; picture.setAccessibilityLabel(title)
+        // AppKit omits SVG arrow markers. WebKit draws them (and text) at any scale.
+        picture.isHidden = false
+        if let svg {
+            let web = vector ?? WKWebView(); vector = web
+            if web.superview == nil { paper.addSubview(web) }
+            web.navigationDelegate = self; web.alphaValue = 0; web.setAccessibilityLabel(title)
+            drawing = web.loadHTMLString("""
+                <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
+                <style>*{margin:0}html,body,img{width:100%;height:100%;overflow:hidden;display:block}</style>
+                <img draggable="false" src="data:image/svg+xml;base64,\(svg)">
+                """, baseURL: nil)
+        } else { vector?.removeFromSuperview(); vector = nil }
+        self.title.stringValue = title; self.title.toolTip = title
+        self.kind.stringValue = kind == "Image" ? "IMAGE" : kind.uppercased() + "  /  DIAGRAM"
+        isHidden = false; fit = kind == "Image"; updateZoom()
+    }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === vector, navigation === drawing else { return }
+        webView.alphaValue = 1; picture.isHidden = true
+    }
+}
+
 @available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let media = ConversationMediaView()
+    private var mediaHeight: NSLayoutConstraint!
+    private var compactFrame: NSRect?
     lazy var caption = ConversationCaption()
     let historyList = NSTableView()
     private let split = NSSplitViewController()
@@ -7805,7 +7900,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let voiceStatus = NSStackView(views: [muteMic, pauseReply, status, listenNext])
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
-        for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
+        for view in [media,scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
         contextChip.bezelStyle = .accessoryBarAction; contextChip.imagePosition = .imageLeading
         contextChip.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
         contextChip.font = .systemFont(ofSize: 12, weight: .medium); contextChip.lineBreakMode = .byTruncatingTail
@@ -7814,7 +7909,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         entry.orientation = .vertical; entry.alignment = .leading; entry.spacing = 6
         for view in [entry,send,meter,voiceStatus] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
-            scroll.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
+            media.topAnchor.constraint(equalTo: body.safeAreaLayoutGuide.topAnchor),
+            media.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), media.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16),
+            media.heightAnchor.constraint(lessThanOrEqualTo: body.heightAnchor, multiplier: 0.61),
+            scroll.topAnchor.constraint(equalTo: media.bottomAnchor), scroll.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 24), scroll.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -24), scroll.bottomAnchor.constraint(equalTo: dock.topAnchor, constant: -8),
             turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
             dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
@@ -7824,6 +7922,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
+        mediaHeight = media.heightAnchor.constraint(equalToConstant: 0); mediaHeight.priority = .defaultHigh; mediaHeight.isActive = true
+        media.close.target = self; media.close.action = #selector(hideMedia)
         refreshScope(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
@@ -8629,15 +8729,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             while true {
                 let data = handle.availableData
                 if data.isEmpty { break }
-                pending.append(data)
-                while let i = pending.firstIndex(of: 10) {
-                    let line = Data(pending[..<i]); pending.removeSubrange(...i)
+                var rest = data[...]
+                while let i = rest.firstIndex(of: 10) {
+                    pending.append(rest[..<i]); rest = rest[(i + 1)...]
+                    let event = (try? JSONSerialization.jsonObject(with: pending)) as? [String:Any]
+                    pending.removeAll(keepingCapacity: false)
                     onMain {
                         guard let self, self.process === child else { return }
-                        guard let event = (try? JSONSerialization.jsonObject(with: line)) as? [String:Any] else { self.workspaceFailed("Unreadable response from the agent."); return }
+                        guard let event else { self.workspaceFailed("Unreadable response from the agent."); return }
                         self.event(event)
                     }
                 }
+                pending.append(rest)
             }
             onMain {
                 guard let self, self.process === child else { return }
@@ -8649,6 +8752,36 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let writer else { throw CocoaError(.fileWriteUnknown) }
         var data = try JSONSerialization.data(withJSONObject: command); data.append(10); try writer.write(contentsOf: data)
     }
+    @objc func hideMedia() {
+        guard !media.isHidden else { return }
+        media.isHidden = true; media.clear(); mediaHeight.constant = 0
+        if let frame = compactFrame, !window.styleMask.contains(.fullScreen) { window.setFrame(window.constrainFrameRect(frame, to: window.screen), display: true) }
+        compactFrame = nil
+    }
+    private func showMedia(_ data: [String: Any]) throws {
+        guard let encoded = data["data"] as? String else { hideMedia(); return }
+        guard let bytes = Data(base64Encoded: encoded), let image = NSImage(data: bytes),
+              image.size.width > 0, image.size.height > 0, image.size.width <= 65536, image.size.height <= 65536,
+              image.size.width * image.size.height <= 64_000_000 else {
+            throw StorageError(description: "Couldn’t display this image. Use a supported image or diagram file.")
+        }
+        let title = data["title"] as? String ?? "Image", kind = data["kind"] as? String ?? "Image"
+        let original = compactFrame ?? window.frame; compactFrame = original
+        let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
+        let side = split.splitViewItems.first?.isCollapsed == true ? 0 : split.splitViewItems.first?.viewController.view.frame.width ?? 0
+        let width = min(screen.width, max(original.width, min(image.size.width + 68, kind == "Image" ? 1000 : screen.width) + side))
+        let height = min(screen.height, max(original.height, min(image.size.height + 390, kind == "Image" ? 920 : screen.height)))
+        if !window.styleMask.contains(.fullScreen) {
+            let frame = NSRect(x: min(max(screen.minX, window.frame.midX - width / 2), screen.maxX - width),
+                               y: min(max(screen.minY, window.frame.maxY - height), screen.maxY - height), width: width, height: height)
+            window.setFrame(frame, display: true)
+        }
+        mediaHeight.constant = max(180, image.size.height + 90)
+        media.display(image, title: title, kind: kind, svg: kind == "Image" ? nil : encoded)
+        window.contentView?.layoutSubtreeIfNeeded()
+        if !window.isVisible { window.orderFrontRegardless() }
+        revealLatest()
+    }
     func event(_ envelope: [String:Any]) {
         if let error = envelope["error"] as? String {
             if directory == nil { closeWorkspace(); generationFailed(StorageError(description: error)) }
@@ -8658,6 +8791,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
         switch kind {
+        case "ConversationMedia":
+            var result = ["id": id]
+            do { try showMedia(data) } catch { result["error"] = error.localizedDescription }
+            try? write(["mediaResult": result])
         case "AgentAccepted":
             turnAccepted = true
             updateComposerActions(); save()
@@ -8872,6 +9009,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         return true
     }
     func stop(_ message: String) {
+        hideMedia()
         pauseID = nil
         if answering || heldReply { interruptPlayback() }
         heldReply = false; discardPendingSpeech()

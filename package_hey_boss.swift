@@ -35,7 +35,7 @@ func agentRevision() throws -> String {
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/conversation-media.mjs", "assets/mermaid-LICENSE", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
@@ -156,11 +156,12 @@ let buildAgent = Process()
 buildAgent.executableURL = URL(fileURLWithPath: "/usr/bin/env")
 buildAgent.arguments = ["node", root.appendingPathComponent("assets/build-conversation-agent.mjs").path, resources.path, try agentRevision()]
 var environment = ProcessInfo.processInfo.environment
-environment["PATH"] = files.homeDirectoryForCurrentUser.path + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+environment["PATH"] = files.homeDirectoryForCurrentUser.path + "/.cargo/bin:" + files.homeDirectoryForCurrentUser.path + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
 buildAgent.environment = environment
 try buildAgent.run(); buildAgent.waitUntilExit()
 require(buildAgent.terminationStatus == 0, "Could not build Poe Agent from GitHub")
 try sign(resources.appendingPathComponent("node"), identifier: "local.hey-boss.agent-node")
+try sign(resources.appendingPathComponent("mmdr"), identifier: "local.hey-boss.mermaid")
 let manifest = try String(contentsOf: root.appendingPathComponent("Cargo.toml"), encoding: .utf8)
 let version = manifest.components(separatedBy: .newlines).first { $0.hasPrefix("version = ") }!.components(separatedBy: "\"")[1]
 let info: [String: Any] = [

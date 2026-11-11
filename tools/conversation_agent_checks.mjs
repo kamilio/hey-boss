@@ -52,7 +52,7 @@ try {
   assert.ok(!serialized.includes('Private skill body.'));
   assert.equal(requests[0].reasoning?.effort, 'low');
   assert.equal(requests[0].store, false);
-  assert.deepEqual(requests[0].tools.map(t => t.name), ['shell', 'batch', 'inspect_window']);
+  assert.deepEqual(requests[0].tools.map(t => t.name), ['shell', 'batch', 'inspect_window', 'show_media', 'hide_media']);
   assert.ok(JSON.stringify(requests[1]).includes('function_call_output'));
   assert.equal((await stat(statePath)).mode & 0o777, 0o600);
   const restored = await createConversation({home: root, statePath, emit: event => events.push(event), fetchImpl: fakeFetch});
@@ -63,6 +63,31 @@ try {
   console.log('PASS real Poe loop: regular shell, batch failure isolation, root config, AGENTS.md, lazy skills, history/resume, file permissions');
   const tool = (name, args) => [{type: 'function_call', id: 'fc_test', call_id: 'call_test', name, arguments: JSON.stringify(args)}];
   const reply = text => [{type: 'message', id: 'msg_test', role: 'assistant', status: 'completed', content: [{type: 'output_text', text, annotations: []}]}];
+  await writeFile(join(root, 'work/map.dot'), 'digraph { Review -> Publish }');
+  await writeFile(join(root, 'work/map.mmd'), 'flowchart LR\n A --> B');
+  const shown = [];
+  const mediaRun = await createConversation({home: root, statePath: join(root, 'media.json'), emit: e => events.push(e),
+    display: async media => { shown.push(media); }, fetchImpl: fakeFetch});
+  const cases = [
+    [{file: 'map.dot'}, 'Graphviz', 'Publish'],
+    [{mermaid: 'sequenceDiagram\n    Alice->>Bob: Hello'}, 'Mermaid', 'Hello'],
+    [{svg: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="20"/></svg>'}, 'SVG', '<circle'],
+    [{file: 'map.mmd'}, 'Mermaid', '<svg'],
+    [{image: {type: 'input_image', image_url: 'data:image/png;base64,YWJj'}}, 'Image', 'abc'],
+    [{image: {type: 'image', mimeType: 'image/png', data: 'YWJj'}}, 'Image', 'abc'],
+  ];
+  for (const [source, kind, expected] of cases) {
+    planned = [tool('show_media', {title: 'Example', ...source}), reply('Here it is.')];
+    await mediaRun({turn: 'Show the example.'}, new AbortController().signal);
+    assert.equal(shown.at(-1).kind, kind);
+    assert.ok(Buffer.from(shown.at(-1).data, 'base64').toString().includes(expected));
+  }
+  planned = [tool('show_media', {file: 'missing.dot'}), reply('Missing file.')];
+  await mediaRun({turn: 'Try the missing file.'}, new AbortController().signal);
+  assert.equal(shown.length, cases.length);
+  planned = [tool('hide_media', {}), reply('Hidden.')];
+  await mediaRun({turn: 'Hide it.'}, new AbortController().signal);
+  assert.deepEqual(shown.at(-1), {});
   const socketDir = 'out/window-' + process.pid;
   const fakeHome = socketDir;
   const endpoint = join(fakeHome, 'Library/Application Support/hey-talk');
