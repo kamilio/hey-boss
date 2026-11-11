@@ -14,6 +14,8 @@ pub(super) const TABLES: &[&str] = &[
     "comments",
     "events",
     "issue_commits",
+    "pr_code_reviews",
+    "pr_code_comments",
     "commit_shelf",
     "commit_reviews",
     "commit_review_comments",

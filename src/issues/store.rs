@@ -243,6 +243,11 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ("issues", "plan", "TEXT"),
     (
         "project_settings",
+        "code_reviews_enabled",
+        "INTEGER NOT NULL DEFAULT 0",
+    ),
+    (
+        "project_settings",
         "artifacts_enabled",
         "INTEGER NOT NULL DEFAULT 1",
     ),
@@ -1118,6 +1123,13 @@ fn publish_database(staged: &Path, path: &Path) -> std::io::Result<()> {
 }
 
 impl Store {
+    pub fn code_review_projects(&self) -> Result<Vec<String>> {
+        Ok(self.db.query_collect(
+            "SELECT project_id FROM project_settings WHERE code_reviews_enabled=1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
     pub(crate) fn schema_version() -> i64 {
         SCHEMA_VERSION
     }
@@ -1494,6 +1506,13 @@ impl Store {
         status::migrate(&db)?;
         provenance::migrate(&db)?;
         super::commits::migrate(&db)?;
+        if !db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='pr_code_comment_review')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            db.execute_batch(super::code_reviews::SCHEMA)?;
+        }
         steering::migrate(&db)?;
         assignments::migrate(&db)?;
         super::allocations::migrate(&db)?;
@@ -1719,7 +1738,8 @@ impl Store {
         }
         if matches!(
             r.operation,
-            Operation::Artifact { .. }
+            Operation::CodeReview { .. }
+                | Operation::Artifact { .. }
                 | Operation::Attachment { .. }
                 | Operation::Job { .. }
                 | Operation::Shelf { .. }
@@ -2194,6 +2214,9 @@ impl Store {
                 *if_order_version,
                 now,
             )?,
+            Operation::CodeReview { operation } => {
+                super::code_reviews::execute(&tx, &project, operation, now)?
+            }
             Operation::Shelf { operation } => {
                 super::shelf::execute(&tx, &project, operation, actor, now)?
             }
@@ -2292,14 +2315,15 @@ impl Store {
                     coalesce((SELECT s.artifacts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
                     coalesce((SELECT s.drafts_enabled FROM project_settings s WHERE s.project_id=p.id),1),
                     coalesce((SELECT s.paused FROM project_settings s WHERE s.project_id=p.id),0),
-                    coalesce((SELECT s.pause_reason FROM project_settings s WHERE s.project_id=p.id),'')
+                    coalesce((SELECT s.pause_reason FROM project_settings s WHERE s.project_id=p.id),''),
+                    coalesce((SELECT s.code_reviews_enabled FROM project_settings s WHERE s.project_id=p.id),0)
                     FROM projects p LEFT JOIN issues i ON i.project_id=p.id AND NOT (i.deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM events e WHERE e.project_id=i.project_id AND e.issue_number=i.number AND e.action='moved_to'))
                     WHERE EXISTS(SELECT 1 FROM project_name_keys k WHERE k.project_id=p.id) AND (?1 OR p.hidden_at IS NULL) GROUP BY p.id ORDER BY p.activity_at DESC,lower(p.name),p.id")?;
                 let projects = query.query_map([include_hidden], |row| Ok(json!({
                     "id":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,
                     "open":row.get::<_,i64>(2)?,"closed":row.get::<_,i64>(3)?,"deleted":row.get::<_,i64>(4)?,"unassigned":row.get::<_,i64>(5)?,
                     "activity_at":row.get::<_,i64>(6)?,"hidden_at":row.get::<_,Option<i64>>(7)?,"created_at":row.get::<_,i64>(8)?,"blocked":row.get::<_,i64>(9)?,"ready":row.get::<_,i64>(10)?,"prs_enabled":row.get::<_,bool>(11)?,
-                    "artifacts_enabled":row.get::<_,bool>(12)?,"drafts_enabled":row.get::<_,bool>(13)?,"paused":row.get::<_,bool>(14)?,"pause_reason":row.get::<_,String>(15)?
+                    "artifacts_enabled":row.get::<_,bool>(12)?,"drafts_enabled":row.get::<_,bool>(13)?,"paused":row.get::<_,bool>(14)?,"pause_reason":row.get::<_,String>(15)?,"code_reviews_enabled":row.get::<_,bool>(16)?
                 })))?.collect::<rusqlite::Result<Vec<_>>>()?;
                 // Discovery and read-only commands do not enroll a project in
                 // Builder. Explicit settings or saved work do, without deleting
@@ -2776,6 +2800,7 @@ impl Store {
             .entry("prs_enabled")
             .or_insert_with(|| project_settings["prs_enabled"].clone());
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
+        result["code_reviews_enabled"] = project_settings["code_reviews_enabled"].clone();
         result["artifacts_enabled"] = project_settings["artifacts_enabled"].clone();
         result["paused"] = project_settings["paused"].clone();
         result["pause_reason"] = project_settings["pause_reason"].clone();

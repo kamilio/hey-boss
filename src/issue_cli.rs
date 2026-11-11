@@ -275,6 +275,10 @@ enum Action {
     /// Project shelf transport used by the g terminal client (JSON on stdin).
     #[command(hide = true)]
     Shelf,
+    #[command(hide = true)]
+    CodeReview,
+    #[command(hide = true)]
+    CodeReviewProjects,
     /// Attach, list, or remove first-class pull request links.
     Pr {
         #[command(subcommand)]
@@ -821,6 +825,10 @@ enum SettingsAction {
         artifacts_enabled: bool,
         #[arg(long)]
         no_artifacts: bool,
+        #[arg(long, conflicts_with = "no_code_reviews")]
+        code_reviews_enabled: bool,
+        #[arg(long)]
+        no_code_reviews: bool,
     },
 }
 #[derive(Subcommand)]
@@ -1009,6 +1017,9 @@ impl Options {
                     },
                 },
             },
+            Action::CodeReview => Operation::CodeReview {
+                operation: serde_json::from_str(&read_text(std::io::stdin(), issues::WIRE_LIMIT)?)?,
+            },
             Action::Shelf => Operation::Shelf {
                 operation: serde_json::from_str(&read_text(std::io::stdin(), issues::WIRE_LIMIT)?)?,
             },
@@ -1032,6 +1043,8 @@ impl Options {
                     no_drafts,
                     artifacts_enabled,
                     no_artifacts,
+                    code_reviews_enabled,
+                    no_code_reviews,
                 } => {
                     if boss_name.is_none()
                         && worker_model.is_none()
@@ -1048,6 +1061,8 @@ impl Options {
                         && !drafts_enabled
                         && !no_drafts
                         && !artifacts_enabled
+                        && !code_reviews_enabled
+                        && !no_code_reviews
                         && !no_artifacts
                     {
                         return Err(Error::invalid(
@@ -1069,6 +1084,13 @@ impl Options {
                         subtask_scheduling: None,
                         chief_enabled: None,
                         chief_prompt: None,
+                        code_reviews_enabled: if *code_reviews_enabled {
+                            Some(true)
+                        } else if *no_code_reviews {
+                            Some(false)
+                        } else {
+                            None
+                        },
                         artifacts_enabled: if *artifacts_enabled {
                             Some(true)
                         } else if *no_artifacts {
@@ -1529,7 +1551,8 @@ impl Options {
                     }
                 }
             }
-            Action::Rpc
+            Action::CodeReviewProjects
+            | Action::Rpc
             | Action::Web { .. }
             | Action::DrainGithub { .. }
             | Action::Migrate { .. } => unreachable!(),
@@ -1538,6 +1561,11 @@ impl Options {
 }
 
 pub fn run(options: &Options) -> Result<()> {
+    if matches!(options.action, Action::CodeReviewProjects) {
+        let projects = Store::open(&issues::database_path()?)?.code_review_projects()?;
+        println!("{}", serde_json::to_string(&projects)?);
+        return Ok(());
+    }
     if options.supervisor {
         if std::env::var_os("HEY_BOSS_ISSUE_HOST").is_some_and(|v| !v.is_empty()) {
             return Err(Error::invalid(
@@ -2125,6 +2153,7 @@ pub(crate) fn print_text(value: &Value) {
         for (key, label) in [
             ("drafts_enabled", "Drafts enabled"),
             ("artifacts_enabled", "Artifacts enabled"),
+            ("code_reviews_enabled", "Code Reviews enabled"),
         ] {
             if let Some(enabled) = value[key].as_bool() {
                 println!("{label}: {enabled}");

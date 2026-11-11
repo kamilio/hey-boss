@@ -5,6 +5,7 @@ pub(crate) mod authority;
 mod discovery;
 pub(crate) use store::chief;
 pub(crate) mod blockers;
+pub mod code_reviews;
 mod comment_limits;
 pub mod commit_reviews;
 pub mod commits;
@@ -426,6 +427,8 @@ pub enum Operation {
         drafts_enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         artifacts_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_reviews_enabled: Option<bool>,
         if_version: Option<i64>,
     },
     PullRequests {
@@ -456,6 +459,9 @@ pub enum Operation {
         commit: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
+    },
+    CodeReview {
+        operation: code_reviews::Operation,
     },
     Shelf {
         operation: shelf::Operation,
@@ -777,6 +783,9 @@ impl Operation {
         if let Self::ProjectInit { settings } = self {
             return settings.is_some();
         }
+        if let Self::CodeReview { operation } = self {
+            return operation.writes();
+        }
         if let Self::Shelf { operation } = self {
             return operation.writes();
         }
@@ -834,7 +843,8 @@ impl Operation {
     }
     pub fn number(&self) -> Option<i64> {
         match self {
-            Self::Shelf { .. }
+            Self::CodeReview { .. }
+            | Self::Shelf { .. }
             | Self::Attachment { .. }
             | Self::Job { .. }
             | Self::Artifact { .. }

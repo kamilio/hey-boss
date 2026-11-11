@@ -118,15 +118,16 @@ struct ProjectSettingsRow {
     version: i64,
     drafts_enabled: bool,
     artifacts_enabled: bool,
+    code_reviews_enabled: bool,
     worktree_enabled: bool,
     overrides: String,
 }
 pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Result<Value> {
     let row = db.query_row(
-        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason,worker_execution FROM project_settings WHERE project_id=?1",
+        "SELECT prompt,prs_enabled,version,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason,worker_execution,code_reviews_enabled FROM project_settings WHERE project_id=?1",
         [&p.id],
         |r| Ok(ProjectSettingsRow {
-            execution: r.get(9)?,
+            execution: r.get(9)?, code_reviews_enabled: r.get(10)?,
             paused: r.get(7)?, pause_reason: r.get(8)?,
             artifacts_enabled: r.get(6)?,
             prompt: r.get(0)?, prs: r.get(1)?, version: r.get(2)?,
@@ -143,6 +144,7 @@ pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Resul
         version,
         drafts_enabled,
         artifacts_enabled,
+        code_reviews_enabled,
         worktree_enabled,
         overrides,
     } = row.unwrap_or_else(|| ProjectSettingsRow {
@@ -154,6 +156,7 @@ pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Resul
         version: 0,
         drafts_enabled: true,
         artifacts_enabled: true,
+        code_reviews_enabled: false,
         worktree_enabled: false,
         overrides: "{}".into(),
     });
@@ -162,7 +165,7 @@ pub(in crate::issues) fn project_settings(db: &Connection, p: &Project) -> Resul
     let prompt = worker::base_prompt(&prompt);
     let boss_name = crate::issues::global_settings::read(db)?["boss_name"].clone();
     Ok(
-        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"worker_prompt_default":worker::DEFAULT_PROMPT,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"version":version,"boss_name":boss_name}),
+        json!({"ok":true,"project":p,"worker_model":execution.model,"worker_reasoning":execution.reasoning,"worker_permissions":execution.permissions,"paused":paused,"pause_reason":pause_reason,"prompt":prompt,"subtask_scheduling":"explicit","prs_enabled":prs,"worktree_enabled":worktree_enabled,"prompt_overrides":prompt_overrides,"worker_prompt_default":worker::DEFAULT_PROMPT,"prompt_defaults":worker::prompt_defaults(),"prompt_sections":worker::prompt_sections(),"drafts_enabled":drafts_enabled,"artifacts_enabled":artifacts_enabled,"code_reviews_enabled":code_reviews_enabled,"version":version,"boss_name":boss_name}),
     )
 }
 // Discover the project's agents first instead of rescanning its issues for
@@ -838,6 +841,7 @@ pub(in crate::issues) fn execute(
             prompt_overrides,
             drafts_enabled,
             artifacts_enabled,
+            code_reviews_enabled,
             if_version,
         } => {
             if *chief_enabled == Some(true) || chief_prompt.is_some() {
@@ -909,7 +913,7 @@ pub(in crate::issues) fn execute(
                 crate::issues::global_settings::configure(db, name, None)?;
             }
             db.execute("INSERT INTO project_settings(project_id,prompt,prs_enabled,version,boss_name,drafts_enabled,worktree_enabled,prompt_overrides,artifacts_enabled,paused,pause_reason) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(project_id) DO UPDATE SET prompt=excluded.prompt,prs_enabled=excluded.prs_enabled,version=excluded.version,boss_name=excluded.boss_name,drafts_enabled=excluded.drafts_enabled,worktree_enabled=excluded.worktree_enabled,prompt_overrides=excluded.prompt_overrides,artifacts_enabled=excluded.artifacts_enabled,paused=excluded.paused,pause_reason=excluded.pause_reason",params![p.id,prompt,prs_enabled,v+1,legacy_name,drafts_enabled,worktree_enabled,serde_json::to_string(&prompt_overrides)?,artifacts_enabled,paused,pause_reason])?;
-            db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit',worker_execution=?2 WHERE project_id=?1", params![p.id,serde_json::to_string(&execution)?])?;
+            db.execute("UPDATE project_settings SET chief_enabled=0,subtask_scheduling='explicit',worker_execution=?2,code_reviews_enabled=coalesce(?3,code_reviews_enabled) WHERE project_id=?1", params![p.id,serde_json::to_string(&execution)?,code_reviews_enabled])?;
             project_settings(db, p)
         }
         Operation::Commits { number } => {

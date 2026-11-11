@@ -3445,3 +3445,43 @@ fn project_configuration_offline_history_survives_conflicts_and_remote_undo() {
         0
     );
 }
+
+#[test]
+fn pr_review_comments_and_edited_wording_replicate() {
+    let fa = Fixture::new();
+    let a = fa.db();
+    install(&a, "a").unwrap();
+    seed(&a);
+    let fb = Fixture::new();
+    let b = fb.db();
+    install(&b, "b").unwrap();
+    a.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer',node='a'; INSERT INTO pr_code_reviews VALUES(45,'p',8,'abc','Fix timezone','submitted','APPROVE','Looks good',2,1,2,'',''); INSERT INTO pr_code_comments VALUES(43,'p',45,1,'{}','context line','Check timezone');").unwrap();
+    b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row(
+            "SELECT body FROM pr_code_comments WHERE review_id=45",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "Check timezone"
+    );
+    b.execute_batch("UPDATE pr_code_comments SET body='Please cover midnight' WHERE id=43; UPDATE pr_code_reviews SET version=3 WHERE id=45").unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row(
+            "SELECT body FROM pr_code_comments WHERE review_id=45",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "Please cover midnight"
+    );
+}
