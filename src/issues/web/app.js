@@ -118,6 +118,7 @@ const specialIssueTags = new Map([
 function labelTone(name) {
   const known = {
     bug: 1,
+    "push-blocked": 1,
     enhancement: 0,
     feature: 0,
     documentation: 5,
