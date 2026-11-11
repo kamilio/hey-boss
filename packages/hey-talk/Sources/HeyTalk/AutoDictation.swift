@@ -140,12 +140,17 @@ struct FocusedInput: Equatable {
         let classes = value(field, "AXDOMClassList") as? [String] ?? []
         let slack = bundleID == "com.tinyspeck.slackmacgap" && classes.contains("ql-editor")
         var ancestor: AXUIElement? = field, document: String?, threadInput: String?
-        var threadReply = false
+        var threadReply = false, mainInput = false, primaryPane = false
+        var slackPanel: AXUIElement?
         for _ in 0..<48 {
             guard let current = ancestor else { break }
             if slack {
                 if let id = value(current, "AXDOMIdentifier") as? String, id.hasSuffix("-thread-list-Thread_input") { threadInput = id }
-                if (value(current, "AXDOMClassList") as? [String])?.contains("p-threads_footer__input") == true { threadReply = true }
+                let classes = value(current, "AXDOMClassList") as? [String] ?? []
+                if classes.contains("p-threads_footer__input") { threadReply = true }
+                if classes.contains("p-workspace__input") { mainInput = true }
+                if classes.contains("p-view_contents--primary") { primaryPane = true }
+                if classes.contains("p-client_workspace__tabpanel") { slackPanel = current }
             }
             let url = value(current, kAXURLAttribute)
             if let url = url as? URL { document = url.absoluteString; break }
@@ -153,9 +158,10 @@ struct FocusedInput: Equatable {
             ancestor = axElement(current, kAXParentAttribute)
         }
         let window = axElement(field, kAXWindowAttribute)
-        if slack {
+        let slackComposer = slack && (threadReply || threadInput != nil || (mainInput && primaryPane))
+        if slackComposer {
             guard let route = document, !threadReply || threadInput != nil,
-                  let destination = slackDestination(route, threadInput: threadInput),
+                  let destination = slackDestination(route, threadInput: threadInput, selectedDM: selectedSlackDM(in: slackPanel)),
                   destination != route || (window != nil && !label.isEmpty) else { return nil }
             document = destination
         }
@@ -164,7 +170,33 @@ struct FocusedInput: Equatable {
         let composer = slack || (t3 && role == "AXTextArea" && classes.contains("composer-tiptap"))
         return Self(app: app, element: field, window: window, document: document, composerLabel: composer && !label.isEmpty ? label : nil)
     }
-    static func slackDestination(_ route: String, threadInput: String?) -> String? {
+    // Look only at the visible DM rows beside this composer, never at message history.
+    private static func selectedSlackDM(in panel: AXUIElement?) -> String? {
+        guard var node = panel else { return nil }
+        func children(_ node: AXUIElement) -> [AXUIElement] {
+            value(node, kAXChildrenAttribute) as? [AXUIElement] ?? []
+        }
+        func hasClass(_ node: AXUIElement, _ name: String) -> Bool {
+            (value(node, "AXDOMClassList") as? [String])?.contains(name) == true
+        }
+        for name in ["p-view_contents--sidebar", "p-recent_page", "c-scrollbar__hider", "c-virtual_list__scroll_container"] {
+            guard let child = children(node).first(where: { hasClass($0, name) }) else { return nil }
+            node = child
+        }
+        var selected: String?
+        let rows = children(node)
+        guard rows.count <= 100 else { return nil }
+        for row in rows {
+            guard children(row).contains(where: { container in
+                children(container).contains { hasClass($0, "p-activity_ia4_page__item--selected--dm") }
+            }) else { continue }
+            guard selected == nil, let id = value(row, "AXDOMIdentifier") as? String else { return nil }
+            selected = id
+        }
+        return selected
+    }
+
+    static func slackDestination(_ route: String, threadInput: String?, selectedDM: @autoclosure () -> String? = nil) -> String? {
         guard let url = URL(string: route), url.scheme == "https", url.host == "app.slack.com" else { return nil }
         let path = url.pathComponents
         guard path.count >= 4, path[1] == "client", path[2].wholeMatch(of: #/^[TE][A-Z0-9]+$/#) != nil else { return nil }
@@ -173,8 +205,10 @@ struct FocusedInput: Equatable {
             guard let match = threadInput.wholeMatch(of: #/^([CDG][A-Z0-9]+)-([0-9]{10}\.[0-9]{6})-thread-list-Thread_input$/#) else { return nil }
             return prefix + match.1 + "&thread_ts=" + match.2
         }
-        // Slack's DMs view shares one URL across recipients. Only the same live editor may match.
-        if path.count == 4, path[3] == "dms" { return route }
+        if path.count == 4, path[3] == "dms" {
+            guard let id = selectedDM(), id.wholeMatch(of: #/^[CDG][A-Z0-9]+$/#) != nil else { return route }
+            return prefix + id
+        }
         guard path[3].wholeMatch(of: #/^[CDG][A-Z0-9]+$/#) != nil else { return nil }
         return prefix + path[3]
     }

@@ -70,6 +70,11 @@ final class AutoDictationTests: XCTestCase {
             FocusedInput(app: app, element: element, window: window ?? first, document: route, composerLabel: label)
         }
         let start = field(first, "t3code://app/#/thread/A", "Message A")
+        let dm = "slack://channel?team=T123&id=D456"
+        XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm, "Message B"))
+        XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm, nil))
+        XCTAssertEqual(field(first, dm, "Message A"), field(other, dm, "Message A"))
+        XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm + "&thread_ts=1234567890.123456", "Message A"))
         XCTAssertEqual(start, field(other, "t3code://app/#/thread/A", "Message A"))
         XCTAssertNotEqual(start, field(first, "t3code://app/#/thread/B", "Message A"))
         XCTAssertNotEqual(start, field(other, "t3code://app/#/thread/A", nil))
@@ -89,6 +94,11 @@ final class AutoDictationTests: XCTestCase {
         XCTAssertEqual(FocusedInput.slackDestination("https://app.slack.com/client/E123/D456", threadInput: nil), "slack://channel?team=E123&id=D456")
         let dms = "https://app.slack.com/client/T123/dms"
         XCTAssertEqual(FocusedInput.slackDestination(dms, threadInput: nil), dms)
+        XCTAssertEqual(FocusedInput.slackDestination(dms, threadInput: nil, selectedDM: "D456"),
+                       FocusedInput.slackDestination("https://app.slack.com/client/T123/D456", threadInput: nil))
+        XCTAssertNotEqual(FocusedInput.slackDestination(dms, threadInput: nil, selectedDM: "D456"),
+                          FocusedInput.slackDestination(dms, threadInput: nil, selectedDM: "D789"))
+        XCTAssertEqual(FocusedInput.slackDestination(dms, threadInput: nil, selectedDM: "unknown"), dms)
         let reply = "C456-1234567890.123456-thread-list-Thread_input"
         XCTAssertEqual(FocusedInput.slackDestination(inbox, threadInput: reply), "slack://channel?team=T123&id=C456&thread_ts=1234567890.123456")
         XCTAssertNotEqual(FocusedInput.slackDestination(channel, threadInput: nil), FocusedInput.slackDestination(channel, threadInput: reply))
