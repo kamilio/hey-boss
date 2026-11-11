@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import HeyTalk
 
@@ -54,6 +55,48 @@ final class SpeechPlaybackTests: XCTestCase {
         XCTAssertEqual(playback.highlight?.range, NSRange(location: 6, length: 5))
         playback.stop()
         XCTAssertNil(playback.highlight)
+    }
+    @MainActor func testRecapFollowsWrappedLinesBeforeAlignmentAndBetweenMatches() throws {
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let playback = SpeechPlayback(engine: engine, output: output), overlay = SpeechOverlay()
+        defer { overlay.hide() }
+        let passage = "First update.\n\nThe Seattle team reviewed the shipping estimates for the new display and expects delivery to the Zürich office before the next planning meeting on Friday."
+        try playback.start(passage)
+        engine.replies[0](.success(SpeechAudio(samples: [0], sampleRate: 100)))
+        drain()
+        let segment = try XCTUnwrap(engine.requests.last) as NSString
+        XCTAssertTrue(segment.hasSuffix("Friday."))
+        engine.replies[1](.success(SpeechAudio(samples: Array(repeating: 0, count: 1000), sampleRate: 100)))
+        drain()
+        overlay.showCaption(text: passage, state: .playing)
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { $0.title == "Hey Talk — Read Aloud" && $0.isVisible })
+        func findText(_ view: NSView) -> NSTextView? { (view as? NSTextView) ?? view.subviews.compactMap(findText).first }
+        let view = try XCTUnwrap(findText(try XCTUnwrap(panel.contentView)))
+        let layout = try XCTUnwrap(view.layoutManager)
+        func check(_ time: Double, _ word: String, exact: Bool, line: UInt = #line) throws {
+            output.time = time
+            let mark = try XCTUnwrap(playback.highlight)
+            XCTAssertEqual(mark.word, exact, line: line)
+            overlay.highlight(mark)
+            let glyphs = layout.glyphRange(forCharacterRange: (passage as NSString).range(of: word), actualCharacterRange: nil)
+            let rect = layout.boundingRect(forGlyphRange: glyphs, in: try XCTUnwrap(view.textContainer))
+            let point = NSPoint(x: rect.midX + view.textContainerOrigin.x, y: rect.midY + view.textContainerOrigin.y)
+            XCTAssertTrue(view.visibleRect.contains(point), "Caption lost \(word) at \(time)s", line: line)
+            XCTAssertTrue(view.subviews.contains { $0 is SpeechWordLens && $0.frame.contains(point) }, line: line)
+        }
+        try check(0.1, "Seattle", exact: false)
+        try check(5.9, "delivery", exact: false)
+        engine.timings[1]([SpeechWord(range: segment.range(of: "Zürich"), start: 6, end: 7),
+                           SpeechWord(range: segment.range(of: "Friday"), start: 9, end: 10)])
+        drain()
+        try check(6.5, "Zürich", exact: true)
+        try check(8.8, "meeting", exact: false)
+        playback.togglePause()
+        overlay.showCaption(text: passage, state: .paused)
+        try check(8.8, "meeting", exact: false)
+        playback.togglePause()
+        overlay.showCaption(text: passage, state: .playing)
+        try check(9.5, "Friday", exact: true)
     }
     @MainActor func testPlaybackStartsBeforeWholePassageAndOnlyBuffersTwoChunks() throws {
         let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
