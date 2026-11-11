@@ -82,7 +82,7 @@ const hub = createServer(async (req, res) => {
     val = bytes ? JSON.parse(bytes) : {};
   const mut =
     req.method !== "GET" &&
-    !(path === "/graphql" && !/\bmutation\b/.test(val.query));
+    !(path.endsWith("/graphql") && !/\bmutation\b/.test(val.query));
   if (path === "/graphql" && !mut)
     graphReads.push({ auth: req.headers.authorization, query: val.query });
   if (mut) writes.push({ path, auth: req.headers.authorization });
@@ -164,6 +164,15 @@ try {
       "native gh parity: " + args.join(" "),
     );
   }
+  env.GH_HOST = "git.example.test";
+  env.GH_ENTERPRISE_TOKEN = "fixture-enterprise";
+  const enterpriseRead = ["api", "graphql", "-f", "query={viewer{login}}"];
+  assert.deepEqual(
+    await run(gh, enterpriseRead),
+    await run(native, enterpriseRead),
+    "preserve the user's selected GitHub host",
+  );
+  env.GH_HOST = "github.com";
   const inline = JSON.parse(
     await ok(
       gh,
