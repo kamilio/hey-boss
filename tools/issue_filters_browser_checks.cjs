@@ -165,6 +165,28 @@ let web;
         await page.keyboard.press('Escape');
         if (process.env.FILTER_SCREENSHOTS) await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-${scheme}-${width}.png`)});
       }
+      // A label can outlive its last active issue; find it again in Deleted.
+      const tag = 'migration bug findings ' + engine.name();
+      const batch = () => page.getByRole('button',{name:'Batch actions',exact:true}).click();
+      const applyBatch = async () => {
+        await page.locator('#batch-submit').click();
+        await page.locator('#issue-batch-dialog').waitFor({state:'hidden'});
+      };
+      await page.goto(url('open')); await expect([1,2,3]);
+      await batch();
+      assert.ok(await page.locator('#batch-submit').isDisabled());
+      await page.locator('#batch-rows input[value="3"]').check();
+      await page.locator('#batch-label').fill(tag); await applyBatch();
+      await choose('label',tag); await expect([3]);
+      await batch(); await page.locator('#batch-all').check();
+      await page.locator('#batch-action').selectOption('delete'); await applyBatch(); await expect([]);
+      await page.goto(url('deleted')); await expect([3,8]);
+      await choose('label',tag); await expect([3]);
+      await batch(); await page.locator('#batch-all').check();
+      assert.equal(await page.locator('#batch-action').inputValue(),'restore');
+      await applyBatch(); await expect([]);
+      await page.goto(url('open')); await expect([1,2,3]);
+      await choose('label',tag); await expect([3]);
       assert.deepEqual(errors, [], 'No browser exceptions');
       console.log(`${engine.name()}: presets, combinations, lookup, history, keyboard, copy command, light/dark and four widths passed`);
       await context.close();

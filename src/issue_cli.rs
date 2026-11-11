@@ -445,7 +445,7 @@ enum Action {
     },
     /// Replace supplied fields; omitted fields are preserved.
     #[command(
-        after_help = "Example: issue edit --match-label e2e-case --draft\nMatching edits support drafting and report ineligible work without releasing it.\nOn a companion, --draft uses the existing supervisor tunnel.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
+        after_help = "Example: issue edit --match-label e2e-case --draft\nExample: issue edit --match-draft --label 'migration bug findings'\nOn a companion, --draft uses the existing supervisor tunnel.\nInspect supported operations with `hey-boss fleet capabilities`; no SSH hostname or claim is needed."
     )]
     Edit {
         #[arg(long)]
@@ -639,7 +639,11 @@ enum Action {
         force: bool,
     },
     /// Recover a deleted issue without restoring its former claim.
-    Restore { number: i64 },
+    Restore {
+        number: Option<i64>,
+        #[command(flatten)]
+        matching: issues::IssueMatcher,
+    },
     #[command(hide = true)]
     Rpc,
 }
@@ -1291,21 +1295,26 @@ impl Options {
                     }
                 } else {
                     if number.is_some()
-                        || !draft
                         || title.is_some()
                         || body.is_some()
-                        || !add_labels.is_empty()
-                        || !remove_labels.is_empty()
+                        || *draft == (!add_labels.is_empty() || !remove_labels.is_empty())
                         || if_version.is_some()
                     {
                         return Err(Error::invalid(
-                            "Matching edits support --draft only; use --match-label to select labels",
+                            "Use matching filters with --draft or with --label / --remove-label",
                         ));
                     }
                     Operation::Batch {
                         edits: vec![],
                         matching: Some(matching.clone()),
-                        change: Some(issues::MatchingChange::Edit { draft: true }),
+                        change: Some(if *draft {
+                            issues::MatchingChange::Edit { draft: true }
+                        } else {
+                            issues::MatchingChange::Labels {
+                                add_labels: add_labels.clone(),
+                                remove_labels: remove_labels.clone(),
+                            }
+                        }),
                         if_order_version: None,
                     }
                 }
@@ -1486,7 +1495,34 @@ impl Options {
                     }
                 }
             }
-            Action::Restore { number } => Operation::Restore { number: *number },
+            Action::Restore { number, matching } => {
+                if matching.is_empty() {
+                    Operation::Restore {
+                        number: number.ok_or_else(|| {
+                            Error::invalid("Supply an issue number or matching filters")
+                        })?,
+                    }
+                } else {
+                    if number.is_some()
+                        || matching
+                            .state
+                            .as_deref()
+                            .is_some_and(|state| state != "deleted")
+                    {
+                        return Err(Error::invalid(
+                            "Matching restore selects deleted issues; omit the number and use filters such as --match-label",
+                        ));
+                    }
+                    let mut matching = matching.clone();
+                    matching.state = Some("deleted".into());
+                    Operation::Batch {
+                        edits: vec![],
+                        matching: Some(matching),
+                        change: Some(issues::MatchingChange::Restore),
+                        if_order_version: None,
+                    }
+                }
+            }
             Action::Rpc
             | Action::Web { .. }
             | Action::DrainGithub { .. }
@@ -1517,6 +1553,7 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Reopen { .. }
                 | Action::BlockedBy { .. }
                 | Action::Batch { .. }
+                | Action::Restore { number: None, .. }
                 | Action::Delete {
                     number: None,
                     force: false,

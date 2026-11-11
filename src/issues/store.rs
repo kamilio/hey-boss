@@ -1940,7 +1940,20 @@ impl Store {
         {
             return self.finish_replay(r, response);
         }
-        let archive_targets = super::archive::mutation_targets(&r.operation);
+        let mut archive_targets = super::archive::mutation_targets(&r.operation);
+        if let Operation::Batch {
+            matching: Some(matcher),
+            change: Some(change),
+            ..
+        } = &r.operation
+            && !matches!(change, super::MatchingChange::Move { .. })
+        {
+            archive_targets.extend(
+                matching::select(&self.db, &detected, matcher, true)?
+                    .into_iter()
+                    .map(|row| row.0),
+            );
+        }
         for number in &archive_targets {
             super::archive::restore_issue(&self.db, &detected.id, *number, super::worker::now())?;
         }

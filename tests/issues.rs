@@ -3108,6 +3108,53 @@ fn matching_delete_preserves_busy_work_and_can_be_undone() {
 }
 
 #[test]
+fn matching_labels_delete_and_restore_the_same_drafts() {
+    let f = Fixture::new();
+    let tag = "migration bug findings";
+    for title in ["Draft one", "Draft two"] {
+        f.run(
+            "session-a",
+            &[
+                "create",
+                "--title",
+                title,
+                "--draft",
+                "--body",
+                "Keep the evidence",
+            ],
+        );
+    }
+    f.create();
+    f.run(
+        "session-a",
+        &["comment", "1", "--body", "Keep the discussion"],
+    );
+    let label = ["edit", "--match-draft", "--label", tag];
+    assert_eq!(f.run("session-a", &label)["changed_count"], 2);
+    assert_eq!(f.run("session-a", &label)["changed_count"], 0);
+    assert_eq!(
+        f.run("session-a", &["delete", "--match-label", tag])["changed_count"],
+        2
+    );
+    let restore = ["restore", "--match-label", tag];
+    assert_eq!(f.run("session-a", &restore)["changed_count"], 2);
+    assert_eq!(f.run("session-a", &restore)["changed_count"], 0);
+    let restored = f.run("reader", &["view", "1"]);
+    assert_eq!(restored["issue"]["draft"], true);
+    assert_eq!(restored["issue"]["labels"], json!([tag]));
+    assert_eq!(restored["issue"]["body"], "Keep the evidence");
+    assert_eq!(restored["comments"][0]["body"], "Keep the discussion");
+    assert!(
+        !f.run("reader", &["view", "3"])["issue"]["labels"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(tag))
+    );
+    f.fail("session-a", &["restore"], 2);
+    f.fail("session-a", &["restore", "--match-state", "open"], 2);
+}
+
+#[test]
 fn repeated_issue_moves_match_user_order_and_preserve_unique_positions() {
     let f = Fixture::new();
     let mut expected: Vec<i64> = (1..=7).collect();

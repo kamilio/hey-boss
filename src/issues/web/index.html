@@ -94,6 +94,7 @@
           >
           <div id="applied-issue-filters" class="applied-issue-filters" hidden><div id="active-issue-filters" class="active-issue-filters"></div><button id="clear-issue-filters" class="issue-filter-clear" type="button" hidden>Clear all</button></div>
           <button id="add-issue-filter" class="issue-filter-add" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="issue-filter-menu"><span data-icon="plus"></span>Add filter</button>
+          <button id="issue-batch-open" class="button" type="button" aria-haspopup="dialog" disabled>Batch actions</button>
           <button
               class="icon-button refresh"
               id="refresh"
@@ -568,6 +569,18 @@
           <p id="transfer-error" class="form-error" role="alert" hidden></p>
         </div>
         <div class="dialog-footer"><button type="button" class="button" data-transfer-cancel>Cancel</button><button type="submit" class="button primary" id="transfer-submit" disabled>Move issue<span data-icon="arrow-right"></span></button></div>
+      </form>
+    </dialog>
+    <dialog id="issue-batch-dialog" aria-labelledby="issue-batch-title">
+      <form id="issue-batch-form">
+        <div class="dialog-heading"><h2 id="issue-batch-title">Batch actions</h2></div>
+        <label class="batch-all"><input id="batch-all" type="checkbox"><strong id="batch-all-text"></strong></label>
+        <div id="batch-rows"></div>
+        <label class="field-label" for="batch-action">Action</label>
+        <select class="text-input" id="batch-action"><option value="labels">Add label</option><option value="delete">Move to Deleted</option><option value="restore">Restore issues</option></select>
+        <label id="batch-label-field" class="field-label">Label<input class="text-input" id="batch-label" maxlength="64" placeholder="Label name" autocomplete="off"></label>
+        <p id="batch-help"></p><p id="batch-error" role="alert" class="form-error" hidden></p>
+        <div class="dialog-footer"><span id="batch-count" role="status"></span><button class="button" id="batch-cancel" type="button">Cancel</button><button class="button primary" id="batch-submit" type="submit"></button></div>
       </form>
     </dialog>
     <dialog id="confirm-dialog" aria-labelledby="confirm-title">

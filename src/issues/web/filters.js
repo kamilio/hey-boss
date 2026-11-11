@@ -43,7 +43,7 @@ const IssueFilters = (() => {
       ]},
       {key:"draft", label:"Readiness", icon:"edit", options:[{value:"", label:"Any readiness"}, {value:"1", label:"Draft"}]},
       {key:"label", label:"Label / tag", icon:"tag", options:[{value:"", label:"Any label or tag"},
-        ...[...new Set([...model.labels, ...(model.route.label ? [model.route.label] : [])])].sort().map(value => ({value, label:value})),
+        ...[...new Set([...model.labels, ...(model.route.state === "deleted" ? (model.batchIssues || []).flatMap(i => i.labels) : []), ...(model.route.label ? [model.route.label] : [])])].sort().map(value => ({value, label:value})),
       ]},
       {key:"min_launches", label:"Agent launches", icon:"refresh", options:[{value:"", label:"Any number of launches"},
         ...[...new Set(["1", "5", "10", ...(model.route.min_launches ? [model.route.min_launches] : [])])].sort((a,b) => a-b).map(value => ({value, label:`${value}+ agent launches`})),

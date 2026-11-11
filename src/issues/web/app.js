@@ -899,6 +899,8 @@ function renderList(result) {
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueFilters.matches(issue, model.route))};
+  model.batchIssues = result.issues;
+  $("#issue-batch-open").disabled = !result.issues.length;
   model.bossAssigned = result.issues
     .filter(
       (issue) =>
@@ -1051,6 +1053,9 @@ async function renderRoute() {
   closeListActions();
   closeIssueTagPicker();
   const sequence = ++model.sequence;
+  $("#issue-batch-open").disabled = true;
+  $("#issue-batch-dialog").close();
+  model.batchIssues = [];
   const previous = model.project?.id;
   model.route = parseRoute();
   if (previous !== model.route.project || model.activeHost !== model.route.host) model.creators = [];
@@ -1174,6 +1179,7 @@ async function refresh(quiet = true) {
     document.hidden ||
     $("#editor-dialog").open ||
     $("#confirm-dialog").open ||
+    $("#issue-batch-dialog").open ||
     $("#transfer-dialog").open ||
     !!$(".issue-overflow[open]")
   )
@@ -2341,6 +2347,62 @@ document.addEventListener("click", async event => {
 document.addEventListener("keydown", event => {
   if (event.key === "Escape" && !$("dialog[open]")) $$(".issue-overflow[open]").forEach(menu => { menu.open = false; $("summary", menu).focus(); });
 });
+$("#issue-batch-open").onclick = () => {
+  const issues = model.batchIssues;
+  if (!issues.length || $("#issue-search").value !== model.route.search) return;
+  const {state, draft, label, project, host} = model.route, version = model.orderVersion, sequence = model.sequence;
+  const dialog = $("#issue-batch-dialog"), form = $("#issue-batch-form"), action = $("#batch-action"), input = $("#batch-label");
+  form.inert = false; form.reset();
+  const deleted = state === "deleted";
+  for (const option of action.options) option.hidden = (option.value === "restore") !== deleted;
+  action.value = deleted ? "restore" : "labels";
+  $("#batch-all-text").textContent = `Select all ${issues.length.toLocaleString()} matching issues`;
+  $("#batch-rows").innerHTML = issues.map(i => `<label><input type="checkbox" value="${i.number}"><span>#${i.number}</span>${esc(i.title)}</label>`).join("");
+  const checks = $$("#batch-rows input"), all = $("#batch-all"), submit = $("#batch-submit");
+  $("#batch-error").hidden = true;
+  let busy = false, selected = 0;
+  dialog.oncancel = e => { if (busy) e.preventDefault(); };
+  const update = () => {
+    all.checked = selected === checks.length;
+    all.indeterminate = selected > 0 && !all.checked;
+    $("#batch-count").textContent = selected.toLocaleString() + " selected";
+    $("#batch-label-field").hidden = action.value !== "labels";
+    input.required = action.value === "labels";
+    $("#batch-help").textContent = action.value === "delete" ? "Issues keep their labels and history. Restore them later from Deleted. Busy issues are skipped." : action.value === "restore" ? "Issues return to their previous state, unassigned, with labels and history intact." : "Existing labels stay on each issue.";
+    submit.textContent = action.selectedOptions[0].textContent;
+    submit.disabled = busy || !selected || (input.required && !input.value.trim());
+  };
+  form.onchange = e => {
+    if (e.target === input) return;
+    if (e.target === all) { for (const check of checks) check.checked = all.checked; selected = all.checked ? checks.length : 0; }
+    else if (e.target.closest("#batch-rows")) selected += e.target.checked ? 1 : -1;
+    update();
+  };
+  input.oninput = update;
+  $("#batch-cancel").onclick = () => dialog.close();
+  form.onsubmit = async e => {
+    e.preventDefault();
+    if (busy || submit.disabled || model.sequence !== sequence) return;
+    const numbers = checks.filter(c => c.checked).map(c => Number(c.value));
+    if (!numbers.length) return;
+    const matching = {state, numbers, ...(draft ? {draft:true} : {}), labels:label ? [label] : []};
+    const change = action.value === "labels" ? {action:"labels",add_labels:[input.value.trim()],remove_labels:[]} : {action:action.value};
+    busy = true; form.inert = true; update();
+    try {
+      const result = await mutate({action:"batch", matching, change, if_order_version:version}, project, host || null);
+      if (sequence !== model.sequence) return;
+      dialog.close();
+      detailCache.clear();
+      toast(`${result.changed_count} changed · ${result.skipped_count} skipped`);
+      await renderRoute();
+      await refreshProjects(project);
+    } catch (error) {
+      $("#batch-error").textContent = error.message;
+      $("#batch-error").hidden = false;
+    } finally { busy = false; form.inert = false; update(); }
+  };
+  update(); dialog.showModal();
+};
 function confirmDialog(title, message, submit, input = false) {
   return new Promise((resolve) => {
     confirmResolve = resolve;

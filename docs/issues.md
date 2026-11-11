@@ -757,7 +757,7 @@ hey-boss issue move 12             # Move to the end
 hey-boss issue list
 ```
 
-Use the same matcher with `move`, `edit --draft`, and `delete` to change matching
+Use the same matcher with `move`, `edit`, `delete`, and `restore` to change matching
 issues, including those beyond the first list page:
 
 ```sh
@@ -765,9 +765,15 @@ hey-boss issue move --match-label e2e-case --to bottom
 hey-boss issue move --match-label urgent --to top
 hey-boss issue edit --match-label e2e-case --draft
 hey-boss issue delete --match-label e2e-case
+
+hey-boss issue edit --match-draft --label "migration bug findings"
+hey-boss issue delete --match-label "migration bug findings"
+hey-boss issue restore --match-label "migration bug findings"
 ```
 
-Matchers default to open issues. Combine `--match-state`, repeated
+In the Issues page, open **Batch actions**, select individual matches or **Select all**, then add a label or move the selection to Deleted. To undo, filter the Deleted tab by that label and choose **Restore issues**. Labels, drafts, comments, and history are preserved.
+
+Matchers default to open issues; restore always selects from Deleted. Combine `--match-draft`, `--match-state`, repeated
 `--match-label` (all required), `--match-search` (literal title/body text),
 `--match-assignee`, or `--match-unassigned`. Selection happens at the authority
 inside one transaction. Moves preserve the relative order of both groups.
