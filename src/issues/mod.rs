@@ -10,6 +10,7 @@ pub mod commit_reviews;
 pub mod commits;
 mod dependency_notices;
 mod fleet;
+pub mod shelf;
 pub(crate) use fleet::INDEXES as FLEET_INDEXES;
 pub mod config_files;
 pub(crate) mod drafts;
@@ -456,6 +457,9 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         title: Option<String>,
     },
+    Shelf {
+        operation: shelf::Operation,
+    },
     CommitReview {
         number: i64,
         commit: String,
@@ -773,6 +777,9 @@ impl Operation {
         if let Self::ProjectInit { settings } = self {
             return settings.is_some();
         }
+        if let Self::Shelf { operation } = self {
+            return operation.writes();
+        }
         if let Self::CommitReview { operation, .. } = self {
             return operation.writes();
         }
@@ -827,7 +834,8 @@ impl Operation {
     }
     pub fn number(&self) -> Option<i64> {
         match self {
-            Self::Attachment { .. }
+            Self::Shelf { .. }
+            | Self::Attachment { .. }
             | Self::Job { .. }
             | Self::Artifact { .. }
             | Self::Batch { .. }

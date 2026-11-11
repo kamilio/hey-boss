@@ -22,6 +22,7 @@ pub(super) const TABLES: &[(&str, &[&str])] = &[
     ("issue_subtasks", &["project_id", "child_number"]),
     ("comments", &["id"]),
     ("events", &["id"]),
+    ("commit_shelf", &["project_id", "sha"]),
     ("commit_reviews", &["project_id", "issue_number", "sha"]),
     ("commit_review_comments", &["id"]),
     ("project_settings", &["project_id"]),
