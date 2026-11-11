@@ -7,7 +7,7 @@ use std::collections::HashSet;
 #[cfg(unix)]
 mod transport;
 #[cfg(unix)]
-pub use transport::run;
+pub use transport::{run, run_review};
 #[cfg(not(unix))]
 pub fn run(
     _: std::process::Command,

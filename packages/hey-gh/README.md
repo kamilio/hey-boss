@@ -1086,3 +1086,19 @@ explicitly installed. Custom `serve --listen/--cache/--hostname` instances remai
 separately owned; the service command manages only the default local instance.
 
 `ApiClient::pr_lifecycles` batches up to 25 distinct PR numbers into one personal-account GraphQL read. It returns lifecycle, title, authorship, and the original source validation times. Scoped missing/denied PRs appear in `errors` with `complete=false`; other independently validated records remain usable. Global errors and rate limits fail the read. The endpoint uses the shared queue, read deadlines, and repository/PR identity fences. Its cache is separate from generic GraphQL and REST metadata; these records do not establish CI or merge readiness.
+
+### Project Code Reviews
+
+Enable **Code Reviews** in project settings and run
+`packages/hey-gh/install-review-command.sh` on machines where agents use native
+`gh`. The installer keeps the previous eval wrapper for eval runs.
+PR review submissions and inline review comments for an enabled GitHub repository
+go to its private review queue. Use the usual `gh pr review` and `gh api`
+commands; no checkout, review-start command, or agent-specific flag is required.
+PR conversation and issue comments keep their normal behavior.
+
+Open **Code Reviews** in the project's navigation to edit a summary or inline
+comment and publish the submitted review with your personal GitHub login.
+Publication checks the PR head and the exact saved revision. An unconfirmed
+GitHub response stays pending for inspection rather than being posted twice.
+Review tables replicate through the existing project SQLite journal.
