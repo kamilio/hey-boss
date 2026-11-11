@@ -35,7 +35,7 @@ func agentRevision() throws -> String {
 func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
-    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-tools.md", "assets/conversation-agent.mjs", "assets/conversation-media.mjs", "assets/mermaid-LICENSE", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
+    for name in ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/conversation.md", "assets/conversation-title.md", "assets/conversation-visuals.md", "assets/conversation-tools/inspect_window.md", "assets/conversation-tools/hide_media.md", "assets/conversation-tools/show_media.md", "assets/conversation-tools/shell.md", "assets/conversation-tools/batch.md", "assets/conversation-agent.mjs", "assets/conversation-media.mjs", "assets/conversation-dot.mjs", "assets/mermaid-LICENSE", "assets/build-conversation-agent.mjs", "assets/signing-identity.sha1"] {
         hash.update(data: Data(name.utf8)); hash.update(data: Data([0]))
         hash.update(data: try Data(contentsOf: root.appendingPathComponent(name)))
         hash.update(data: Data([0]))
