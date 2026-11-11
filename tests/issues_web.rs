@@ -2151,9 +2151,9 @@ fn removed_mindmap_routes_are_not_served_or_advertised() {
 fn batch_unassign_from_boss_clears_allocations_protects_holds_and_releases_pickup() {
     let web = Web::start();
     let home_html = String::from_utf8(web.http("GET", "/", &[], b"").body).unwrap();
-    assert!(home_html.contains("id=\"unassign-boss-all\""));
+    assert!(!home_html.contains("id=\"unassign-boss-all\""));
     let script_js = String::from_utf8(web.http("GET", "/app.js", &[], b"").body).unwrap();
-    assert!(script_js.contains("unassign-boss-all"));
+    assert!(!script_js.contains("unassign-boss-all"));
 
     for title in ["First bug", "Second bug", "Protected bug"] {
         web.ok(json!({"action":"create","title":title,"body":"Repro","labels":[]}));
