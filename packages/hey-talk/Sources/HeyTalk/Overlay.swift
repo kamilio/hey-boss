@@ -130,6 +130,8 @@ final class Overlay {
     private let wave = WaveView()
     private let resultIcon = NSImageView()
     private let chatButton = NSButton()
+    private let listenPause = NSButton()
+    var onPauseListening: ((Bool) -> Void)?
     private var hover = false
     private let editSpelling = NSButton()
     private var addedTerm: String?
@@ -285,6 +287,9 @@ final class Overlay {
         chatButton.toolTip = "Start conversation · Hyper+C"; chatButton.setAccessibilityLabel("Start conversation")
         chatButton.target = self; chatButton.action = #selector(startConversation)
         pillContent.addSubview(chatButton)
+        listenPause.isBordered = false; listenPause.imagePosition = .imageOnly
+        listenPause.target = self; listenPause.action = #selector(pauseListening)
+        listenPause.isHidden = true; pillContent.addSubview(listenPause)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
         connecting.textColor = .secondaryLabelColor
         connecting.isHidden = true
@@ -436,14 +441,13 @@ final class Overlay {
             let symbol: String
             switch (conversation["phase"] as? String, conversation["message"] as? String) {
             case _ where conversation["approval"] as? Bool == true: symbol = "hand.raised.fill"
-            case (_, "Microphone muted"), ("idle", _): symbol = "mic.slash"
+            case (_, "Listening paused"), (_, "Microphone muted"), ("idle", _): symbol = "mic.slash"
             case (_, "Paused"): symbol = "pause.fill"
             case ("speaking", _): symbol = "speaker.wave.2.fill"
             case ("listening", _), ("recording", _): symbol = "mic.fill"
             default: symbol = "hourglass"
             }
             chatIcon.image = NSImage(systemSymbolName: symbol, accessibilityDescription: conversation["message"] as? String)
-            chatIcon.contentTintColor = conversation["approval"] as? Bool == true ? .systemOrange : next == .recording || conversation["phase"] as? String == "listening" ? TalkDesign.active : TalkDesign.accent
             identity.isHidden = true
             if next == .processing && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
                 chatIcon.isHidden = true; chatSpinner.startAnimation(nil)
@@ -453,7 +457,7 @@ final class Overlay {
         updateModeAppearance()
         wave.update(level: nil)
         wave.isHidden = next != .recording
-        wave.alphaValue = waitingForAudio ? 0.35 : 1
+        wave.alphaValue = waitingForAudio || conversation?["listeningPaused"] as? Bool == true ? 0.35 : 1
         identity.layer?.removeAllAnimations()
         glow.removeAllAnimations(); halo.removeAllAnimations()
         glow.isHidden = next != .processing || conversation != nil; halo.isHidden = next != .processing && !waitingForAudio
@@ -593,6 +597,10 @@ final class Overlay {
         onEditVocabulary?(addedTerm)
     }
     @objc private func showHistory() { onShowHistory?() }
+    @objc private func pauseListening() {
+        guard let paused = conversation?["listeningPaused"] as? Bool else { return }
+        onPauseListening?(!paused)
+    }
     @objc private func startConversation() { onStartConversation?() }
     @objc private func openTranscript() { onOpenTranscript?() }
     @objc private func chatWithContext() { onChatWithContext?() }
@@ -602,6 +610,7 @@ final class Overlay {
         if let conversation {
             let recording = ["listening", "recording"].contains(conversation["phase"] as? String)
             let color = conversation["approval"] as? Bool == true ? NSColor.systemOrange : recording ? TalkDesign.active : TalkDesign.accent
+            chatIcon.contentTintColor = conversation["listeningPaused"] as? Bool == true ? .secondaryLabelColor : color
             pillContent.accent = color; identity.color = color; wave.color = color
             autoHalo.isHidden = true
             pillContent.toolTip = (conversation["detail"] as? String ?? "") + " · " + (conversation["action"] as? String ?? "") + " · Separate dictation: Hyper+R"
@@ -654,12 +663,21 @@ final class Overlay {
         let statusWidth = labelX + connecting.frame.width + 12
         let leftExtension = confirmation.isHidden ? 0 : ceil(confirmation.frame.width) + 26 + (editSpelling.isHidden ? 0 : 26)
         let rightExtension = closingStatus ? 0 : status?.frame.width ?? 0
+        let pause = conversation?["listeningPaused"] as? Bool
+        listenPause.isHidden = pause == nil
+        if let pause {
+            let action = pause ? "Resume listening" : "Pause listening"
+            listenPause.image = NSImage(systemSymbolName: pause ? "play.fill" : "pause.fill", accessibilityDescription: nil)
+            listenPause.contentTintColor = pause ? TalkDesign.active : .labelColor
+            listenPause.toolTip = action; listenPause.setAccessibilityLabel(action)
+        }
         let showChat = hover && canRevealChat
         chatButton.isEnabled = showChat
         if showChat { chatButton.isHidden = false }
         else if !animate || !canRevealChat { chatButton.isHidden = true }
-        let size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
+        var size = pasteWait?.frame.size ?? notice.map { NSSize(width: max($0.frame.width, showConnecting ? statusWidth : TalkDesign.recordingSize.width), height: $0.frame.height + 36) }
             ?? (showConnecting ? NSSize(width: statusWidth, height: 36) : expanded ? TalkDesign.recordingSize : showChat ? NSSize(width: 84, height: 36) : TalkDesign.idleSize)
+        if pause != nil { size.width += 32 }
         // Status messages grow only the right edge of the window, keeping the recording control still.
         let baseWidth = max(200, size.width + 96, size.width + 2 * leftExtension + 16)
         let anchorX = baseWidth / 2
@@ -713,8 +731,10 @@ final class Overlay {
         depth.path = outline; depth.shadowPath = outline
         autoHalo.path = autoOutline
         CATransaction.commit()
-        let contentOrigin = leftExtension + (size.width - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
-        let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (showChat ? 13 : (size.width - 22) / 2)
+        let contentWidth = size.width - (pause == nil ? 0 : 32)
+        let contentOrigin = leftExtension + (contentWidth - (showConnecting ? statusWidth : TalkDesign.recordingSize.width)) / 2
+        let markX = expanded || showConnecting ? contentOrigin + 9 : leftExtension + (showChat ? 13 : (contentWidth - 22) / 2)
+        listenPause.frame = NSRect(x: leftExtension + contentWidth - 3, y: 1, width: 32, height: 34)
         chatIcon.frame = NSRect(x: markX + 2, y: 9, width: 18, height: 18)
         chatSpinner.frame = NSRect(x: markX + 3, y: 10, width: 16, height: 16)
         chatButton.frame = NSRect(x: 44, y: 3, width: 32, height: 30)
@@ -743,7 +763,7 @@ final class Overlay {
         CATransaction.commit()
         if let notice { notice.frame.origin = NSPoint(x: (width - notice.frame.width) / 2, y: 36) }
         status?.frame.origin = NSPoint(x: leftExtension + size.width, y: 0)
-        noticeRecordButton.isHidden = notice == nil && status == nil
+        noticeRecordButton.isHidden = pause == nil && notice == nil && status == nil
         pillContent.setAccessibilityRole(showChat || pasteWait != nil || !noticeRecordButton.isHidden ? .group : .button)
         noticeRecordButton.frame = NSRect(x: notice == nil ? markX - 7 : (width - 36) / 2, y: 0, width: 36, height: 36)
         noticeRecordButton.setAccessibilityLabel(conversation?["action"] as? String ?? (phase == .recording ? "Stop dictation" : "Start dictation"))
@@ -785,7 +805,7 @@ final class Overlay {
             RunLoop.main.add(ticker, forMode: .common); timer = ticker
             return
         }
-        guard phase == .recording, !waitingForAudio, enabled else { return }
+        guard phase == .recording, !waitingForAudio, conversation?["listeningPaused"] as? Bool != true, enabled else { return }
         let ticker = Timer(timeInterval: WaveView.interval, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.wave.update(level: self.level())

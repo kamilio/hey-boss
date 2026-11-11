@@ -24,6 +24,23 @@ final class OverlayTests: XCTestCase {
             XCTAssertTrue(surface.layer?.sublayers?.first { $0.name == "ai-disabled" }?.isHidden == true)
             XCTAssertFalse(panel.canBecomeKey)
         }
+        var requests: [Bool] = []
+        overlay.onPauseListening = { requests.append($0) }
+        overlay.onToggle = { XCTFail("Pause must not send or stop the conversation") }
+        for phase in ["listening", "recording"] {
+            var position: NSRect?
+            for paused in [false, true] {
+                overlay.showConversation(["phase": phase, "message": paused ? "Listening paused" : "Listening", "listeningPaused": paused])
+                let label = paused ? "Resume listening" : "Pause listening"
+                let button = try XCTUnwrap(all.compactMap { $0 as? NSButton }.first { !$0.isHidden && $0.accessibilityLabel() == label })
+                let rect = button.convert(button.bounds, to: panel.contentView)
+                XCTAssertTrue(panel.contentView?.hitTest(NSPoint(x: rect.midX, y: rect.midY)) === button)
+                if let position { XCTAssertEqual(position, rect) }
+                position = rect
+                button.performClick(nil)
+            }
+        }
+        XCTAssertEqual(requests, [true, false, true, false])
         overlay.showConversation(["phase": "thinking", "message": "Needs approval", "action": "Open chat", "approval": true])
         XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "New Chat"])
         overlay.showConversation(["phase": "speaking", "message": "Speaking", "action": "Stop voice", "interrupt": true])
