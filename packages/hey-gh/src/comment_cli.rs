@@ -66,7 +66,7 @@ pub async fn post(kind: &str, args: &CommentArgs, repo: Option<&str>) -> Result<
     argv.extend(["--body-file".into(), "-".into()]);
     let invocation = crate::cli_route::Invocation::parse(argv)?;
     let native = tokio::task::spawn_blocking(move || {
-        crate::cli_auth::command(&invocation).map_err(|error| error.to_string())
+        crate::cli_auth::command(&invocation, None).map_err(|error| error.to_string())
     })
     .await??;
     let mut command = tokio::process::Command::from(native.command);

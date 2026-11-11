@@ -8,12 +8,13 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn resolve(invocation: &Invocation) -> Result<Option<Invocation>> {
-    if invocation.auth == Auth::User || invocation.help() || builtin(invocation.root()) {
+pub fn resolve(invocation: &Invocation, bare: bool) -> Result<Option<Invocation>> {
+    if invocation.help() || builtin(invocation.root()) {
         return Ok(None);
     }
     // Local config only; never contact GitHub or consume the caller's stdin.
     let output = Command::new("gh")
+        .env("HEY_GH_NATIVE_CALL", "1")
         .args(["alias", "list"])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -37,7 +38,7 @@ pub fn resolve(invocation: &Invocation) -> Result<Option<Invocation>> {
             return Ok(Some(current));
         };
         if expansion.starts_with('!') {
-            if invocation.auth == Auth::App {
+            if bare || invocation.auth != Auth::Auto {
                 return Ok(None);
             }
             return Err("shell aliases require explicit --auth app or --auth user; their GitHub operations cannot be inferred".into());

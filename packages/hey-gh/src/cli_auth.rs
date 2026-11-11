@@ -13,10 +13,9 @@ pub struct Prepared {
     pub identity: Option<(String, String)>,
 }
 
-pub fn command(invocation: &Invocation) -> Result<Prepared> {
+pub fn command(invocation: &Invocation, resolved: Option<&Invocation>) -> Result<Prepared> {
     let original_args = &invocation.args;
-    let resolved = crate::cli_alias::resolve(invocation)?;
-    let invocation = resolved.as_ref().unwrap_or(invocation);
+    let invocation = resolved.unwrap_or(invocation);
     let options = option_values(&invocation.args);
     let comment = is_comment(invocation, &options)?;
     let app = !invocation.help()
@@ -26,7 +25,7 @@ pub fn command(invocation: &Invocation) -> Result<Prepared> {
             Auth::App => true,
         };
     let mut command = Command::new("gh");
-    command.args(original_args);
+    command.env("HEY_GH_NATIVE_CALL", "1").args(original_args);
     if !app {
         return Ok(Prepared {
             command,
@@ -37,22 +36,7 @@ pub fn command(invocation: &Invocation) -> Result<Prepared> {
         return Err("GitHub App comments cannot use a browser's personal login; omit --web or explicitly select --auth user".into());
     }
     let host = hostname(invocation, &options)?;
-    let token = match std::env::var("HEY_GH_APP_TOKEN") {
-        Ok(token) if hey_gh::app_auth::valid_cli_token(&token) => token,
-        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
-            return Err(
-                "HEY_GH_APP_TOKEN must contain a valid GitHub App installation token".into(),
-            );
-        }
-        Err(std::env::VarError::NotPresent) => {
-            let installation = hey_gh::app_auth::load(&host)?
-                .ok_or("GitHub App is not configured for this host; configure it with hey-gh app (personal authentication is never used as a fallback)")?;
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?
-                .block_on(installation.cli_token(&host))?
-        }
-    };
+    let token = app_token(&host)?;
     set_token(&mut command, &host, &token);
     // Native gh performs implicit user lookups and expands aliases itself. Its
     // private transport lets those reads retain personal selection without
@@ -188,7 +172,7 @@ fn is_comment(invocation: &Invocation, options: &[(String, Option<OsString>)]) -
         || (parts.first() == Some(&"gists") && parts.get(2) == Some(&"comments")))
 }
 
-fn graphql_comments(query: &str) -> bool {
+pub(crate) fn graphql_comments(query: &str) -> bool {
     use graphql_parser::query::{Definition, OperationDefinition, Selection, SelectionSet};
     fn contains(set: &SelectionSet<'_, String>) -> bool {
         set.items.iter().any(|selection| match selection {
@@ -291,6 +275,7 @@ fn hostname(invocation: &Invocation, options: &[(String, Option<OsString>)]) -> 
     }
     if matches!(invocation.root(), "pr" | "issue") {
         let output = Command::new("gh")
+            .env("HEY_GH_NATIVE_CALL", "1")
             .args(["repo", "view", "--json", "url"])
             .stdin(Stdio::null())
             .output()?;
@@ -316,4 +301,23 @@ fn url_host(value: &str) -> Result<String> {
         .host_str()
         .ok_or("invalid GitHub URL")?
         .to_ascii_lowercase())
+}
+
+pub(crate) fn app_token(host: &str) -> Result<String> {
+    Ok(match std::env::var("HEY_GH_APP_TOKEN") {
+        Ok(token) if hey_gh::app_auth::valid_cli_token(&token) => token,
+        Ok(_) | Err(std::env::VarError::NotUnicode(_)) => {
+            return Err(
+                "HEY_GH_APP_TOKEN must contain a valid GitHub App installation token".into(),
+            );
+        }
+        Err(std::env::VarError::NotPresent) => {
+            let installation = hey_gh::app_auth::load(host)?
+                .ok_or("GitHub App is not configured for this host; configure it with hey-gh app (personal authentication is never used as a fallback)")?;
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(installation.cli_token(host))?
+        }
+    })
 }

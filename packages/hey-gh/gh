@@ -1,0 +1,11 @@
+#!/bin/sh
+# Installed in front of native gh on machines that use project Code Reviews.
+set -eu
+bindir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+dispatch="$bindir/.hey-gh-dispatch"
+if [ "${HEY_GH_NATIVE_CALL:-}" = 1 ]; then unset HEY_GH_NATIVE_CALL; exec "$dispatch/native" "$@"; fi
+if [ "${AGENT_EVAL:-}" = 1 ] && [ -x "$dispatch/previous" ]; then
+  HEY_GH_NATIVE_CALL=1; export HEY_GH_NATIVE_CALL
+  exec "$dispatch/previous" "$@"
+fi
+exec hey-gh __gh "$@"

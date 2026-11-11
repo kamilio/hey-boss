@@ -12,6 +12,8 @@ mod log_summary;
 mod logging;
 mod read_deadline;
 mod release_cli;
+mod review_graphql;
+mod review_intercept;
 mod service;
 mod skill_install;
 
@@ -233,15 +235,54 @@ enum IssueAction {
 }
 
 fn main() {
-    let invocation = match cli_route::Invocation::parse(std::env::args_os().skip(1).collect()) {
+    let mut args: Vec<_> = std::env::args_os().skip(1).collect();
+    let bare = args.first().is_some_and(|arg| arg == "__gh");
+    if bare {
+        args.remove(0);
+    }
+    let native_args = args.clone();
+    let invocation = match cli_route::Invocation::parse(args) {
         Ok(invocation) => invocation,
         Err(error) => {
             eprintln!("hey-gh: {error}");
             std::process::exit(2);
         }
     };
-    if !invocation.cached {
-        let result = cli_auth::command(&invocation).and_then(|prepared| {
+    if bare || !invocation.cached {
+        let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+            let alias = if !invocation.cached {
+                cli_alias::resolve(&invocation, bare)?
+            } else {
+                None
+            };
+            if let Some(target) =
+                review_intercept::select(alias.as_ref().unwrap_or(&invocation), bare)?
+            {
+                let mut native = std::process::Command::new("gh");
+                native.env("HEY_GH_NATIVE_CALL", "1").args(if bare {
+                    &native_args
+                } else {
+                    &invocation.args
+                });
+                let status = cli_identity::run_review(native, target)?;
+                use std::os::unix::process::ExitStatusExt;
+                if let Some(signal) = status.signal() {
+                    unsafe {
+                        libc::signal(signal, libc::SIG_DFL);
+                        libc::raise(signal);
+                    }
+                }
+                std::process::exit(status.code().unwrap_or(1))
+            }
+            if bare {
+                use std::os::unix::process::CommandExt;
+                return Err(std::process::Command::new("gh")
+                    .env("HEY_GH_NATIVE_CALL", "1")
+                    .args(native_args)
+                    .exec()
+                    .into());
+            }
+            let prepared = cli_auth::command(&invocation, alias.as_ref())?;
             let mut command = prepared.command;
             if let Some((host, token)) = prepared.identity {
                 let status = cli_identity::run(command, host, token)?;
@@ -266,7 +307,7 @@ fn main() {
             {
                 std::process::exit(command.status()?.code().unwrap_or(1));
             }
-        });
+        })();
         if let Err(error) = result as Result<(), Box<dyn std::error::Error>> {
             eprintln!("hey-gh: {error}");
             std::process::exit(1);

@@ -19,11 +19,35 @@ use tokio::sync::OnceCell;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub fn run(mut command: Command, host: String, token: String) -> Result<ExitStatus> {
+pub fn run(command: Command, host: String, token: String) -> Result<ExitStatus> {
+    run_with(command, host, token, None)
+}
+pub fn run_review(command: Command, target: crate::review_intercept::Target) -> Result<ExitStatus> {
+    run_with(
+        command,
+        "github.com".into(),
+        String::new(),
+        Some(Arc::new(target)),
+    )
+}
+fn run_with(
+    mut command: Command,
+    host: String,
+    token: String,
+    target: Option<Arc<crate::review_intercept::Target>>,
+) -> Result<ExitStatus> {
     use std::os::unix::fs::{PermissionsExt, symlink};
-    let directory = tempfile::Builder::new()
-        .prefix("hey-gh-")
-        .tempdir_in("/tmp")?;
+    let directory = if target.is_some() {
+        let root = dirs::home_dir()
+            .ok_or("Cannot locate review socket directory")?
+            .join(".cache/hey-gh");
+        std::fs::create_dir_all(&root)?;
+        tempfile::Builder::new().prefix("r-").tempdir_in(root)?
+    } else {
+        tempfile::Builder::new()
+            .prefix("hey-gh-")
+            .tempdir_in("/tmp")?
+    };
     let socket = directory.path().join("http.sock");
     let config = directory.path().join("config");
     std::fs::create_dir(&config)?;
@@ -38,6 +62,11 @@ pub fn run(mut command: Command, host: String, token: String) -> Result<ExitStat
     if settings.is_null() {
         settings = serde_yaml::Value::Mapping(Default::default());
     }
+    let prior_socket = settings
+        .get("http_unix_socket")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from);
     settings
         .as_mapping_mut()
         .ok_or("invalid gh config.yml")?
@@ -70,7 +99,19 @@ pub fn run(mut command: Command, host: String, token: String) -> Result<ExitStat
     runtime.block_on(async {
         let listener = tokio::net::UnixListener::bind(&socket)?;
         std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600))?;
-        let state = Arc::new(Transport::new(host, token)?);
+        let mut state = Transport::new(host, token)?;
+        if target.is_some()
+            && let Some(socket) = prior_socket
+        {
+            state.client = reqwest::Client::builder()
+                .unix_socket(socket)
+                .timeout(Duration::from_secs(30))
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?;
+            state.socket_upstream = true;
+        }
+        state.review = target;
+        let state = Arc::new(state);
         let app = Router::new().fallback(any(relay)).with_state(state);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let result = wait_for_command(command).await;
@@ -122,6 +163,8 @@ async fn wait_for_command(command: Command) -> Result<ExitStatus> {
 }
 
 struct Transport {
+    review: Option<Arc<crate::review_intercept::Target>>,
+    socket_upstream: bool,
     host: String,
     app_token: String,
     client: reqwest::Client,
@@ -132,6 +175,8 @@ struct Transport {
 impl Transport {
     fn new(host: String, app_token: String) -> Result<Self> {
         Ok(Self {
+            review: None,
+            socket_upstream: false,
             host,
             app_token,
             client: reqwest::Client::builder()
@@ -158,6 +203,7 @@ impl Transport {
         let output = tokio::time::timeout(
             Duration::from_secs(30),
             tokio::process::Command::new("gh")
+                .env("HEY_GH_NATIVE_CALL", "1")
                 .args(args)
                 .args(["--hostname", &self.host])
                 .stdin(Stdio::null())
@@ -211,6 +257,15 @@ impl Transport {
 
 async fn relay(State(state): State<Arc<Transport>>, request: Request<Body>) -> Response<Body> {
     let result = async {
+        if let Some(target) = &state.review {
+            return crate::review_intercept::relay(
+                target.clone(),
+                &state.client,
+                state.socket_upstream,
+                request,
+            )
+            .await;
+        }
         let host = request
             .headers()
             .get("host")
