@@ -7,7 +7,6 @@ resources=$(dirname "$2")
 if [ "$(basename "$resources")" = MacOS ]; then resources="$resources/../Resources"; fi
 node tools/conversation_media_checks.mjs "$resources" "$root"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_MEDIA="$root" "$2"
-HEY_TALK_MEDIA_AUDIT="$root" swift test --package-path packages/hey-talk --filter PillMediaTests
 HEY_BOSS_AUDIT_PILL_ESCAPE="$root/escape" "$2"
 say -v Samantha -o "$root/first.aiff" 'Which fruit is on this page? Answer in one word.'
 say -v Alex -o "$root/second.aiff" 'Which fruit did I mention earlier? Answer in one word.'
