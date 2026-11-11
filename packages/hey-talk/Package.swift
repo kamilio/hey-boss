@@ -8,7 +8,7 @@ let package = Package(
     targets: [
         .target(name: "TalkCore"),
         .target(name: "CSherpa", publicHeadersPath: "include"),
-        .executableTarget(name: "HeyTalk", dependencies: ["TalkCore", "CSherpa"], resources: [.process("Prompts")]),
+        .executableTarget(name: "HeyTalk", dependencies: ["TalkCore", "CSherpa"], resources: [.process("Prompts"), .copy("speech-model.json")]),
         .testTarget(name: "TalkCoreTests", dependencies: ["TalkCore"]),
         .testTarget(name: "HeyTalkTests", dependencies: ["HeyTalk"]),
     ],

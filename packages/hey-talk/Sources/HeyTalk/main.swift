@@ -8,7 +8,8 @@ let arguments = Array(CommandLine.arguments.dropFirst())
 do {
     if arguments.first == "--speech-worker" {
         guard arguments.count == 1 || arguments.count == 4 else { throw TalkError("Invalid speech worker arguments") }
-        try runSpeechWorker(model: arguments.count == 4 ? arguments[1] : SpeechModel.directory.path,
+        guard let model = SpeechModel.selected else { throw TalkError("Reinstall Hey Talk to restore the speech model manifest.") }
+        try runSpeechWorker(model: arguments.count == 4 ? arguments[1] : model.directory.path, voice: model.voice,
             library: arguments.count == 4 ? arguments[2] : ModelPaths.library.path,
             alignmentModel: arguments.count == 4 ? arguments[3] : ModelPaths.directory.path)
     } else if arguments.first == "--worker" {

@@ -8,7 +8,7 @@ final class SpeechInferenceTests: XCTestCase {
         guard let path = ProcessInfo.processInfo.environment["HEY_TALK_TEST_APP"] else { throw XCTSkip("Run test-speech.sh after building the app") }
         let app = URL(fileURLWithPath: path), worker = Process(), input = Pipe(), output = Pipe()
         worker.executableURL = app.appendingPathComponent("Contents/Helpers/hey-talk-inference")
-        worker.arguments = ["--speech-worker", SpeechModel.directory.path, app.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib").path, "/nonexistent-word-alignment-model"]
+        worker.arguments = ["--speech-worker", try XCTUnwrap(SpeechModel.selected).directory.path, app.appendingPathComponent("Contents/Frameworks/libsherpa-onnx-c-api.dylib").path, "/nonexistent-word-alignment-model"]
         worker.standardInput = input; worker.standardOutput = output
         try Wire.prepare(input.fileHandleForWriting.fileDescriptor); try Wire.prepare(output.fileHandleForReading.fileDescriptor)
         try worker.run()
@@ -24,7 +24,7 @@ final class SpeechInferenceTests: XCTestCase {
         let alignment = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30)) as? [String: Any]
         XCTAssertEqual(alignment?["tokens"] as? [String], [], "Missing alignment uses the existing phrase highlight")
     }
-    func testPackagedPocketMaryProducesAudibleRecognizableSpeech() throws {
+    func testPackagedModelProducesAudibleRecognizableSpeech() throws {
         guard let path = ProcessInfo.processInfo.environment["HEY_TALK_TEST_APP"] else {
             throw XCTSkip("Run test-speech.sh after building the app")
         }
@@ -40,9 +40,9 @@ final class SpeechInferenceTests: XCTestCase {
         let ready = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 60)) as? [String: Any]
         XCTAssertEqual(ready?["ready"] as? Bool, true, "\(ready ?? [:])")
         XCTAssertEqual(ready?["engine"] as? String, "pocket-tts")
-        XCTAssertEqual(ready?["voice"] as? String, "mary")
+        XCTAssertEqual(ready?["voice"] as? String, try XCTUnwrap(SpeechModel.selected).voice)
         guard ready?["ready"] as? Bool == true else { return }
-        print("Pocket Mary model load: \(Int((ProcessInfo.processInfo.systemUptime - cold) * 1000))ms")
+        print("Speech model load: \(Int((ProcessInfo.processInfo.systemUptime - cold) * 1000))ms")
         var first: [Float] = []
         var alignedSentences = 0
         let sentences = ["Hello there. This paragraph can now be read aloud.", "The quick brown fox jumps over the lazy dog.", "Speech stays on this computer."]
@@ -63,7 +63,7 @@ final class SpeechInferenceTests: XCTestCase {
             let samples = data.withUnsafeBytes { bytes in stride(from: 0, to: data.count, by: 4).map { bytes.loadUnaligned(fromByteOffset: $0, as: Float.self) } }
             XCTAssertTrue(samples.allSatisfy(\.isFinite))
             XCTAssertGreaterThan(samples.map { abs($0) }.max() ?? 0, 0.01)
-            print("Pocket Mary generation: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))ms for \(String(format: "%.2f", Double(count) / 24_000))s audio")
+            print("Speech model generation: \(Int((ProcessInfo.processInfo.systemUptime - start) * 1000))ms for \(String(format: "%.2f", Double(count) / 24_000))s audio")
             let alignment = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor)) as? [String: Any]
             let words = SpeechTiming.align(text: text, tokens: alignment?["tokens"] as? [String] ?? [], times: alignment?["timestamps"] as? [Double] ?? [], duration: Double(count) / 24_000)
             if !words.isEmpty {
@@ -98,7 +98,7 @@ final class SpeechInferenceTests: XCTestCase {
         try Wire.write(PCMFrame.encode(samples), to: ri.fileHandleForWriting.fileDescriptor)
         let result = try JSONSerialization.jsonObject(with: Wire.line(from: ro.fileHandleForReading.fileDescriptor)) as? [String: Any]
         let heard = try XCTUnwrap(result?["text"] as? String).lowercased()
-        print("Pocket Mary recognized: \(heard)")
+        print("Speech model recognized: \(heard)")
         for word in ["hello", "paragraph", "read", "aloud"] { XCTAssertTrue(heard.contains(word), heard) }
     }
 }

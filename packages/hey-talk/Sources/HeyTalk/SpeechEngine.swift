@@ -17,11 +17,19 @@ protocol SpeechEngine: AnyObject {
     func cancel()
 }
 
-enum SpeechModel {
-    static let name = "pocket-tts-english-2026-10"
-    static let voice = "mary"
-    static var directory: URL { ControlSocket.directory.appendingPathComponent("models/" + name) }
-    static var available: Bool {
+struct SpeechModel: Decodable {
+    let name: String
+    let voice: String
+    static let selected: SpeechModel? = {
+        let contents = ModelPaths.contents
+        let url = contents.lastPathComponent == "Contents"
+            ? contents.appendingPathComponent("Resources/speech-model.json")
+            : Bundle.module.url(forResource: "speech-model", withExtension: "json")
+        guard let url, let data = try? Data(contentsOf: url) else { return nil }
+        return try? JSONDecoder().decode(Self.self, from: data)
+    }()
+    var directory: URL { ControlSocket.directory.appendingPathComponent("models/" + name) }
+    var available: Bool {
         ["config.yaml", "model.safetensors", "tokenizer.json", voice + ".safetensors"].allSatisfy {
             FileManager.default.isReadableFile(atPath: directory.appendingPathComponent($0).path)
         } && FileManager.default.isExecutableFile(atPath: ModelPaths.contents.appendingPathComponent("Helpers/pocket-tts").path)
@@ -81,7 +89,7 @@ final class LocalSpeechEngine: SpeechEngine {
         lock.lock()
         guard ticket == epoch else { lock.unlock(); throw TalkError("Speech cancelled") }
         if process?.isRunning == true, let input, let output { lock.unlock(); return (input, output) }
-        guard SpeechModel.available else { lock.unlock(); throw TalkError("Speech model missing. Run the Hey Talk installer.") }
+        guard SpeechModel.selected?.available == true else { lock.unlock(); throw TalkError("Speech model missing. Run the Hey Talk installer.") }
         let child = Process(), stdin = Pipe(), stdout = Pipe()
         child.executableURL = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/hey-talk-inference")
         child.arguments = ["--speech-worker"]
@@ -137,7 +145,7 @@ private final class SpeechAlignment {
     deinit { if let recognizer { ht_destroy(recognizer) } }
 }
 
-func runSpeechWorker(model: String, library: String, alignmentModel: String) throws {
+func runSpeechWorker(model: String, voice: String, library: String, alignmentModel: String) throws {
     try Wire.prepare(STDIN_FILENO); try Wire.prepare(STDOUT_FILENO)
     let speech = PocketSpeech()
     let parentWatch = DispatchSource.makeProcessSource(identifier: getppid(), eventMask: .exit, queue: .global())
@@ -146,8 +154,8 @@ func runSpeechWorker(model: String, library: String, alignmentModel: String) thr
     let termination = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
     termination.setEventHandler { speech.stop(); _exit(0) }; termination.resume()
     defer { speech.stop(); parentWatch.cancel(); termination.cancel() }
-    try speech.start(model: model)
-    try Wire.write(Wire.json(["ready": true, "engine": "pocket-tts", "voice": SpeechModel.voice]), to: STDOUT_FILENO)
+    try speech.start(model: model, voice: voice)
+    try Wire.write(Wire.json(["ready": true, "engine": "pocket-tts", "voice": voice]), to: STDOUT_FILENO)
     let alignment = SpeechAlignment(library: library, model: alignmentModel)
     while true {
         let request = try Wire.line(from: STDIN_FILENO, timeout: 86_400, limit: 16_384)

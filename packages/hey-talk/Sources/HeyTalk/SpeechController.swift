@@ -65,7 +65,7 @@ final class SpeechController {
         var result = settings.json
         result["state"] = preparing != nil ? "loading" : playback.state.rawValue
         if recapSource != nil { result["source"] = "catch-up" }
-        result["model"] = SpeechModel.name; result["voice"] = SpeechModel.voice; result["model_ready"] = SpeechModel.available
+        result["model"] = SpeechModel.selected?.name; result["voice"] = SpeechModel.selected?.voice; result["model_ready"] = SpeechModel.selected?.available == true
         result["rate"] = playback.rate; result["overlay"] = overlay.visible
         result["first_audio_ms"] = playback.firstAudioMS
         result["worker_pid"] = engine.pid
