@@ -50,7 +50,8 @@ final class SlackToolsTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["HEY_TALK_SLACK_NAV"] == "1" else { throw XCTSkip("Opt-in navigation in Slack") }
         let app = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.tinyspeck.slackmacgap").first)
         let original = try XCTUnwrap(SlackTools.route(app)), path = original.pathComponents
-        let originalLink = try XCTUnwrap(FocusedInput.slackLink(original.absoluteString, threadInput: nil))
+        let originalLink = try XCTUnwrap(FocusedInput.slackDestination(original.absoluteString, threadInput: nil))
+        guard originalLink.hasPrefix("slack://channel?") else { throw XCTSkip("Requires a conversation that can be reopened") }
         let previous = NSWorkspace.shared.frontmostApplication, api = SlackAPI()
         let auth = try await api.call("auth.test", [:])
         let me = try XCTUnwrap(auth["user_id"] as? String)
