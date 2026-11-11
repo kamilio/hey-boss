@@ -422,7 +422,10 @@ pub async fn relay(
             return Ok(make_json(v, 200));
         }
     }
-    let mut app_token = None;
+    let mut use_app = path == "/graphql"
+        && method == "GET"
+        && target.repo.is_empty()
+        && target.auth == crate::cli_route::Auth::App;
     if path == "/graphql" && method != "GET" {
         let t = target.clone();
         let i = input.clone();
@@ -435,15 +438,7 @@ pub async fn relay(
                 let needs_app = target.auth == crate::cli_route::Auth::App
                     || target.auth == crate::cli_route::Auth::Auto
                         && matches!(d, crate::review_graphql::Decision::Forward(true));
-                if needs_app && target.repo.is_empty() {
-                    app_token = Some(
-                        tokio::task::spawn_blocking(|| {
-                            crate::cli_auth::app_token("github.com").map_err(|e| e.to_string())
-                        })
-                        .await
-                        .map_err(|_| "App token lookup failed")??,
-                    )
-                }
+                use_app = needs_app && target.repo.is_empty();
             }
         }
     } else if !matches!(method.as_str(), "GET" | "HEAD") {
@@ -466,6 +461,20 @@ pub async fn relay(
             .map(|p| p.as_str())
             .unwrap_or("/")
     );
+    if use_app {
+        let token = tokio::task::spawn_blocking(|| {
+            crate::cli_auth::app_token("github.com").map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|_| "App token lookup failed")??;
+        return crate::cli_identity::forward_review_app(
+            client,
+            Request::from_parts(parts, Body::from(bytes)),
+            url.parse().map_err(|_| "Invalid GitHub URL")?,
+            token,
+        )
+        .await;
+    }
     let mut headers = parts.headers;
     for name in [
         "host",
@@ -476,10 +485,7 @@ pub async fn relay(
     ] {
         headers.remove(name);
     }
-    let mut upstream = client.request(parts.method, url).headers(headers);
-    if let Some(token) = app_token {
-        upstream = upstream.bearer_auth(token)
-    }
+    let upstream = client.request(parts.method, url).headers(headers);
     let upstream = upstream
         .body(bytes)
         .send()

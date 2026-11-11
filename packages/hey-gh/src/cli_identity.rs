@@ -7,6 +7,8 @@ use std::collections::HashSet;
 #[cfg(unix)]
 mod transport;
 #[cfg(unix)]
+pub(crate) use transport::forward_review_app;
+#[cfg(unix)]
 pub use transport::{run, run_review};
 #[cfg(not(unix))]
 pub fn run(

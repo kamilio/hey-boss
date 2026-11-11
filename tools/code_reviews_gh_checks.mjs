@@ -76,6 +76,7 @@ const ok = async (...args) => {
   assert.equal(r.code, 0, r.stderr + r.stdout);
   return r.stdout;
 };
+const graphReads = [];
 const hub = createServer(async (req, res) => {
   let bytes = "";
   for await (const b of req) bytes += b;
@@ -84,6 +85,8 @@ const hub = createServer(async (req, res) => {
   const mut =
     req.method !== "GET" &&
     !(path === "/graphql" && !/\bmutation\b/.test(val.query));
+  if (path === "/graphql" && !mut)
+    graphReads.push({ auth: req.headers.authorization, query: val.query });
   if (mut) writes.push({ path, auth: req.headers.authorization });
   let result = {};
   if (path === "/graphql") {
@@ -105,7 +108,8 @@ const hub = createServer(async (req, res) => {
         node: { ...pr, repository: { nameWithOwner: "example/time" } },
       },
     };
-  } else if (path.endsWith("/files"))
+  } else if (path === "/user") result = { login: "fixture-human" };
+  else if (path.endsWith("/files"))
     result = [
       {
         filename: "time.rs",
@@ -255,6 +259,23 @@ try {
     "event=APPROVE",
   ]);
   assert.match(writes[1].auth, /fixture-personal$/);
+  await ok(hey, [
+    "api",
+    "graphql",
+    "-f",
+    'query=mutation { addComment(input:{subjectId:"outside",body:"hello"}) {clientMutationId} }',
+  ]);
+  assert.match(writes.at(-1).auth, /fixture-app$/);
+  await ok(hey, [
+    "--auth",
+    "app",
+    "api",
+    "graphql",
+    "-f",
+    "query={ viewer { login } }",
+  ]);
+  assert.match(graphReads.at(-1).auth, /fixture-app$/);
+  assert.match(graphReads.at(-1).query, /user\(login: "fixture-human"\)/);
   console.log(
     "Native gh: stdin, aliases, body-file, REST inline comments, review submission, GraphQL drafts and threads, readback, invalid anchors, disabled projects and both identities passed.",
   );
