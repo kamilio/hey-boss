@@ -103,6 +103,8 @@ fn issue_collection(route: &Route, options: &Options) -> Result<Value> {
     let mut value = execute(route, options, operation)?;
     // The browser refines the complete collection before counting and paging.
     // Keep old/invalid URL values inert, just like IssueFilters.read.
+    let created_by = param("created_by");
+    let drafts_only = param("draft") == "1";
     let raw_min = param("min_launches");
     let min = raw_min
         .parse::<u64>()
@@ -116,6 +118,12 @@ fn issue_collection(route: &Route, options: &Options) -> Result<Value> {
     };
     if let Some(issues) = value["issues"].as_array_mut() {
         issues.retain(|issue| {
+            if !created_by.is_empty() && issue["created_by"] != created_by {
+                return false;
+            }
+            if drafts_only && issue["draft"] != true {
+                return false;
+            }
             if issue["agent_launch_count"].as_u64().unwrap_or(0) < min {
                 return false;
             }

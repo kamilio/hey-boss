@@ -42,12 +42,12 @@ let web;
     'Preserve filters in shared links',
     'Retire the old assignment selector',
   ];
-  for (const [index,title] of titles.entries()) await api({action:'create',title,body:'Isolated filter verification.',labels:[index === 2 ? 'interface' : 'reliability', 'needs & review']});
+  for (const [index,title] of titles.entries()) await api({action:'create',title,body:'Isolated filter verification.',draft:index === 2,labels:[index === 2 ? 'interface' : 'reliability', 'needs & review']});
   for (const number of [4,6]) await api({action:'block',number,comment:'Waiting for a decision.',force:false});
   for (const number of [5,6]) await api({action:'set_blockers',number,blockers:[3],force:false});
   await api({action:'close',number:7,force:false});
   await api({action:'delete',number:8,force:false});
-  sql("UPDATE issues SET assignee='human:boss' WHERE number IN (1,2); UPDATE issues SET manual_blocked=1 WHERE number=6;");
+  sql("UPDATE issues SET created_by='human:qa' WHERE number IN (2,3); UPDATE issues SET assignee='human:boss' WHERE number IN (1,2); UPDATE issues SET manual_blocked=1 WHERE number=6;");
   for (const [index,count] of [5,4,8,6,7,10,5,6].entries()) {
     for (let launch=0;launch<count;launch++) sql(`INSERT INTO issue_agent_launches VALUES('run-${index}-${launch}','named:Filter QA',${index+1},1);`);
   }
@@ -78,6 +78,15 @@ let web;
       };
       await page.goto(url('open'));
       await expect([1,2,3]);
+      await page.getByRole('link',{name:'Filter by draft issues'}).click(); await expect([3]);
+      await choose('created_by','human:qa'); await expect([3]);
+      await page.reload(); await expect([3]);
+      await preset('draft').click(); await expect([2,3]);
+      await page.getByRole('button',{name:'Remove Created by filter'}).click(); await expect([1,2,3]);
+      await preset('draft').click(); await expect([3]);
+      await preset('draft').click(); await expect([1,2,3]);
+      await choose('draft','1'); await expect([3]);
+      await page.getByRole('button',{name:'Remove Readiness filter'}).click(); await expect([1,2,3]);
       await preset('min_launches').click(); await expect([1,3]);
       await preset('owner').click(); await expect([1]);
       sql("INSERT INTO issue_agent_launches VALUES('new-launch','named:Filter QA',2,1);");
@@ -98,11 +107,11 @@ let web;
 
       // Search directly across filter categories, including escaped labels.
       await page.getByRole('button',{name:'Add filter',exact:true}).click();
-      await page.getByRole('searchbox',{name:'Search filters'}).fill('needs & review');
+      await page.getByRole('searchbox',{name:'Search filters'}).fill('tag needs & review');
       await page.getByRole('searchbox',{name:'Search filters'}).press('ArrowDown');
       await page.keyboard.press('Enter'); await expect([1,2,3]);
       assert.equal(new URL(page.url()).hash.includes('needs+%26+review'), true);
-      await page.getByRole('button',{name:'Remove Label filter',exact:true}).click();
+      await page.getByRole('button',{name:'Remove Label / tag filter',exact:true}).click();
       await page.getByRole('button',{name:'Add filter',exact:true}).click();
       await page.keyboard.press('Escape');
       assert.equal(await page.locator('#add-issue-filter').evaluate(el => el === document.activeElement), true);
@@ -142,7 +151,7 @@ let web;
         await page.emulateMedia({colorScheme:scheme,reducedMotion:'reduce'});
         await page.setViewportSize({width,height:1000});
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `${engine.name()} ${scheme}/${width}: no horizontal overflow`);
-        for (const key of ['min_launches','owner','blocked']) {
+        for (const key of ['min_launches','owner','draft','blocked']) {
           const bounds = await preset(key).boundingBox();
           assert.ok(bounds && bounds.x >= 0 && bounds.x+bounds.width <= width && bounds.height >= 30);
         }

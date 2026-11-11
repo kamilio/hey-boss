@@ -1,20 +1,26 @@
 "use strict";
 const IssueFilters = (() => {
-  const empty = {owner:"all", label:"", blocked:"", min_launches:"", search:""};
+  const empty = {owner:"all", created_by:"", label:"", blocked:"", draft:"", min_launches:"", search:""};
   function read(params) {
     const value = params.get("min_launches") || "";
     return {
+      created_by: params.get("created_by") || "",
+      draft: params.get("draft") === "1" ? "1" : "",
       min_launches: /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? value : "",
       blocked: params.get("state") === "blocked" && ["hold", "dependencies"].includes(params.get("blocked")) ? params.get("blocked") : "",
     };
   }
   function matches(issue, route) {
-    return (issue.agent_launch_count || 0) >= Number(route.min_launches || 0) && IssueBlockers.matches(issue, route.blocked);
+    return (!route.created_by || issue.created_by === route.created_by)
+      && (!route.draft || issue.draft === true)
+      && (issue.agent_launch_count || 0) >= Number(route.min_launches || 0)
+      && IssueBlockers.matches(issue, route.blocked);
   }
   function presets(route) {
     return [
       {key:"min_launches", value:"5", label:"5+ agent launches", icon:"refresh"},
       {key:"owner", value:"human:boss", label:"Assigned to boss", icon:"hat"},
+      {key:"draft", value:"1", label:"Draft", icon:"edit"},
       ...(route.state === "blocked" ? [{key:"blocked", value:"hold", label:"On hold", icon:"blocked"}] : []),
     ];
   }
@@ -30,7 +36,13 @@ const IssueFilters = (() => {
         {value:"unassigned", label:"Unassigned"},
         ...owners.filter(id => id !== "human:boss").map(id => ({value:id, label:actorName(id), detail:id})),
       ]},
-      {key:"label", label:"Label", icon:"tag", options:[{value:"", label:"Any label"},
+      {key:"created_by", label:"Created by", icon:"user", options:[{value:"", label:"Any creator"},
+        ...model.creators.map(([value,label]) => ({value,label,detail:value})),
+        ...(model.route.created_by && !model.creators.some(([id]) => id === model.route.created_by)
+          ? [{value:model.route.created_by, label:actorName(model.route.created_by), detail:model.route.created_by}] : []),
+      ]},
+      {key:"draft", label:"Readiness", icon:"edit", options:[{value:"", label:"Any readiness"}, {value:"1", label:"Draft"}]},
+      {key:"label", label:"Label / tag", icon:"tag", options:[{value:"", label:"Any label or tag"},
         ...[...new Set([...model.labels, ...(model.route.label ? [model.route.label] : [])])].sort().map(value => ({value, label:value})),
       ]},
       {key:"min_launches", label:"Agent launches", icon:"refresh", options:[{value:"", label:"Any number of launches"},

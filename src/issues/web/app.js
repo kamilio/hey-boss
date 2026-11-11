@@ -49,6 +49,7 @@ let model = {
   actor: null,
   boss: { id: "human:boss", name: "Boss" },
   assignees: [],
+  creators: [],
   assignmentMachines: [],
   projects: [],
   labels: [],
@@ -278,7 +279,7 @@ async function mutate(operation, project = model.project.id, host = model.route.
 }
 function routeHash(route) {
   route = { ...route };
-  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "label", "search", "blocked", "min_launches"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
+  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "created_by", "label", "search", "blocked", "draft", "min_launches"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
     if (model.route && filters.some(filter => (route[filter] || "") !== (model.route[filter] || ""))) route[key] = 1;
     if (HeyBossPagination.number(route[key]) === 1) delete route[key];
   }
@@ -587,11 +588,7 @@ async function setProjectVisibility(project) {
         navigate({
           project: next.id,
           issue: null,
-          search: "",
-          label: "",
-          owner: "all",
-          blocked: "",
-          min_launches: "",
+          ...IssueFilters.empty,
           state: "open",
         });
     }
@@ -893,9 +890,11 @@ function renderList(result) {
       : null;
   model.listContext = listContext;
   model.orderVersion = result.order_version;
-  model.issues = result.issues;
+  model.creators = [...new Map(result.issues.filter(i => i.created_by).map(i => [i.created_by, HeyBossOrigin.creator(i, actorName)]))]
+    .sort((a,b) => a[1].localeCompare(b[1]) || a[0].localeCompare(b[0]));
   model.drafts_enabled = result.drafts_enabled;
-  if (result.assignment_machines) { model.assignmentMachines = result.assignment_machines; IssueFilters.render(); }
+  if (result.assignment_machines) model.assignmentMachines = result.assignment_machines;
+  IssueFilters.render();
   model.signature = JSON.stringify(result.issues);
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
@@ -934,7 +933,7 @@ function renderList(result) {
     ? result.issues
         .map(
           (i) =>
-            `<article class="issue-row" data-issue-number="${i.number}">${model.route.search ? "" : `<button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button>`}<span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? '<span class="draft-badge" title="Agents skip drafts until they are marked ready">Draft</span>' : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div>${i.match ? `<p class="issue-match"><span>${esc(i.match.field)}${i.match.kind === "semantic" ? " · related meaning" : ""}</span> ${esc(i.match.excerpt)}</p>` : ""}</div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listActionTrigger(i)}</div></article>`,
+            `<article class="issue-row" data-issue-number="${i.number}">${model.route.search ? "" : `<button type="button" class="issue-order-handle" aria-keyshortcuts="ArrowUp ArrowDown" data-move-issue="${i.number}" aria-label="Reorder issue #${i.number}: ${esc(i.title)}" title="Drag to reorder. Use ↑ or ↓ when focused.">${icon("grip")}</button>`}<span ${i.state === "blocked" && !i.deleted_at ? `role="img" aria-label="${IssueBlockers.description(i)}" title="${IssueBlockers.description(i)}"` : ""} class="issue-state ${IssueBlockers.kind(i) === "hold" ? "on-hold " : ""}${i.deleted_at ? "deleted" : i.state === "open" && i.draft ? "draft" : i.state}">${icon(i.deleted_at ? "trash" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}</span><div class="issue-row-main"><div class="issue-title-line"><a class="issue-title" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}">${esc(i.title)}</a>${i.draft ? `<a class="list-label-filter" href="${esc(routeHash({ ...model.route, issue: null, draft: "1" }))}" aria-label="Filter by draft issues" title="Agents skip drafts until they are marked ready"><span class="draft-badge">Draft</span></a>` : ""}${i.labels.map(listLabel).join("")}</div><div class="issue-meta"><span class="issue-number">#${i.number}</span>${HeyBossStatus.list(i)}<span class="issue-authorship">${i.state === "closed" ? `closed ${i.closed_at ? `<a class="issue-time-link" data-issue="${i.number}" href="${esc(routeHash({ ...model.route, issue: i.number }))}" aria-label="Open issue #${i.number}, closed ${esc(new Date(i.closed_at).toLocaleString())}">${date(i.closed_at)}</a>` : ""}${i.closed_by ? ` by ${esc(actorName(i.closed_by))}` : ""}` : `opened ${date(i.created_at)} by ${esc(HeyBossOrigin.creator(i, actorName))}`}</span>${agentLaunchCount(i)}${listPullRequests(i)}${listCommits(i)}${IssueSubtasks.list(i)}${IssueBlockers.list(i)}</div>${i.match ? `<p class="issue-match"><span>${esc(i.match.field)}${i.match.kind === "semantic" ? " · related meaning" : ""}</span> ${esc(i.match.excerpt)}</p>` : ""}</div><div class="issue-row-end">${listAssignment(i)}${i.comment_count ? `<span class="comment-count" title="${i.comment_count} comments">${icon("comment")}${i.comment_count}</span>` : ""}${listActionTrigger(i)}</div></article>`,
         )
         .join("")
     : emptyState();
@@ -1054,6 +1053,7 @@ async function renderRoute() {
   const sequence = ++model.sequence;
   const previous = model.project?.id;
   model.route = parseRoute();
+  if (previous !== model.route.project || model.activeHost !== model.route.host) model.creators = [];
   model.project = currentProject();
   if (model.project?.id) model.route.project = model.project.id;
   updateAppNavigation();
@@ -2310,7 +2310,7 @@ $("#transfer-form").onsubmit = async event => {
     $("#transfer-dialog").close();
     if (model.project.id === context.project && model.route.issue === context.number && model.route.host === context.host) {
       model.detail = null;
-      navigate({project: result.project.id, issue: result.issue.number, state: result.issue.state, owner: "all", label: "", search: ""});
+      navigate({project: result.project.id, issue: result.issue.number, state: result.issue.state, ...IssueFilters.empty});
     }
     toast(`Moved to ${result.project.name} · #${result.issue.number}`);
   } catch (error) {
