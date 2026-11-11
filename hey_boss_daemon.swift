@@ -7657,11 +7657,6 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
         isHidden = true
     }
     required init?(coder: NSCoder) { fatalError() }
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        let hit = super.hitTest(point)
-        if let vector, let hit, hit === vector || hit.isDescendant(of: vector) { return viewport.contentView }
-        return hit
-    }
     override func updateLayer() {
         layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
         layer?.borderColor = NSColor.separatorColor.cgColor
@@ -7684,10 +7679,9 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
         let image = NSSize(width: size.width * scale, height: size.height * scale)
         paper.setFrameSize(NSSize(width: max(image.width + 32, area.width), height: max(image.height + 32, area.height)))
         picture.frame = NSRect(x: (paper.frame.width - image.width) / 2, y: (paper.frame.height - image.height) / 2, width: image.width, height: image.height)
-        vector?.frame = picture.frame
     }
     func clear() {
-        vector?.removeFromSuperview(); vector = nil; drawing = nil; picture.image = nil
+        vector?.stopLoading(); vector = nil; drawing = nil; picture.image = nil
     }
     @objc func toggleFit() { fit.toggle(); updateZoom() }
     private func updateZoom() {
@@ -7698,24 +7692,28 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
     func display(_ image: NSImage, title: String, kind: String, svg: String?) {
         picture.image = image; picture.setAccessibilityLabel(title)
         // AppKit omits SVG arrow markers. WebKit draws them (and text) at any scale.
-        picture.isHidden = false
         if let svg {
             let web = vector ?? WKWebView(); vector = web
-            if web.superview == nil { paper.addSubview(web) }
-            web.navigationDelegate = self; web.alphaValue = 0; web.setAccessibilityLabel(title)
+            web.frame = NSRect(origin: .zero, size: image.size); web.navigationDelegate = self
             drawing = web.loadHTMLString("""
                 <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'">
                 <style>*{margin:0}html,body,img{width:100%;height:100%;overflow:hidden;display:block}</style>
                 <img draggable="false" src="data:image/svg+xml;base64,\(svg)">
                 """, baseURL: nil)
-        } else { vector?.removeFromSuperview(); vector = nil }
+        } else { vector?.stopLoading(); vector = nil; drawing = nil }
         self.title.stringValue = title; self.title.toolTip = title
         self.kind.stringValue = kind == "Image" ? "IMAGE" : kind.uppercased() + "  /  DIAGRAM"
         isHidden = false; fit = kind == "Image"; updateZoom()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === vector, navigation === drawing else { return }
-        webView.alphaValue = 1; picture.isHidden = true
+        // Keep a native vector image: a background chat must not depend on a live web surface.
+        let config = WKPDFConfiguration(); config.rect = webView.bounds
+        webView.createPDF(configuration: config) { [weak self] result in
+            guard let self, webView === self.vector, navigation === self.drawing else { return }
+            if case .success(let pdf) = result, let image = NSImage(data: pdf) { self.picture.image = image }
+            self.vector = nil; self.drawing = nil
+        }
     }
 }
 
