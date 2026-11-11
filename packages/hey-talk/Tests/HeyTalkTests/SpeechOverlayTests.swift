@@ -92,7 +92,7 @@ final class SpeechOverlayTests: XCTestCase {
         let target = SpeechPassage.join([first, second]), overlay = SpeechOverlay()
         defer { overlay.hide() }
         overlay.show(target: target, state: .playing, rate: 1.25, fraction: 0, error: nil)
-        overlay.highlight((target.paragraphs[1].range, false))
+        overlay.highlight(SpeechHighlight(range: target.paragraphs[1].range, word: false))
         let panel = try XCTUnwrap(NSApplication.shared.windows.last { $0.title == "Hey Talk — Read Aloud" })
         func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
         let label = try XCTUnwrap(views(try XCTUnwrap(panel.contentView)).compactMap { $0 as? NSTextField }.first { $0.superview is GlassFace })
@@ -121,12 +121,12 @@ final class SpeechOverlayTests: XCTestCase {
         XCTAssertTrue(NSFontManager.shared.traits(of: bold).contains(.boldFontMask))
         XCTAssertTrue((storage.attribute(.font, at: 11, effectiveRange: nil) as? NSFont)?.fontName.contains("Menlo") == true)
         let original = NSAttributedString(attributedString: storage)
-        view.highlight((NSRange(location: 6, length: 4), true))
+        view.highlight(SpeechHighlight(range: NSRange(location: 6, length: 4), word: true))
         XCTAssertEqual(storage.attribute(.foregroundColor, at: 6, effectiveRange: nil) as? NSColor, .clear)
         let lens = try XCTUnwrap(text.subviews.first { $0 is SpeechWordLens } as? SpeechWordLens)
         XCTAssertNil(lens.hitTest(.zero))
         XCTAssertEqual(lens.magnification, 1.035, accuracy: 0.001)
-        view.highlight((NSRange(location: 16, length: 4), true))
+        view.highlight(SpeechHighlight(range: NSRange(location: 16, length: 4), word: true))
         XCTAssertEqual(storage.attributedSubstring(from: NSRange(location: 6, length: 4)), original.attributedSubstring(from: NSRange(location: 6, length: 4)))
         view.highlight(nil)
         XCTAssertEqual(NSAttributedString(attributedString: storage), original)
@@ -154,7 +154,7 @@ extension SpeechOverlayTests {
         let all = views(try XCTUnwrap(panel.contentView))
         let field = try XCTUnwrap(all.compactMap { $0 as? NSTextView }.first)
         let words = (text as NSString).range(of: "Friday")
-        overlay.highlight((words, true))
+        overlay.highlight(SpeechHighlight(range: words, word: true))
         let lens = try XCTUnwrap(field.subviews.first { $0 is SpeechWordLens })
         XCTAssertTrue(field.visibleRect.contains(NSPoint(x: lens.frame.midX, y: lens.frame.midY)))
         let frame = panel.frame

@@ -61,6 +61,14 @@ final class NativeSpeechOutput: SpeechOutput {
 
 enum SpeechState: String { case idle, loading, playing, paused, failed }
 
+// In an unaligned phrase, the drawer highlights the phrase while a one-line
+// caption follows the estimated reading position within it.
+struct SpeechHighlight {
+    var range: NSRange
+    let word: Bool
+    var follow: Int? = nil
+}
+
 // Main-thread state machine. Generation tickets discard worker/player callbacks
 // after stop, app switches, or replacement. Generation continues only two chunks ahead.
 final class SpeechPlayback {
@@ -83,16 +91,25 @@ final class SpeechPlayback {
     var active: Bool { [.loading, .playing, .paused].contains(state) }
     var rate: Float { get { output.rate } set { output.rate = min(2, max(0.75, newValue)); onChange?() } }
     var progress: Double { chunks.isEmpty ? 0 : Double(completed) / Double(chunks.count) }
-    var highlight: (range: NSRange, word: Bool)? {
+    var highlight: SpeechHighlight? {
         guard active else { return nil }
         let time = output.time
         for index in timings.keys.sorted() {
             guard let timing = timings[index], time >= timing.start, time < timing.start + timing.duration else { continue }
             let position = time - timing.start
             if let word = timing.words.first(where: { position >= $0.start && position < $0.end }) {
-                return (NSRange(location: chunks[index].range.location + word.range.location, length: word.range.length), true)
+                return SpeechHighlight(range: NSRange(location: chunks[index].range.location + word.range.location, length: word.range.length), word: true)
             }
-            return (chunks[index].range, false)
+            let chunk = chunks[index]
+            let before = timing.words.last { $0.end <= position }
+            let after = timing.words.first { $0.start > position }
+            let start = before?.end ?? 0, end = after?.start ?? timing.duration
+            let lower = before.map { NSMaxRange($0.range) } ?? 0
+            let upper = after?.range.location ?? chunk.range.length
+            let fraction = (position - start) / (end - start)
+            let offset = min(chunk.range.length - 1, lower + Int(Double(max(0, upper - lower - 1)) * fraction))
+            let anchor = (chunk.text as NSString).rangeOfComposedCharacterSequence(at: offset).location
+            return SpeechHighlight(range: chunk.range, word: false, follow: chunk.range.location + anchor)
         }
         return nil
     }

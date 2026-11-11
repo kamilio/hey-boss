@@ -243,7 +243,15 @@ final class SpeechOverlay: NSObject {
         face.reading = active
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
-    func highlight(_ next: (range: NSRange, word: Bool)?) {
+    func highlight(_ mark: SpeechHighlight?) {
+        var next = mark
+        if caption, let follow = mark?.follow, let range = mark?.range,
+           let layout = textView.layoutManager {
+            var line = NSRange()
+            let glyph = layout.glyphIndexForCharacter(at: follow)
+            _ = layout.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &line)
+            next?.range = NSIntersectionRange(range, layout.characterRange(forGlyphRange: line, actualGlyphRange: nil))
+        }
         if let next, let index = target?.paragraphs.firstIndex(where: { NSLocationInRange(next.range.location, $0.range) }), index != paragraphIndex {
             paragraphIndex = index; updateLabel()
         }
