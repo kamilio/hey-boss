@@ -3,7 +3,6 @@ import {open} from 'node:fs/promises';
 import {homedir} from 'node:os';
 import {basename, extname, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {renderGraph, graphvizLimits} from './poe-agent.mjs';
 
 const limit = 12 * 1024 * 1024;
 const string = {type: 'string'};
@@ -65,15 +64,13 @@ export async function prepareMedia({title, ...sources}, cwd, signal) {
   bytes ??= Buffer.from(source);
   checkSize(bytes.length);
   if (format === 'graphviz' || format === 'mermaid') checkSize(bytes.length, 1024 * 1024);
-  if (format === 'graphviz') {
-    bytes = Buffer.from(await renderGraph(bytes.toString(), 'svg', 'dot', {
-      node: {shape: 'box', style: 'rounded,filled', fillcolor: '#edf5ff', color: '#7495b8', fontcolor: '#203c58', fontname: 'Helvetica'},
-      edge: {color: '#637f96'},
-    }, graphvizLimits({}), signal));
-  } else if (format === 'mermaid') {
+  if (format === 'graphviz' || format === 'mermaid') {
     const input = bytes;
+    const dot = format === 'graphviz';
+    const command = dot ? process.execPath : fileURLToPath(new URL('./mmdr', import.meta.url));
+    const args = dot ? [fileURLToPath(new URL('./conversation-dot.mjs', import.meta.url))] : ['-i', '-', '-t', 'modern'];
     bytes = await new Promise((ok, fail) => {
-      const child = execFile(fileURLToPath(new URL('./mmdr', import.meta.url)), ['-i', '-', '-t', 'modern'],
+      const child = execFile(command, args,
         {signal, timeout: 10000, maxBuffer: limit, encoding: 'buffer'}, (error, stdout, stderr) =>
           error ? fail(new Error(stderr.toString().trim() || error.message)) : ok(stdout));
       child.stdin.on('error', error => { if (error.code !== 'EPIPE') fail(error); });

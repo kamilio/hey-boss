@@ -49,7 +49,9 @@ export async function createConversation({home = homedir(), statePath, emit, dis
   await mkdir(cwd, {recursive: true});
   await mkdir(dirname(statePath), {recursive: true, mode: 0o700});
   const base = (await readFile(new URL('./conversation.md', import.meta.url), 'utf8')).trim();
-  const [guidance, shellDescription, batchDescription, windowDescription, showDescription, hideDescription] = (await readFile(new URL('./conversation-tools.md', import.meta.url), 'utf8')).trim().split('\n\n');
+  const guidance = (await readFile(new URL('./conversation-visuals.md', import.meta.url), 'utf8')).trim();
+  const descriptions = Object.fromEntries(await Promise.all(['shell', 'batch', 'inspect_window', 'show_media', 'hide_media'].map(async name =>
+    [name, (await readFile(new URL('./conversation-tools/' + name + '.md', import.meta.url), 'utf8')).trim()])));
   const stored = await optionalFile(statePath);
   let history = stored === undefined ? undefined : interruptedHistory(JSON.parse(stored).messages);
   async function checkpoint(messages) {
@@ -112,8 +114,8 @@ export async function createConversation({home = homedir(), statePath, emit, dis
           await checkpoint(ctx.messages);
         },
       }})
-      .tools({name: 'shell', description: shellDescription, inputSchema: commandSchema, call: command},
-        {name: 'batch', description: batchDescription, inputSchema: {type: 'object', properties: {
+      .tools({name: 'shell', description: descriptions.shell, inputSchema: commandSchema, call: command},
+        {name: 'batch', description: descriptions.batch, inputSchema: {type: 'object', properties: {
           commands: {type: 'array', items: commandSchema, minItems: 1, maxItems: 8}}, required: ['commands'], additionalProperties: false},
         async call(args, ctx) {
           if (!Array.isArray(args?.commands) || args.commands.length < 1 || args.commands.length > 8) throw new Error('batch requires 1–8 commands.');
@@ -122,7 +124,7 @@ export async function createConversation({home = homedir(), statePath, emit, dis
           ctx.signal.throwIfAborted();
           return JSON.stringify(results.map((result, i) => ({...args.commands[i], ...(result.status === 'fulfilled' ? {output: result.value} : {error: result.reason.message})})));
         }},
-        {name: 'inspect_window', description: windowDescription, inputSchema: {type: 'object', properties: {
+        {name: 'inspect_window', description: descriptions.inspect_window, inputSchema: {type: 'object', properties: {
           target: {type: 'string', examples: ['active', 'browser', 'Gmail', 'Obsidian', 'Slack', 'cmux']},
           mode: {type: 'string', enum: ['accessibility', 'screenshot', 'both']}},
           required: ['target', 'mode'], additionalProperties: false},
@@ -150,12 +152,12 @@ export async function createConversation({home = homedir(), statePath, emit, dis
             throw new Error(message);
           } finally { socket.destroy(); }
         }},
-        {name: 'show_media', description: showDescription, inputSchema: mediaSchema, async call(args, ctx) {
+        {name: 'show_media', description: descriptions.show_media, inputSchema: mediaSchema, async call(args, ctx) {
           const media = await prepareMedia(args, cwd, ctx.signal); ctx.signal.throwIfAborted();
-          await display(media, ctx.signal); return 'Showing: ' + media.title;
+          await display(media, ctx.signal); return 'OK';
         }},
-        {name: 'hide_media', description: hideDescription, inputSchema: {type: 'object', properties: {}, additionalProperties: false},
-          async call(_, ctx) { await display({}, ctx.signal); return 'Media hidden.'; }});
+        {name: 'hide_media', description: descriptions.hide_media, inputSchema: {type: 'object', properties: {}, additionalProperties: false},
+          async call(_, ctx) { await display({}, ctx.signal); return 'OK'; }});
     try {
       for await (const event of runner.stream(turn, {signal, baseSystemPrompt: base, resume: {messages: interruptedHistory(history ?? legacy)},
         fetch: (url, init) => fetchImpl(url, {...init, body: JSON.stringify({...JSON.parse(init.body), store: false, text: {verbosity: 'low'}})})})) {

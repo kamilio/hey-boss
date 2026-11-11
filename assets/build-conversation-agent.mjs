@@ -1,6 +1,6 @@
 // Build Poe Agent from GitHub source; no registry release is required.
 import {execFileSync} from 'node:child_process';
-import {copyFile, mkdir, readFile, writeFile, realpath} from 'node:fs/promises';
+import {cp, copyFile, mkdir, readFile, writeFile, realpath} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {homedir} from 'node:os';
 import {join, resolve} from 'node:path';
@@ -15,14 +15,18 @@ export async function bundle(source, destination) {
     ...['shell', 'memory', 'skills', 'compaction'].map(name =>
       `export {default as ${name}Plugin} from ${JSON.stringify(join(agent, 'plugins/poe-agent-plugin-' + name + '.js'))};`),
     `export {openaiResponsesPlugin} from ${JSON.stringify(join(agent, 'plugins/poe-agent-plugin-openai-responses.js'))};`,
-    `export {renderGraph, settings as graphvizLimits} from ${JSON.stringify(join(source, 'packages/safe-bash-graphviz-engine/dist/index.js'))};`,
     `export {parse as parseYaml} from ${JSON.stringify(join(source, 'node_modules/yaml/dist/index.js'))};`,
   ].join('\n'), resolveDir: source}, bundle: true, platform: 'node', format: 'esm', mainFields: ['module', 'main'],
     outfile: join(destination, 'poe-agent.mjs'), external: ['*.node', '*.wasm'],
     banner: {js: 'import {createRequire as __createRequire} from "node:module"; const require = __createRequire(import.meta.url);'}});
-  for (const name of ['conversation-agent.mjs', 'conversation-media.mjs', 'conversation.md', 'conversation-tools.md']) {
+  const viz = join(homedir(), '.cache/hey-boss/viz-3.31.0');
+  const dist = join(viz, 'node_modules/@viz-js/viz/dist/viz.js');
+  if (!existsSync(dist)) execFileSync('npm', ['install', '--prefix', viz, '--ignore-scripts', '--no-audit', '--no-fund', '@viz-js/viz@3.31.0'], {stdio: 'inherit'});
+  await copyFile(dist, join(destination, 'viz.mjs'));
+  for (const name of ['conversation-dot.mjs', 'conversation-agent.mjs', 'conversation-media.mjs', 'conversation.md', 'conversation-visuals.md']) {
     await copyFile(new URL(name, import.meta.url), join(destination, name));
   }
+  await cp(new URL('conversation-tools/', import.meta.url), join(destination, 'conversation-tools'), {recursive: true});
   await copyFile(new URL('mermaid-LICENSE', import.meta.url), join(destination, 'mermaid-LICENSE'));
   await copyFile(join(source, 'LICENSE'), join(destination, 'poe-code-LICENSE'));
 }
