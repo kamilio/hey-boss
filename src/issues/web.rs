@@ -10,8 +10,6 @@ use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 #[path = "web/code_reviews.rs"]
 mod code_reviews;
-#[path = "web/errors.rs"]
-mod errors;
 mod lan;
 #[cfg(test)]
 mod listener_tests;
@@ -757,15 +755,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/css; charset=utf-8",
                 include_bytes!("web/git-review/review.css"),
             )),
-            "/errors" => Some((
-                "text/html; charset=utf-8",
-                include_bytes!("web/errors.html"),
-            )),
-            "/errors.js" => Some((
-                "text/javascript; charset=utf-8",
-                include_bytes!("web/errors.js"),
-            )),
-            "/errors.css" => Some(("text/css; charset=utf-8", include_bytes!("web/errors.css"))),
             "/pages" => Some(("text/html; charset=utf-8", include_bytes!("web/pages.html"))),
             "/pages.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/pages.js"))),
             "/pages.css" => Some(("text/css; charset=utf-8", include_bytes!("web/pages.css"))),
@@ -976,7 +965,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/jobs"
                     | "/runs"
                     | "/artifacts"
-                    | "/errors"
                     | "/prompts"
                     | "/skills"
                     | "/secrets"
@@ -987,14 +975,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 let shell = include_str!("web/app-shell.html")
                     .replace("<!--prompts-current-->", if path == "/prompts" { " aria-current=\"page\"" } else { "" })
                     .replace("<!--pages-current-->", if path == "/pages" { " aria-current=\"page\"" } else { "" })
-                    .replace(
-                        "<!--errors-current-->",
-                        if path == "/errors" {
-                            " aria-current=\"page\""
-                        } else {
-                            ""
-                        },
-                    )
                     .replace(
                         "<!--secrets-current-->",
                         if path == "/secrets" {
@@ -1123,7 +1103,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     }
     if request.method() == &Method::Post
         && [
-            "/api/errors",
             "/api/code-reviews/publish",
             "/api/action",
             "/api/jobs/runtime",
@@ -1203,9 +1182,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
         if path == "/api/pages/delete" { return json_response(pages::delete(app, &bytes)?); }
         if path == "/api/pages/share" { return json_response(pages::share(app, &bytes)?); }
         if path == "/api/pages/sync" { return json_response(pages::sync(app, &bytes)?); }
-        if path == "/api/errors" {
-            return json_response(errors::act(&bytes, app)?);
-        }
         if path == "/api/jobs/runtime" {
             return json_response(crate::jobs::web::runtime(serde_json::from_slice(&bytes)?)?);
         }

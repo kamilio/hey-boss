@@ -1783,7 +1783,7 @@ fn project_workflow_prompts_select_branches_and_match_claims() {
 fn retired_prompt_overrides_do_not_change_the_workflow() {
     let web = Web::start();
     web.ok(json!({"action":"create","title":"Prompt layout fixture","body":"","labels":[]}));
-    let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "goal_continue":"Retired", "prs":"Publish {{number}}."});
+    let overrides = json!({"layout":"{{delivery}}\n\n{{task}}\n\n{{handoff}}", "handoff":"Review task {{number}}.", "goal_continue":"Retired", "error_task":"Old error evidence", "prs":"Publish {{number}}."});
     web.ok(json!({"action":"configure_project","prompt":"Implement {{number}}.","prs_enabled":true,"prompt_overrides":overrides}));
     let settings = web.ok(json!({"action":"project_settings"}));
     assert_eq!(
@@ -1795,6 +1795,7 @@ fn retired_prompt_overrides_do_not_change_the_workflow() {
         "plan_document",
         "handoff",
         "goal_continue",
+        "error_task",
         "subtask",
         "github",
         "steering",
@@ -1998,120 +1999,14 @@ fn unverified_public_ip_preserves_local_access_and_cannot_bypass_host_checks() {
 }
 
 #[test]
-fn error_inbox_requires_opt_in_and_promotes_once_with_durable_evidence() {
-    let w = Web::start();
-    let call = |mut action: Value| {
-        action["project"] = json!(w.project);
-        w.http(
-            "POST",
-            "/api/errors",
-            &[
-                ("Content-Type", "application/json"),
-                ("X-Hey-Boss-CSRF", &w.token),
-            ],
-            &serde_json::to_vec(&action).unwrap(),
-        )
-    };
-    let shell = w.http("GET", "/errors", &[], &[]);
-    assert_eq!(shell.status, 200);
-    assert!(
-        String::from_utf8(shell.body)
-            .unwrap()
-            .contains("id=\"nav-errors\"")
-    );
-    assert_eq!(call(json!({"action":"list"})).json()["enabled"], false);
-    let event = json!({"source":"synthetic","event_id":"one","timestamp":hey_boss::error_inbox::now(),"message":"Synthetic upload failure","count":7,"request_ref":"trace-qa"});
-    assert_ne!(
-        call(json!({"action":"ingest","events":[event.clone()]})).status,
-        200
-    );
-    let denied = w.http(
-        "POST",
-        "/api/errors",
-        &[("Content-Type", "application/json")],
-        &serde_json::to_vec(&json!({"action":"enable","project":w.project,"enabled":true}))
-            .unwrap(),
-    );
-    assert_eq!(denied.status, 403);
-    assert_eq!(call(json!({"action":"enable","enabled":true})).status, 200);
-    assert_eq!(
-        call(json!({"action":"ingest","events":[event.clone()]})).json()["accepted"],
-        1
-    );
-    assert_eq!(
-        call(json!({"action":"ingest","events":[event]})).json()["accepted"],
-        0
-    );
-    let list = call(json!({"action":"list"})).json();
-    assert_eq!(list["groups"][0]["count_24h"], 7);
-    let id = &list["groups"][0]["id"];
-    let detail = call(json!({"action":"detail","id":id})).json();
-    let prompt = detail["task_prompt"].as_str().unwrap();
-    assert!(prompt.starts_with("Fix this error: `hey-boss errors --project "));
-    assert!(prompt.contains(&format!("show '{}' # get error`", id.as_str().unwrap())));
-    let first = call(json!({"action":"promote","id":id}));
-    assert_eq!(
-        first.status,
-        200,
-        "{}",
-        String::from_utf8_lossy(&first.body)
-    );
-    assert_eq!(first.json()["issue"], 1);
-    assert_eq!(call(json!({"action":"promote","id":id})).json()["issue"], 1);
-    let issue = w.ok(json!({"action":"view","number":1}));
-    assert_eq!(issue["issue"]["body"], prompt);
-    assert_eq!(issue["issue"]["title"], "Fix: Synthetic upload failure");
-    let detail = call(json!({"action":"detail","id":id})).json();
-    assert!(detail["snapshot"].as_str().unwrap().contains("trace-qa"));
-
-    w.ok(json!({"action":"configure_project","prompt_overrides":{"error_task":"Custom {{command}}"}}));
-    let event = json!({"source":"synthetic","event_id":"two","timestamp":hey_boss::error_inbox::now(),"message":"Different failure"});
-    call(json!({"action":"ingest","events":[event]}));
-    let groups = call(json!({"action":"list"})).json();
-    let id = &groups["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|g| g["title"] == "Different failure")
-        .unwrap()["id"];
-    assert!(
-        call(json!({"action":"detail","id":id})).json()["task_prompt"]
-            .as_str()
-            .unwrap()
-            .starts_with("Custom hey-boss errors")
-    );
-    assert_ne!(
-        call(json!({"action":"promote","id":id,"prompt":" "})).status,
-        200
-    );
-    assert_eq!(
-        call(json!({"action":"promote","id":id,"prompt":"Edited task prompt"})).json()["issue"],
-        2
-    );
-    // A lost link acknowledgement must recover the same task and frozen prompt.
-    rusqlite::Connection::open(w.root.join("issues.errors.db"))
-        .unwrap()
-        .execute(
-            "UPDATE error_groups SET issue=NULL WHERE id=?1",
-            [id.as_str().unwrap()],
-        )
-        .unwrap();
-    assert_eq!(
-        call(json!({"action":"promote","id":id,"prompt":"Changed retry"})).json()["issue"],
-        2
-    );
-    assert_eq!(
-        w.ok(json!({"action":"view","number":2}))["issue"]["body"],
-        "Edited task prompt"
-    );
-}
-
-#[test]
-fn removed_mindmap_routes_are_not_served_or_advertised() {
+fn retired_routes_are_not_served_or_advertised() {
     let web = Web::start();
     for path in [
         "/mm",
         "/mm?focus=1",
+        "/errors",
+        "/errors.js",
+        "/errors.css",
         "/mindmap.js",
         "/mindmap-map.js",
         "/mindmap.css",
@@ -2122,18 +2017,21 @@ fn removed_mindmap_routes_are_not_served_or_advertised() {
         let reply = web.http("GET", path, &[], b"");
         assert_eq!(reply.status, 200);
         let html = String::from_utf8(reply.body).unwrap();
+        assert!(!html.contains("nav-errors"));
         assert!(!html.contains("nav-mindmaps") && !html.contains("project-mindmaps"));
     }
-    let reply = web.http(
-        "POST",
-        "/api/mm",
-        &[
-            ("X-Hey-Boss-CSRF", &web.token),
-            ("Content-Type", "application/json"),
-        ],
-        b"{}",
-    );
-    assert_eq!(reply.status, 404);
+    for path in ["/api/errors", "/api/mm"] {
+        let reply = web.http(
+            "POST",
+            path,
+            &[
+                ("X-Hey-Boss-CSRF", &web.token),
+                ("Content-Type", "application/json"),
+            ],
+            b"{}",
+        );
+        assert_eq!(reply.status, 404, "{path}");
+    }
     let reply = web.action(
         &web.project,
         json!({"action":"mindmap","operation":{"command":"show"}}),

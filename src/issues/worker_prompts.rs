@@ -11,6 +11,8 @@ macro_rules! prompts {
         pub struct PromptOverrides {
             // Accept old saved sections without applying or exposing them.
             #[serde(skip_serializing)]
+            pub error_task: Option<String>,
+            #[serde(skip_serializing)]
             pub goal_continue: Option<String>,
             #[serde(skip_serializing)]
             pub handoff: Option<String>,
@@ -64,7 +66,6 @@ prompts! {
     (checkout, DEFAULT_CHECKOUT_PROMPT, "workspace-checkout.md", "Existing checkout", ""),
     (prs, DEFAULT_PRS_PROMPT, "delivery-pr.md", "Pull request", ""),
     (main, DEFAULT_MAIN_PROMPT, "delivery-main.md", "Push to main", ""),
-    (error_task, DEFAULT_ERROR_TASK_PROMPT, "error_task.md", "Error task", "Tasks created from Errors. Variable: {{command}} reads the error evidence."),
 }
 
 pub fn render(text: &str, mut value: impl FnMut(&str) -> Option<String>) -> String {

@@ -655,12 +655,6 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
                 }
                 // Capture and recovery continue with no reachable transport.
                 let db = ctx.db()?;
-                if ctx.path.with_extension("errors.db").exists()
-                    && let Err(error) = crate::error_inbox::Inbox::open(&ctx.path)
-                        .and_then(|inbox| inbox.publish_events(&db))
-                {
-                    eprintln!("Error event publication: {error}");
-                }
                 let mut journal = engine(&ctx)?;
                 prepared(&ctx, &db, &mut journal, controller)?;
                 Ok(())

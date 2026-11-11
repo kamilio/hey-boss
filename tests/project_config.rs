@@ -154,6 +154,7 @@ fn prompt_rename_preserves_local_edits_and_archives_retired_files() {
         "layout.md",
         "resume.md",
         "handoff.md",
+        "error_task.md",
         "goal_continue.md",
         "prs.md",
     ];
@@ -178,41 +179,6 @@ fn prompt_rename_preserves_local_edits_and_archives_retired_files() {
         );
     }
     assert_eq!(f.sync().unwrap()["changed"], false);
-}
-
-#[test]
-fn error_prompt_follows_collection_without_losing_edits() {
-    let mut f = Fixture::new();
-    let settings = || json!({"action":"project_settings"});
-    let file = f.root.join(".hey-boss/prompts/error_task.md");
-    f.sync().unwrap();
-    assert!(!file.exists());
-    assert!(!f.root.join("issues.errors.db").exists());
-    let inbox = hey_boss::error_inbox::Inbox::open(&f.root.join("issues.db")).unwrap();
-    inbox.enable("named:Another project", true).unwrap();
-    assert!(
-        f.call(settings())["prompt_defaults"]
-            .get("error_task")
-            .is_none()
-    );
-    inbox.enable("named:Config test", true).unwrap();
-    f.sync().unwrap();
-    assert!(file.is_file());
-    fs::write(&file, "Local error instructions").unwrap();
-    inbox.enable("named:Config test", false).unwrap();
-    f.sync().unwrap();
-    assert!(!file.exists());
-    assert_eq!(
-        f.call(settings())["prompt_overrides"]["error_task"],
-        "Local error instructions"
-    );
-    f.sync().unwrap();
-    inbox.enable("named:Config test", true).unwrap();
-    f.sync().unwrap();
-    assert_eq!(
-        fs::read_to_string(file).unwrap(),
-        "Local error instructions"
-    );
 }
 
 #[test]

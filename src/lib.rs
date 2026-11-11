@@ -16,7 +16,6 @@ pub mod database;
 pub mod desktop_identity;
 pub mod document;
 pub mod environment;
-pub mod error_inbox;
 pub mod event_log;
 pub mod fleet;
 pub mod health;

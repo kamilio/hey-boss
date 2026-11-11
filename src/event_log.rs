@@ -284,10 +284,6 @@ pub fn types(db: &Connection, filter: &Filter) -> Result<Vec<Value>> {
             "peer.disconnected",
             "Reporter observed an outgoing CRDT route disconnected",
         ),
-        (
-            "error.observed",
-            "Selected evidence from an enabled local error collector",
-        ),
     ] {
         if filter.kind.as_deref().is_none_or(|wanted| {
             wanted == kind
