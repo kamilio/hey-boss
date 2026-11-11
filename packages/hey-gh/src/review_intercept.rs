@@ -107,7 +107,7 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
     } else {
         i.auth
     };
-    if graphql {
+    if graphql || (is_pr && i.subcommand() == "review" && repo.is_none()) {
         return Ok(Some(Target {
             repo: String::new(),
             enabled,
@@ -123,6 +123,9 @@ pub fn select(i: &Invocation, bare: bool) -> Result<Option<Target>> {
             .stdin(Stdio::null())
             .output()?;
         if !out.status.success() {
+            if is_pr {
+                return Ok(None);
+            }
             return Err("Cannot resolve repository; specify -R OWNER/REPO or a PR URL".into());
         }
         String::from_utf8(out.stdout)?.trim().to_owned()

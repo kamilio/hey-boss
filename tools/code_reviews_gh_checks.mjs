@@ -6,23 +6,20 @@ import {
   mkdtempSync,
   mkdirSync,
   writeFileSync,
-  copyFileSync,
   symlinkSync,
   rmSync,
-  chmodSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 const [boss, hey, native] = process.argv.slice(2).map((p) => resolve(p));
 const root = mkdtempSync(resolve(".cr-")),
-  bin = join(root, "bin"),
-  dispatch = join(bin, ".hey-gh-dispatch"),
+  bin = join(root, ".local/bin"),
+  upstreamBin = join(root, "native-bin"),
   config = join(root, "config"),
   sock = join(root, "hub.sock");
-mkdirSync(dispatch, { recursive: true });
+mkdirSync(bin, { recursive: true });
+mkdirSync(upstreamBin);
 mkdirSync(config);
-copyFileSync("packages/hey-gh/gh", join(bin, "gh"));
-chmodSync(join(bin, "gh"), 0o755);
-symlinkSync(native, join(dispatch, "native"));
+symlinkSync(native, join(upstreamBin, "gh"));
 symlinkSync(boss, join(bin, "hey-boss"));
 symlinkSync(hey, join(bin, "hey-gh"));
 writeFileSync(
@@ -37,7 +34,8 @@ const project = "github.com/example/time",
   repo = "example/time";
 const env = {
   ...process.env,
-  PATH: bin + ":" + process.env.PATH,
+  HOME: root,
+  PATH: [bin, upstreamBin, process.env.PATH].join(":"),
   GH_CONFIG_DIR: config,
   GH_HOST: "github.com",
   GH_TOKEN: "fixture-personal",
@@ -125,6 +123,9 @@ const hub = createServer(async (req, res) => {
 });
 await new Promise((yes, no) => hub.listen(sock, yes).once("error", no));
 try {
+  const installer = resolve("packages/hey-gh/install-review-command.sh");
+  await ok(installer, []);
+  await ok(installer, []);
   await ok(boss, [
     "project",
     "init",
@@ -148,6 +149,21 @@ try {
   ]);
   const gh = join(bin, "gh"),
     api = "repos/" + repo + "/pulls/7";
+  for (const args of [
+    ["--version"],
+    ["pr", "review", "--help"],
+    ["api", "--help"],
+    ["--auth", "nonsense"],
+    ["pr", "review", "--bogus"],
+    ["pr", "review", "7", "-R", repo, "--approve", "--request-changes"],
+    ["pr", "review", "7", "-R", repo, "--body-file", "missing-file"],
+  ]) {
+    assert.deepEqual(
+      await run(gh, args),
+      await run(native, args),
+      "native gh parity: " + args.join(" "),
+    );
+  }
   const inline = JSON.parse(
     await ok(
       gh,
