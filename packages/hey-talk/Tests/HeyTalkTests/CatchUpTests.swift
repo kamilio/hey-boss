@@ -14,9 +14,10 @@ final class CatchUpTests: XCTestCase {
         XCTAssertTrue(sentences.isEmpty)
         _ = try event("response.output_text.delta", "5 percent. Jo")
         XCTAssertEqual(sentences, ["Revenue grew 3.5 percent."])
-        _ = try event("response.output_text.delta", " will follow up")
+        _ = try event("response.output_text.delta", " will follow up.\n\n")
+        _ = try event("response.output_text.delta", "Mei owns billing.")
         XCTAssertTrue(try event("response.completed"))
-        XCTAssertEqual(sentences, ["Revenue grew 3.5 percent.", "Jo will follow up"])
+        XCTAssertEqual(sentences, ["Revenue grew 3.5 percent.", " Jo will follow up.", "\n\nMei owns billing."])
     }
 
     func testIncompleteResponseDoesNotSpeakAnUnfinishedThought() throws {

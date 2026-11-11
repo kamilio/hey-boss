@@ -127,9 +127,9 @@ final class SpeechPlayback {
     }
     func append(_ sentence: String) throws {
         guard streaming, active else { return }
-        let offset = text.utf16.count + 1
+        let offset = text.utf16.count
         let parts = try SpeechText.segments(sentence)
-        text += " " + sentence
+        text += sentence
         chunks += parts.map { SpeechSegment(text: $0.text, range: NSRange(location: offset + $0.range.location, length: $0.range.length)) }
         onChange?(); pump()
     }

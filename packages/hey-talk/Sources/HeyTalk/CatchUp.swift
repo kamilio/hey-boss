@@ -37,7 +37,6 @@ struct SpokenRecap: Encodable {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         guard let url = bundle.url(forResource: "catch_up", withExtension: "md") else { throw TalkError("Reinstall Hey Talk to restore the recap prompt.") }
         var request = try ProxyResponses.request()
-        request.timeoutInterval = 45
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model":"gpt-6-luna", "store":false, "stream":true, "reasoning":["effort":"none"],
             "instructions":try String(contentsOf: url, encoding: .utf8), "input":String(decoding: try JSONEncoder().encode(self), as: UTF8.self)])
@@ -69,17 +68,23 @@ struct RecapStream {
             pending += event["delta"] as? String ?? ""
             // Keep the last fragment until the tokenizer sees the next sentence:
             // a delta ending in a period might be half of a decimal or abbreviation.
-            while !pending.isEmpty {
+            while let start = pending.firstIndex(where: { !$0.isWhitespace }) {
                 sentences.string = pending
-                let range = sentences.tokenRange(at: pending.startIndex)
-                guard !range.isEmpty, pending[range.upperBound...].contains(where: { !$0.isWhitespace }) else { break }
-                let sentence = pending[range].trimmingCharacters(in: .whitespacesAndNewlines)
-                pending = String(pending[range.upperBound...].drop(while: \.isWhitespace))
-                if !sentence.isEmpty { try onSentence(sentence); emitted = true }
+                let range = sentences.tokenRange(at: start)
+                guard !range.isEmpty, let end = pending[range].lastIndex(where: { !$0.isWhitespace }) else { break }
+                let next = pending.index(after: end)
+                let tail = pending[next...]
+                guard tail.contains(where: { !$0.isWhitespace }) || tail.contains(where: \.isNewline) else { break }
+                try onSentence(String(pending[(emitted ? pending.startIndex : start)..<next]))
+                emitted = true
+                pending = String(tail)
             }
         case "response.completed":
-            let rest = pending.trimmingCharacters(in: .whitespacesAndNewlines)
-            if !rest.isEmpty { try onSentence(rest); emitted = true }
+            if let end = pending.lastIndex(where: { !$0.isWhitespace }) {
+                let rest = String(pending[...end])
+                try onSentence(emitted ? rest : rest.trimmingCharacters(in: .whitespacesAndNewlines))
+                emitted = true
+            }
             guard emitted else { throw TalkError("The recap service returned no spoken text.") }
             return true
         case "error", "response.failed":
