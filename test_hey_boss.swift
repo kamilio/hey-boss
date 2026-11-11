@@ -159,9 +159,9 @@ func audit() {
         withExtendedLifetime(prompt) { app.run() }; return
     }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SYNC_ONLY"] == "1" { auditFleetSync(); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
     auditPromptClipboard()
     auditFleetSync()
-    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_QUOTA_ONLY"] == "1" { auditSubscriptionQuota(); return }
     auditSubscriptionQuota()
     auditQuickIssue()
     auditArtifactEditor()
@@ -404,6 +404,7 @@ func auditNativeQuickIssue() {
         if args.first == "projects" { completion(.success(bootstrap)) } else { reply = completion }
     }
     ui.open(cli: nil); precondition(ui.ready && ui.current == nil)
+    precondition(ui.window.collectionBehavior.contains(.canJoinAllSpaces), "Quick Add must also be visible over the active full-screen app")
     precondition(ui.canvas.bounds.width == ui.window.frame.width && ui.canvas.bounds.height == ui.window.frame.height, "Glass content must fill the quick-add panel")
     ui.current = projects[1]; ui.input.string = "Title"; ui.changed()
     precondition(ui.mediaHint.stringValue == "⌘V Attach image", "Only the attachment hint belongs below the editor")
@@ -3928,6 +3929,12 @@ func auditSubscriptionQuota() {
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"codex","id":"work"}]}"#.utf8)))
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"error","updated_at":2000}"#.utf8)))
     precondition(showsRefreshFailure() && ui.rows[0].reading?.data?.windows.count == 1, "Structured failures preserve limits and show the refresh failure")
+    ui.refresh()
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[{"provider":"claude","id":"default"}]}"#.utf8)))
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"account":{"provider":"claude","id":"default"},"state":"error","error":"Claude OAuth authorization rejected (HTTP 400); run hey-proxy claude-login"}"#.utf8)))
+    let authLabels = ui.body.subviews.flatMap { $0.subviews }.compactMap { $0 as? NSTextField }
+    precondition(authLabels.contains { $0.stringValue == "Sign in required" && $0.toolTip?.contains("claude-login") == true })
+
     ui.refresh()
     replies.removeFirst()(.success(Data(#"{"schema_version":1,"accounts":[]}"#.utf8)))
     precondition(!ui.loading && ui.rows.isEmpty && ui.message == "No subscriptions connected")
