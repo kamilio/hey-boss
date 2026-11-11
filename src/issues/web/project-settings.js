@@ -54,6 +54,7 @@ function projectSettingsDraft() {
     worktree_enabled: $("#project-worktree").checked,
     prs_enabled: $("#project-prs").checked,
     drafts_enabled: $("#project-drafts").checked,
+    code_reviews_enabled: $("#project-code-reviews").checked,
     artifacts_enabled: $("#project-artifacts").checked,
   };
 }
@@ -120,6 +121,7 @@ $("#project-settings-trigger").onclick = async event => {
     $("#project-pause-reason").value = value.pause_reason || "";
     $("#project-prs").checked = value.prs_enabled;
     $("#project-worktree").checked = value.worktree_enabled;
+    $("#project-code-reviews").checked = value.code_reviews_enabled === true;
     for (const resource of ["drafts", "artifacts"]) $("#project-" + resource).checked = value[resource + "_enabled"] !== false;
     projectSettingsOriginal = projectSettingsDraft();
     setProjectSettingsDisabled(false);
@@ -172,7 +174,7 @@ $("#project-settings-form").onsubmit = async (event) => {
     projectSettingsChanged();
   }
 };
-for (const resource of ["prs", "worktree", "drafts", "artifacts"]) $("#project-" + resource).onchange = projectSettingsChanged;
+for (const resource of ["prs", "worktree", "drafts", "artifacts", "code-reviews"]) $("#project-" + resource).onchange = projectSettingsChanged;
 $("#project-paused").onchange = projectSettingsChanged;
 $("#project-pause-reason").oninput = projectSettingsChanged;
 for (const field of ["model", "reasoning", "permissions"]) $("#project-worker-" + field).addEventListener("input", projectSettingsChanged);
@@ -200,7 +202,7 @@ function configField(key) {
     const section = key.slice('prompt_overrides.'.length);
     return 'prompts/' + (projectPromptSections.find(s => s.key === section)?.path || section + '.md');
   }
-  return ({worker_model:'Worker model',worker_reasoning:'Reasoning',worker_permissions:'Permissions',paused:'Paused',pause_reason:'Pause reason',prs_enabled:'Pull requests',worktree_enabled:'Worktrees',drafts_enabled:'Drafts',artifacts_enabled:'Artifacts'})[key] || key;
+  return ({worker_model:'Worker model',worker_reasoning:'Reasoning',worker_permissions:'Permissions',paused:'Paused',pause_reason:'Pause reason',prs_enabled:'Pull requests',worktree_enabled:'Worktrees',drafts_enabled:'Drafts',artifacts_enabled:'Artifacts',code_reviews_enabled:'Code Reviews'})[key] || key;
 }
 function configValue(value) {
   if (value === null || value === undefined) return 'Inherited default';

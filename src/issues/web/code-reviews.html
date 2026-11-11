@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Code Reviews · Hey Boss</title>
+    <link rel="icon" href="/icon.png" />
+    <link rel="stylesheet" href="/components.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/code-reviews.css" />
+    <script src="/routes.js" defer></script>
+    <script src="/components.js" defer></script>
+    <script src="/quick-issue.js" defer></script>
+    <script src="/code-reviews.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#reviews-main">Skip to code reviews</a
+    ><!--app-shell-->
+    <main id="reviews-main">
+      <header class="reviews-heading">
+        <div>
+          <p class="reviews-eyebrow">PULL REQUESTS</p>
+          <h1>Code Reviews</h1>
+          <p>
+            Read the findings, edit the wording, and choose what reaches GitHub.
+          </p>
+        </div>
+        <button id="reviews-refresh" class="button">Refresh</button>
+      </header>
+      <div id="reviews-error" role="alert" hidden></div>
+      <div class="reviews-layout">
+        <aside aria-label="Review queue">
+          <h2>Review queue <span id="reviews-count"></span></h2>
+          <div id="reviews-list"></div>
+        </aside>
+        <section id="reviews-detail" aria-label="Selected review">
+          <p role="status">Loading reviews…</p>
+        </section>
+      </div>
+      <p id="reviews-status" role="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>

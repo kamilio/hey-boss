@@ -324,6 +324,7 @@ function date(at) {
       const settings = {...projects.find(p => p.id === project?.id), ...project};
       for (const [id, enabled] of [
         ["nav-artifacts", project && settings.artifacts_enabled !== false],
+        ["nav-code-reviews", project && settings.code_reviews_enabled === true],
         ["nav-merged-prs", project && settings.prs_enabled === true],
       ]) {
         const link = $("#" + id);
