@@ -7,7 +7,6 @@ mod broker;
 mod cli_request;
 mod companion;
 mod config_cli;
-mod error_cli;
 mod event_cli;
 mod exec_cli;
 mod health_cli;
@@ -180,8 +179,6 @@ fn parse_icon_file(value: &str) -> Result<std::path::PathBuf, String> {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Local error ingestion and frequency-ranked diagnostics.
-    Errors(error_cli::Options),
     /// Durable fleet events: inspect history or follow newly arriving facts.
     Events(event_cli::Options),
     /// Local encrypted records, explicit machine grants, and metadata inventory.
@@ -620,13 +617,6 @@ fn run() -> std::io::Result<()> {
                 } else {
                     eprintln!("hey-boss project: {error}");
                 }
-                std::process::exit(error.exit_code());
-            }
-            return Ok(());
-        }
-        Command::Errors(options) => {
-            if let Err(error) = error_cli::run(options) {
-                eprintln!("hey-boss errors: {error}");
                 std::process::exit(error.exit_code());
             }
             return Ok(());

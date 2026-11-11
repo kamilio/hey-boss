@@ -47,7 +47,7 @@ assert.equal(context.ui.projectId('github.com/example/real'), savedProject, 'kee
 context.location.hash = '#project=github.com/example/link';
 assert.equal(context.ui.projectId('github.com/example/real'), 'github.com/example/link', 'explicit links win');
 
-context.location.pathname = '/errors';
+context.location.pathname = '/artifacts';
 context.location.hash = '#project=old&host=remote';
 const project = 'named:Beta & more / #2';
 update({id:project,name:'Beta'});
@@ -74,7 +74,7 @@ assert.equal(nodes.get('#nav-issues').href, '#project=mobile&state=closed', 'Iss
 assert.equal(nodes.get('#nav-inbox').href, '#project=mobile&view=inbox&inbox_state=archive', 'Inbox filters remain owned by the issue page');
 console.log('All project sections carry selection; global links and page filters keep their scope');
 
-context.location.pathname = '/errors';
+context.location.pathname = '/artifacts';
 context.location.hash = '';
 update({id:project,name:'Beta'});
 assert.equal(new URLSearchParams(context.location.hash.slice(1)).get('project'), project, 'Direct project pages pin the remembered selection for browser history');

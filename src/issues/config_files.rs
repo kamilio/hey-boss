@@ -225,6 +225,7 @@ fn migrate_prompt_names(dir: &Path) -> Result<()> {
         "layout",
         "resume",
         "handoff",
+        "error_task",
         "goal_continue",
     ] {
         let old = prompts.join(format!("{key}.md"));
@@ -416,16 +417,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         base.as_object_mut().unwrap().remove("pending");
     }
     let previous: Files = serde_json::from_value(base["files"].clone())?;
-    let mut changes = edit(&previous, &disk)?;
-    // An absent disabled file is not a request to clear its saved override.
-    if settings["prompt_defaults"].get("error_task").is_none()
-        && disk["prompts/error_task.md"].is_none()
-    {
-        changes
-            .as_object_mut()
-            .unwrap()
-            .remove("prompt_overrides.error_task");
-    }
+    let changes = edit(&previous, &disk)?;
     let changed = !changes.as_object().unwrap().is_empty();
     if changed {
         let mut req = request(
@@ -445,10 +437,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         store.execute(&req)?;
         settings = store.execute(&request(project, actor, Operation::ProjectSettings))?;
     }
-    let mut next = desired(&settings, &disk)?;
-    if settings["prompt_defaults"].get("error_task").is_none() {
-        next.insert("prompts/error_task.md".into(), None);
-    }
+    let next = desired(&settings, &disk)?;
     let revision: Option<String> = store.db.query_row("SELECT id FROM project_config_revisions WHERE project_id=?1 ORDER BY sequence DESC,id DESC LIMIT 1", [&project.id], |r| r.get(0)).optional()?;
     let pending = json!({"files":disk,"pending":next,"revision":revision});
     let root_string = root.to_string_lossy();

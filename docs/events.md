@@ -60,7 +60,6 @@ consumption, or exactly-once execution of downstream actions.
 | `job.queued`, `job.started`, `job.finished`, `job.skipped` | Saved scheduler transitions, per-machine children and aggregate completion, execution machine/session |
 | `machine.disk_low`, `machine.disk_recovered` | Available and total bytes on sampled local volumes |
 | `peer.connected`, `peer.disconnected` | Reporter's observation of an outgoing CRDT route |
-| `error.observed` | Enabled local collectors: source, group reference, count, selected error classification |
 
 Lifecycle facts commit with saved state; duplicate callbacks do not duplicate them.
 Tool/input observations can be skipped with a diagnostic if the database is busy,
@@ -77,14 +76,8 @@ samples. A completely full database volume may be unable to record its own fault
 Connectivity is also sampled once a minute; a disconnected route is an observation
 by that reporter, not a global verdict that the remote machine is down.
 
-Error collection remains opt-in. New accepted errors queue selected evidence in
-the inbox transaction; fleet maintenance bridges it into this log with retry-safe
-IDs. Existing raw history is not backfilled. Raw messages, stacks, request bodies,
-prompts, tool arguments and responses are not copied by these producers. Inspect
-a group on its collector with `hey-boss errors --project PROJECT show GROUP_ID`.
-
 This layer does not ingest every desktop chat, unmanaged agent session, or proxy
-trace. Proxy/application adapters can use existing normalized error ingestion.
+trace.
 AI interpretation, prompts, alerts, and automatic remediation are future consumers;
 none run here.
 
