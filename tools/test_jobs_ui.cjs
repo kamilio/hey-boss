@@ -69,6 +69,15 @@ assert.equal(availability([machine],'p','codex',200000),false);
  for(const crypto of [webcrypto,{getRandomValues:webcrypto.getRandomValues.bind(webcrypto)}]){
   const context=vm.createContext({crypto,document:{addEventListener(){}}});
   vm.runInContext(readFileSync('src/issues/web/components.js','utf8'),context);
+  const warning = vm.runInContext('HeyBossUI.jobWarning',context);
+  const now=900000, enabled={enabled:true};
+  assert.equal(warning({...enabled,status:{state:'pending',at:0}},now),'Stalled');
+  assert.equal(warning({...enabled,status:{state:'pending',at:now-1000}},now),'');
+  assert.equal(warning({...enabled,status:{state:'failed'}},now),'Failed');
+  assert.equal(warning({enabled:false,status:{state:'failed'}},now),'');
+  const ghost={state:'pending',created_at:1};
+  assert.equal(warning({...enabled,active_run:ghost,last_run:{reason:'overlap',scheduled_at:400000},status:{state:'succeeded',finished_at:500000}},now),'');
+  assert.equal(warning({...enabled,active_run:ghost,last_run:{reason:'overlap',scheduled_at:550000},status:{state:'succeeded',finished_at:500000}},now),'Stalled');
   delete context.document;
   vm.runInContext(readFileSync('src/issues/web/jobs.js','utf8')+'\nthis.Mutation=HeyBossJobs.Mutation;',context);
   const sent=[],saved=[];

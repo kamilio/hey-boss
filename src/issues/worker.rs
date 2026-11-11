@@ -182,7 +182,7 @@ pub(crate) fn validate_settings_structure(c: &Settings) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
+pub(crate) fn checkout_matches_project(path: &Path, project: &str) -> Result<bool> {
     let machine = identity::machine()?;
     let (actual, bound) = identity::project_with_binding(path, &machine)?;
     // Adding an origin does not invalidate the saved identity of this same

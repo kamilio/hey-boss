@@ -53,7 +53,7 @@ impl Store {
     }
     /// A generation is never reassigned on timeout. Only an acknowledged revoke
     /// before submission can release its owner; submitted work completes once.
-    pub(crate) fn assign_job(&self, id: &str, node: &str, worker: &str) -> Result<bool> {
+    pub(crate) fn assign_job(&self, id: &str, node: &str, worker: Option<&str>) -> Result<bool> {
         authority(&self.db)?;
         let tx =
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -263,7 +263,10 @@ impl Store {
                 }
             }
             if report.state == "skipped" {
-                tx.execute("UPDATE scheduled_job_runs SET machine=?2 WHERE id=?1", params![run.id, node])?;
+                tx.execute(
+                    "UPDATE scheduled_job_runs SET machine=?2 WHERE id=?1",
+                    params![run.id, node],
+                )?;
             }
             if report.state != "running" {
                 let state = if stop_requested {

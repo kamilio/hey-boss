@@ -2,7 +2,7 @@
 
 **Scheduled jobs** lists recurring definitions, including paused schedules. **Runs** lists individual executions, newest first: one-off commands, scheduled occurrences, and manual **Run now** attempts. A schedule keeps its own run history. Old one-off job links open the corresponding run.
 
-`hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs to a running worker for the project. Jobs use no task slots, so a full worker can still run them. Without a running worker, runs wait.
+`hey-boss job --help` manages schedules and run history. The fleet supervisor dispatches due jobs to a running worker for the project. Jobs use no task slots, so a full worker can still run them. Agent jobs wait for a running worker. Script jobs can also run directly in a configured machine checkout. The Scheduled jobs navigation shows a warning for enabled schedules that fail or fall behind by more than five minutes.
 
 Placement is automatic by default. In the editor, choose **Specific machines** and add machines in priority order; move a fallback up to change the order. The CLI accepts repeated `--machine NODE_ID` on create/edit, and the definition API accepts `"machines":["primary-node-id","fallback-node-id"]`. IDs are the stable fleet node IDs, not hostnames. The first connected, fresh machine with an eligible project worker and harness wins. If none qualify, the run waits; unlisted machines are never used. One entry pins a job to one machine. Omit the list (or use an empty list) to restore automatic placement. Edits replace the list along with the other definition fields. Each run keeps its revision’s list; changing it affects future runs. Fallback applies before assignment; a disconnected owner retains custody until the existing fenced handoff protocol permits release.
 
@@ -34,7 +34,7 @@ Select **Script** in the editor, or pass `--executable` instead of agent setting
 hey-boss job create --id refresh-index --name "Refresh index" --cron "0 9 * * *" --timezone America/Chicago --executable refresh-index
 ```
 
-The assigned worker runs the executable in the project checkout itself. A bare name uses the worker’s PATH; absolute paths and paths like `./scripts/refresh-index` also work. Install the executable on each intended machine. The field names one program; put arguments or shell commands inside the script. All placement modes, Run Now, overlap protection, and Stop work as for agent jobs. No agent runtime or worktree is needed.
+A machine with a configured project checkout runs the script there even when task workers are paused or absent. Machines without a configured checkout can still use a running worker’s checkout. A bare name uses the worker’s PATH; absolute paths and paths like `./scripts/refresh-index` also work. Install the executable on each intended machine. The field names one program; put arguments or shell commands inside the script. All placement modes, Run Now, overlap protection, and Stop work as for agent jobs. No agent runtime or worktree is needed.
 
 After execution, open **View log** in run history or use `hey-boss job logs JOB_ID RUN_ID`. Standard output and errors are saved together and transferred in pages. Transfer resumes on reconnect. A nonzero exit or missing executable marks only that execution failed; no failure notification is sent.
 

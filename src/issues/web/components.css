@@ -1133,3 +1133,5 @@ textarea::placeholder {
 .attempt-notice dl > div { margin-top: 8px; }
 .attempt-notice dt { font-size: 12px; font-weight: 600; }
 .attempt-notice dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+
+#jobs-warning { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, var(--surface)); font-weight: 650; }
