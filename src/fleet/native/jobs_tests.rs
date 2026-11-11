@@ -45,7 +45,7 @@ fn scheduled_jobs_follow_project_execution_on_new_and_resumed_runs() {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+            f.store.assign_job(&run, &f.ctx.node, Some("pool")).unwrap();
             f.store
                 .job_dispatches(&f.ctx.node)
                 .unwrap()
@@ -111,7 +111,7 @@ fn scheduled_job_model_can_inherit_project_or_machine_configuration() {
                 .as_str()
                 .unwrap()
                 .to_owned();
-            f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+            f.store.assign_job(&run, &f.ctx.node, Some("pool")).unwrap();
             f.store
                 .job_dispatches(&f.ctx.node)
                 .unwrap()
@@ -197,7 +197,7 @@ fn job_thread_mode_starts_fresh_by_default_and_resumes_only_when_selected() {
             .as_str()
             .unwrap()
             .to_owned();
-        f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+        f.store.assign_job(&run, &f.ctx.node, Some("pool")).unwrap();
         f.store
             .job_dispatches(&f.ctx.node)
             .unwrap()
@@ -328,7 +328,9 @@ impl Fixture {
             .as_str()
             .unwrap()
             .to_owned();
-        self.store.assign_job(&run, &self.ctx.node, "pool").unwrap();
+        self.store
+            .assign_job(&run, &self.ctx.node, Some("pool"))
+            .unwrap();
         self.store
             .job_dispatches(&self.ctx.node)
             .unwrap()
@@ -636,7 +638,7 @@ fn companion_sync_preserves_snapshot_exact_model_and_terminal_ack() {
     supervisor.store.accept_job_report("test", &ack).unwrap();
     supervisor
         .store
-        .assign_job(&dispatch.run.id, "companion", "pool")
+        .assign_job(&dispatch.run.id, "companion", Some("pool"))
         .unwrap();
     dispatch = supervisor
         .store
@@ -1447,7 +1449,7 @@ fn exec_command_isolated_files_arguments_model_and_output_roundtrip() {
         "harness":"claude","model":"exact-model","effort":"high"
     }})).unwrap();
     let id = f.op(op)["run"]["id"].as_str().unwrap().to_owned();
-    f.store.assign_job(&id, &f.ctx.node, "pool").unwrap();
+    f.store.assign_job(&id, &f.ctx.node, Some("pool")).unwrap();
     let d = f
         .store
         .job_dispatches(&f.ctx.node)
@@ -1483,7 +1485,7 @@ fn exec_cancellation_allows_saving_output_before_stopping() {
         "program":"/bin/sh","args":["-c","trap 'printf saved > result/cancelled; exit 0' TERM; printf ready > result/ready; while :; do sleep 1; done"]
     }})).unwrap();
     let id = f.op(op)["run"]["id"].as_str().unwrap().to_owned();
-    f.store.assign_job(&id, &f.ctx.node, "pool").unwrap();
+    f.store.assign_job(&id, &f.ctx.node, Some("pool")).unwrap();
     let d = f
         .store
         .job_dispatches(&f.ctx.node)
@@ -1680,7 +1682,7 @@ fn condition_controls_agent_launch_and_saved_history() {
             .as_str()
             .unwrap()
             .to_owned();
-        f.store.assign_job(&run, &f.ctx.node, "pool").unwrap();
+        f.store.assign_job(&run, &f.ctx.node, Some("pool")).unwrap();
         let dispatch = f
             .store
             .job_dispatches(&f.ctx.node)
@@ -1701,5 +1703,49 @@ fn condition_controls_agent_launch_and_saved_history() {
             })["run"]["state"],
             expected
         );
+    }
+}
+
+#[test]
+fn checkout_runs_scheduled_script_without_task_workers() {
+    let mut f = Fixture::new();
+    f.store.unregister_worker("pool").unwrap();
+    f.ctx
+        .atomic_json(
+            &f.ctx.state.join("project-checkouts.json"),
+            &json!({(PROJECT): {"path": f.root, "key":"test"}}),
+        )
+        .unwrap();
+    f.op(serde_json::from_value(json!({"command":"create","id":"workerless","enabled":false,
+        "definition":{"name":"Check checkout","cron":"* * * * *","timezone":"UTC","executable":"/bin/pwd"}})).unwrap());
+    let run = f.op(Operation::RunNow {
+        id: "workerless".into(),
+    })["run"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    schedule(&f.ctx, &f.machines()).unwrap();
+    reconcile(&f.ctx).unwrap();
+    let started = Instant::now();
+    loop {
+        if let Some(report) = reports(&f.ctx)
+            .unwrap()
+            .into_iter()
+            .find(|r| r.run_id == run && r.state == "succeeded")
+        {
+            assert!(
+                report
+                    .log
+                    .unwrap()
+                    .output
+                    .contains(f.root.to_str().unwrap())
+            );
+            break;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "Script did not run without a task worker"
+        );
+        std::thread::sleep(Duration::from_millis(20));
     }
 }

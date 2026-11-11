@@ -51,7 +51,15 @@ pub(super) fn capability(ctx: &Context) -> Result<Value> {
             )
         })
         .collect();
-    Ok(json!({"available":true,"workers":workers,"runtimes":runtimes}))
+    let checkouts = super::projects::resolved(ctx)?;
+    let script_projects = checkouts
+        .as_object()
+        .into_iter()
+        .flat_map(|o| o.keys())
+        .collect::<Vec<_>>();
+    Ok(
+        json!({"script_projects":script_projects,"available":true,"workers":workers,"runtimes":runtimes}),
+    )
 }
 
 pub(super) fn reports(ctx: &Context) -> Result<Vec<Report>> {
@@ -287,13 +295,27 @@ pub(super) fn reconcile(ctx: &Context) -> Result<()> {
         if owner.is_some_and(|pid| crate::agents::process_identity(pid) == start) {
             continue;
         }
-        if owner.is_none() && !dispatch.revoke {
+        if owner.is_none()
+            && !dispatch.revoke
+            && !(dispatch.run.worker_id.is_none()
+                && dispatch.run.snapshot.definition.executable.is_some())
+        {
             continue;
         }
         let Some(_lock) = ctx.lock(&format!("job-{}.lock", dispatch.run.id), false)? else {
             continue;
         };
-        execute(ctx, &dispatch)?;
+        if owner.is_none() && !dispatch.revoke {
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _lock = _lock;
+                if let Err(e) = execute(&ctx, &dispatch) {
+                    eprintln!("Script execution failed: {e}");
+                }
+            });
+        } else {
+            execute(ctx, &dispatch)?;
+        }
     }
     Ok(())
 }
@@ -455,20 +477,35 @@ fn run_session(
     d: &Dispatch,
     report: &mut Report,
 ) -> Result<(String, Option<String>)> {
-    let worker = d
-        .run
-        .worker_id
-        .as_deref()
-        .ok_or_else(|| replica::invalid("Job has no assigned worker"))?;
-    let store = Store::open(&ctx.path)?;
-    let config = store
-        .job_worker_projects(worker)?
-        .remove(&d.run.snapshot.project_id)
-        .ok_or_else(|| {
-            replica::invalid(
-                "Assigned worker is paused, stopped, or no longer has this project checkout",
-            )
-        })?;
+    let project = &d.run.snapshot.project_id;
+    let config = if let Some(worker) = &d.run.worker_id {
+        Store::open(&ctx.path)?
+            .job_worker_projects(worker)?
+            .remove(project)
+            .ok_or_else(|| {
+                replica::invalid(
+                    "Assigned worker is paused, stopped, or no longer has this project checkout",
+                )
+            })?
+    } else {
+        let checkouts = super::projects::resolved(ctx)?;
+        let cwd = checkouts[project]["path"]
+            .as_str()
+            .filter(|_| {
+                d.run.snapshot.definition.executable.is_some()
+                    && d.run.snapshot.definition.execution.is_none()
+            })
+            .ok_or_else(|| replica::invalid("Script has no project checkout on this machine"))?;
+        if !crate::issues::worker::checkout_matches_project(std::path::Path::new(cwd), project)? {
+            return Err(replica::invalid(
+                "Script checkout no longer matches the project",
+            ));
+        }
+        crate::issues::worker::ProjectConfig {
+            cwd: cwd.into(),
+            ..Default::default()
+        }
+    };
     if d.run.snapshot.definition.execution.is_some() {
         return command::run(ctx, d, report);
     }
@@ -695,7 +732,10 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
             if !revoking
                 && run.started_at.is_none()
                 && let Some(machine) = machines.iter().find(|m| m["node"] == node && connected(m))
-                && !eligible_workers(machine, &run).any(|id| Some(id) == run.worker_id.as_deref())
+                && !run.worker_id.as_deref().map_or_else(
+                    || machine_script(machine, &run),
+                    |worker| eligible_workers(machine, &run).any(|id| id == worker),
+                )
             {
                 store.revoke_job(&run.id, &node, generation)?;
             }
@@ -719,7 +759,8 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
         let eligible = |m: &Value| {
             (!peer || run.snapshot.definition.execution.is_some() || m["node"] == ctx.node)
                 && connected(m)
-                && eligible_workers(m, &run).any(|id| worker_fits(m, id))
+                && (machine_script(m, &run)
+                    || eligible_workers(m, &run).any(|id| worker_fits(m, id)))
         };
         let targets = &run.snapshot.definition.machines;
         let machine = if let Some(node) = &run.target_machine {
@@ -731,12 +772,12 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 .iter()
                 .find_map(|node| machines.iter().find(|m| m["node"] == *node && eligible(*m)))
         };
-        let candidate = machine.and_then(|m| {
-            eligible_workers(m, &run)
-                .find(|id| worker_fits(m, id))
-                .map(|worker| (m, worker))
-        });
-        if let Some((machine, worker)) = candidate {
+        if let Some(machine) = machine {
+            let worker = if machine_script(machine, &run) {
+                None
+            } else {
+                eligible_workers(machine, &run).find(|id| worker_fits(machine, id))
+            };
             let assigned = store.assign_job(
                 &run.id,
                 machine["node"]
@@ -744,7 +785,10 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                     .ok_or_else(|| replica::invalid("Missing worker machine"))?,
                 worker,
             )?;
-            if assigned && run.snapshot.definition.execution.is_some() {
+            if assigned
+                && run.snapshot.definition.execution.is_some()
+                && let Some(worker) = worker
+            {
                 *occupied.entry(worker.to_owned()).or_default() += 1;
             }
         } else {
@@ -777,6 +821,13 @@ fn connected(machine: &Value) -> bool {
     machine["state"] == "connected"
         && super::context::now() - machine["heartbeat"].as_f64().unwrap_or(0.0) < 15.0
         && machine["jobs"]["available"] == true
+}
+fn machine_script(machine: &Value, run: &crate::jobs::Run) -> bool {
+    run.snapshot.definition.executable.is_some()
+        && run.snapshot.definition.execution.is_none()
+        && machine["jobs"]["script_projects"]
+            .as_array()
+            .is_some_and(|p| p.iter().any(|id| id == &run.snapshot.project_id))
 }
 fn eligible_workers<'a>(
     machine: &'a Value,

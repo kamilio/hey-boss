@@ -235,7 +235,7 @@ fn old_job_history_and_ownership_survive_migration_without_new_tasks() {
             params![run.id, number],
         )
         .unwrap();
-    f.store.assign_job(&run.id, "remote", "pool").unwrap();
+    f.store.assign_job(&run.id, "remote", Some("pool")).unwrap();
     let columns = RUN_COLUMNS
         .replace(",worker_id", "")
         .replace(",parent_run_id,target_machine", "");
@@ -799,11 +799,11 @@ fn runner_fences_handoff_and_late_reports_without_changing_issues() {
     let run = f.store.enqueue_job(&occurrence).unwrap();
     assert!(run.task_number.is_none());
     assert_eq!(old, 1);
-    assert!(f.store.assign_job(&run.id, "first", "pool").unwrap());
-    assert!(!f.store.assign_job(&run.id, "second", "pool").unwrap());
+    assert!(f.store.assign_job(&run.id, "first", Some("pool")).unwrap());
+    assert!(!f.store.assign_job(&run.id, "second", Some("pool")).unwrap());
     f.reopen();
     assert!(
-        !f.store.assign_job(&run.id, "second", "pool").unwrap(),
+        !f.store.assign_job(&run.id, "second", Some("pool")).unwrap(),
         "restart/disconnect never releases an owner"
     );
     let dispatch = f.store.job_dispatches("first").unwrap().remove(0);
@@ -816,11 +816,11 @@ fn runner_fences_handoff_and_late_reports_without_changing_issues() {
     );
     f.store.revoke_job(&run.id, "first", 1).unwrap();
     assert!(
-        !f.store.assign_job(&run.id, "second", "pool").unwrap(),
+        !f.store.assign_job(&run.id, "second", Some("pool")).unwrap(),
         "revoke is not acknowledgement"
     );
     assert!(f.store.accept_job_report("first", &ack).unwrap());
-    assert!(f.store.assign_job(&run.id, "second", "pool").unwrap());
+    assert!(f.store.assign_job(&run.id, "second", Some("pool")).unwrap());
     let second = f.store.job_dispatches("second").unwrap().remove(0);
     assert_eq!(second.generation, 2);
     ack.state = "running".into();
@@ -884,7 +884,7 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_run_status() {
         .unwrap();
     assert_eq!(f.store.enqueue_job(&occurrence).unwrap().state, "skipped");
     let id = run["id"].as_str().unwrap();
-    f.store.assign_job(id, "local", "pool").unwrap();
+    f.store.assign_job(id, "local", Some("pool")).unwrap();
     let dispatch = f.store.job_dispatches("local").unwrap().remove(0);
     f.op(
         JobOperation::Stop {
@@ -912,7 +912,7 @@ fn manual_overlap_stop_pause_and_failure_keep_honest_run_status() {
         .manual_job("named:Jobs", "job", "failed", H + 4)
         .unwrap();
     let run = f.store.enqueue_job(&occurrence).unwrap();
-    f.store.assign_job(&run.id, "local", "pool").unwrap();
+    f.store.assign_job(&run.id, "local", Some("pool")).unwrap();
     let mut report = Report::pending(&f.store.job_dispatches("local").unwrap().remove(0));
     report.state = "failed".into();
     report.finished_at = Some(H + 5);

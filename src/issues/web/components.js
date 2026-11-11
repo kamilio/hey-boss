@@ -216,10 +216,51 @@ function date(at) {
     } catch {}
     return fallback;
   }
+  function jobWarning(job, now = Date.now()) {
+    if (!job.enabled || job.deleted_at) return '';
+    const status = job.status || job.active_run || job.last_run;
+    if (status?.state === 'failed') return 'Failed';
+    const cutoff = now - 5 * 60000;
+    if (status?.state === 'pending' && (status.at ?? status.created_at) < cutoff) return 'Stalled';
+    const last = job.last_run;
+    if ((job.next_at && job.next_at < cutoff) || (last?.reason === 'overlap' && last.scheduled_at < cutoff &&
+        last.scheduled_at > (status?.finished_at || status?.at || status?.created_at || 0))) return 'Stalled';
+    return '';
+  }
+  let healthContext, healthTimer, healthBoot;
+  function watchJobHealth(project, host) {
+    const badge = $('#jobs-warning'), link = $('#nav-jobs');
+    if (!badge || !link) return;
+    const key = JSON.stringify([project,host]);
+    if (healthContext === key) return;
+    healthContext = key; clearTimeout(healthTimer); badge.hidden = true; link.removeAttribute('title');
+    async function refresh() {
+      if (key !== healthContext) return;
+      try {
+        if (!document.hidden) {
+          const boot = healthBoot ||= await (await fetch('/api/bootstrap')).json();
+          const names = []; let after = null;
+          do {
+            const result = await post('/api/action', {project,...(host?{host}:{}),operation:{action:'job',operation:{command:'list',after,limit:100,include_deleted:false}}}, boot,
+              {mobile:Object.keys(document.documentElement.dataset).some(k=>k.endsWith('Mobile') && document.documentElement.dataset[k]==='true')});
+            if (key !== healthContext) return;
+            for (const job of result.jobs) { const warning = jobWarning(job); if (warning) names.push(job.snapshot.definition.name + ': ' + warning); }
+            after = result.next_cursor;
+          } while (after);
+          badge.hidden = !names.length; badge.textContent = '⚠ ' + names.length;
+          badge.setAttribute('aria-label', names.length + ' jobs need attention');
+          if (names.length) link.title = names.join('\n'); else link.removeAttribute('title');
+        }
+      } catch { if (key === healthContext) { badge.textContent = '⚠'; badge.hidden = false; badge.setAttribute('aria-label','Job status unavailable'); link.title = 'Job status unavailable'; } }
+      if (key === healthContext) healthTimer = setTimeout(refresh,60000);
+    }
+    refresh();
+  }
   function projectNavigation(project) {
     const route = new URLSearchParams(location.hash.slice(1));
     const hash = new URLSearchParams({project});
     const host = route.get('host');
+    watchJobHealth(project, host);
     if (host && !Object.keys(document.documentElement.dataset).some(key => key.endsWith('Mobile'))) hash.set('host', host);
     // Every project tab inherits context; global overflow entries keep their scope.
     let projectPage = false;
@@ -378,5 +419,5 @@ function date(at) {
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||fallback);
       return value;
     }
-  return {post, pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  return {jobWarning, post, pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

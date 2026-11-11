@@ -304,7 +304,21 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
         &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND parent_run_id IS NULL AND state IN ('pending','running') LIMIT 1"),
         [&job.id], run_row,
     ).optional()?;
+    // A peer outside a pinned job's placement can report a pending run forever.
+    // Use the target's last actual attempt for display, retaining local run controls.
+    let target_run = if history == "distributed_job_runs" && job.snapshot.definition.machines.len() == 1 {
+        let target = &job.snapshot.definition.machines[0];
+        db.query_row(&format!("SELECT {RUN_COLUMNS} FROM distributed_job_runs r
+            WHERE project_id=?1 AND job_id=?2 AND parent_run_id IS NULL
+            AND NOT (state='skipped' AND reason IS 'overlap')
+            AND (machine=?3 OR (machine IS NULL AND EXISTS (
+              SELECT 1 FROM distributed_fields f WHERE f.table_name='scheduled_job_runs' AND f.entity=json_object('id',r.id)
+              AND f.field='@row' AND (f.origin=?3 OR substr(f.origin,1,length(?3)+1)=?3||':'))))
+            ORDER BY scheduled_at DESC,id DESC LIMIT 1"), params![job.project_id,job.id,target],run_row).optional()?
+    } else { None };
+    let status = target_run.as_ref().or(active.as_ref()).or(last.as_ref());
     let mut value = serde_json::to_value(job)?;
+    value["status"] = status.map(|r| json!({"state":r.state,"at":r.started_at.unwrap_or(r.created_at),"reason":r.reason,"finished_at":r.finished_at})).unwrap_or(Value::Null);
     value["last_run"] = serde_json::to_value(last)?;
     value["active_run"] = serde_json::to_value(active)?;
     Ok(value)
