@@ -792,12 +792,24 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 *occupied.entry(worker.to_owned()).or_default() += 1;
             }
         } else {
-            let reason = if let Some(node) = &run.target_machine {
+            let reason = if run.snapshot.definition.executable.is_some()
+                && run.snapshot.definition.execution.is_none()
+            {
+                let placement = run
+                    .target_machine
+                    .clone()
+                    .unwrap_or_else(|| targets.join(" → "));
+                if placement.is_empty() {
+                    "Waiting for a connected machine with this project checkout.".to_owned()
+                } else {
+                    format!(
+                        "Waiting for this project checkout on the selected machines ({placement})."
+                    )
+                }
+            } else if let Some(node) = &run.target_machine {
                 format!(
                     "Waiting for an eligible worker on machine {node}. This execution cannot move to another machine."
                 )
-            } else if targets.is_empty() && run.snapshot.definition.executable.is_some() {
-                "Waiting for a running script worker with this project checkout.".to_owned()
             } else if targets.is_empty() {
                 "Waiting for a running worker with this project checkout and the selected harness. Job runs do not use task slots.".to_owned()
             } else {
