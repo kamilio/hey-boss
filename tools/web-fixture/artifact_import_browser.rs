@@ -442,3 +442,94 @@ fn retrying_the_library_and_saving_an_import_with_the_keyboard() {
     p.eval("el('#artifact-archived').click()").unwrap();
     p.wait("el('.artifact-row')?.innerText.includes('Imported verification') && el('.artifact-card-label').innerText.toLowerCase().includes('archived')");
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn issue_attachments_keep_the_same_document_after_unlink_and_rename() {
+    let f = installed_fixture();
+    f.init(PROJECT).unwrap();
+    run(f.issue(PROJECT, &["create", "--title", "Design request"])).unwrap();
+    cli(
+        &f,
+        &[
+            "artifact",
+            "create",
+            "--title",
+            "Unrelated note",
+            "--body",
+            "A separate document",
+        ],
+    );
+    let (_server, base) = web(&f, PROJECT);
+    let mut p = Page::open("about:blank");
+    p.command("Page.enable", json!({})).unwrap();
+    p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);window.fill=(s,v)=>{const e=el(s);e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}))}"})).unwrap();
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{base}/#project=named%3AMarkdown+attachments&issue=1")}),
+    )
+    .unwrap();
+    p.wait("el('#issue-artifacts [data-create-artifact]')?.checkVisibility()");
+    p.eval("el('[data-create-artifact]').click()").unwrap();
+    p.wait("el('#artifact-title')?.checkVisibility()");
+    assert_eq!(
+        p.eval("Object.fromEntries(new URLSearchParams(location.hash.slice(1)))")
+            .unwrap(),
+        json!({"new":"1","issue":"1","project":format!("named:{PROJECT}")})
+    );
+    p.eval("fill('#artifact-title','Shared plan');fill('#artifact-body','# Shared design');el('#artifact-editor').requestSubmit()").unwrap();
+    p.wait("el('.artifact-backlinks a')?.textContent.includes('#1')");
+    let url = p.eval("location.href").unwrap();
+    let id = p
+        .eval("new URLSearchParams(location.hash.slice(1)).get('artifact')")
+        .unwrap();
+    p.eval("el('.artifact-backlinks a').click()").unwrap();
+    p.wait("el('.artifact-attachment-list a')?.textContent==='Shared plan'");
+    p.eval("el('#issue-artifacts [data-unlink]').click()")
+        .unwrap();
+    p.wait("!!el('[data-create-artifact]') && !el('.artifact-attachment-list a')");
+    p.eval("el('[data-attach]').click();fill('[data-attach-form] input','missing document')")
+        .unwrap();
+    p.wait("el('[data-attach-status]')?.textContent==='No matching artifacts'");
+    assert_eq!(
+        p.eval("el('[data-attach-form] [type=submit]').disabled")
+            .unwrap(),
+        true
+    );
+    p.eval("el('[data-attach-cancel]').click()").unwrap();
+    assert_eq!(
+        p.eval("!el('[data-attach-form] input') && el('[data-attach]')===document.activeElement")
+            .unwrap(),
+        true
+    );
+    p.eval("el('[data-attach]').click();fill('[data-attach-form] input','Shared plan')")
+        .unwrap();
+    p.wait("el('[data-attach-form] select')?.options.length===1 && !el('[data-attach-form] [type=submit]').disabled");
+    assert_eq!(p.eval("el('[data-attach-form] select').value").unwrap(), id);
+    p.eval("el('[data-attach-form] [type=submit]').click()")
+        .unwrap();
+    p.wait("el('.artifact-attachment-list a')?.textContent==='Shared plan'");
+    p.eval("el('.artifact-attachment-list a').click()").unwrap();
+    p.wait("el('.artifact-backlinks a')?.textContent.includes('#1')");
+    assert_eq!(p.eval("location.href").unwrap(), url);
+    p.eval("el('.artifact-backlinks a').click()").unwrap();
+    p.wait("el('.artifact-attachment-list a')?.textContent==='Shared plan'");
+    cli(
+        &f,
+        &[
+            "artifact",
+            "edit",
+            id.as_str().unwrap(),
+            "--title",
+            "Reviewed plan",
+            "--if-version",
+            "1",
+        ],
+    );
+    p.eval("el('#refresh').click()").unwrap();
+    p.wait("el('.artifact-attachment-list a')?.textContent==='Reviewed plan'");
+    assert_eq!(
+        p.eval("el('.artifact-attachment-list a').href").unwrap(),
+        url
+    );
+}
