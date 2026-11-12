@@ -187,7 +187,6 @@ final class Overlay {
     var onShowHistory: (() -> Void)?
     var onStartConversation: (() -> Void)?
     var onOpenTranscript: (() -> Void)?
-    var onCatchUpAndTalk: (() -> Void)?
     var onInterruptConversation: (() -> Void)?
     var onStopConversation: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
@@ -573,14 +572,12 @@ final class Overlay {
                 item.target = self; item.state = enabled ? .on : .off; menu.addItem(item)
             }
         }
-        menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "").target = self
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Conversation"))
         let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
         start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
-        let context = NSMenuItem(title: "Catch Up and Talk", action: #selector(catchUpAndTalk), keyEquivalent: "m")
-        context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
-        context.target = self; menu.addItem(context)
+        let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")
+        recap.target = self; recap.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Setup"))
         let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
@@ -606,7 +603,6 @@ final class Overlay {
     }
     @objc private func startConversation() { onStartConversation?() }
     @objc private func openTranscript() { onOpenTranscript?() }
-    @objc private func catchUpAndTalk() { onCatchUpAndTalk?() }
     @objc private func interruptConversation() { onInterruptConversation?() }
     @objc private func stopConversation() { onStopConversation?() }
     private func updateModeAppearance() {

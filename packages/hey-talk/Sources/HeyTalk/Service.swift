@@ -155,7 +155,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Start Conversation · Hyper+C", #selector(startConversation)), ("Catch Up and Talk · Hyper+M", #selector(catchUpAndTalk)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Start Conversation · Hyper+C", #selector(startConversation)), ("Catch Up · Hyper+M", #selector(catchUp)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -227,11 +227,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
         historyWindow.show(keepingFocus: session.phase == .recording)
     }
     @objc private func startConversation() { openConversation() }
-    @objc private func catchUpAndTalk() {
+    @objc private func catchUp() {
         Task { @MainActor in
-            do { try await speech.catchUp { [weak self] recap in self?.openConversation(recap: recap) } }
+            do { try await startCatchUp() }
             catch { speech.onNotice?(error.localizedDescription) }
         }
+    }
+    @MainActor private func startCatchUp() async throws {
+        try await speech.catchUp { [weak self] recap in self?.openConversation(recap: recap) }
     }
     private func openConversation(recap: String? = nil) {
         guard !openingConversation, !switchingToDictation else { return }
@@ -399,7 +402,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case .toggleSpeechMode: speech.toggleEnabled()
         case .startConversation:
             if conversation == nil { startConversation() }
-        case .catchUpAndTalk: catchUpAndTalk()
+        case .catchUp: catchUp()
         case .cancel:
             if openingConversation { controlConversation("stop"); return }
             guard conversation == nil else { return }
@@ -428,11 +431,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let view = Overlay()
             view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
-            view.onCatchUp = { [weak self] in
-                Task { @MainActor in
-                    do { try await self?.speech.catchUp() } catch { self?.speech.onNotice?(error.localizedDescription) }
-                }
-            }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
             view.onToggleAutoSubmit = { [weak self] in self?.toggleAutoSubmit() }
@@ -444,7 +442,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onStartConversation = { [weak self] in self?.startConversation() }
             view.onPauseListening = { [weak self] paused in self?.controlConversation(paused ? "pause_listening" : "resume_listening") }
             view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
-            view.onCatchUpAndTalk = { [weak self] in self?.catchUpAndTalk() }
+            view.onCatchUp = { [weak self] in self?.catchUp() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }
             view.onStopConversation = { [weak self] in self?.controlConversation("stop") }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }
@@ -697,7 +695,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     return
                 case "catch-up":
                     Task { @MainActor in
-                        do { try await speech.catchUp(); reply(["ok": true, "speech": speech.status]) }
+                        do { try await startCatchUp(); reply(["ok": true, "speech": speech.status]) }
                         catch { speech.onNotice?(error.localizedDescription); reply(failure(error.localizedDescription)) }
                     }
                     return

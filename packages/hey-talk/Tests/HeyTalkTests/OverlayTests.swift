@@ -223,7 +223,14 @@ final class OverlayTests: XCTestCase {
         var historyOpened = false
         overlay.onShowHistory = { historyOpened = true }
         let menu = overlay.contextMenu()
-        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "Catch Up", "", "Conversation", "Start Conversation", "Catch Up and Talk", "", "Setup", "Paste Permissions…"])
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "", "Conversation", "Start Conversation", "Catch Up", "", "Setup", "Paste Permissions…"])
+        let recap = try XCTUnwrap(menu.item(withTitle: "Catch Up"))
+        var starts = 0
+        overlay.onCatchUp = { starts += 1 }
+        XCTAssertEqual(recap.keyEquivalent, "m")
+        XCTAssertEqual(recap.keyEquivalentModifierMask, [.control, .command, .option, .shift])
+        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(recap.action), to: recap.target, from: recap))
+        XCTAssertEqual(starts, 1)
         let returnItem = try XCTUnwrap(menu.item(withTitle: "Return to Field Before Pasting"))
         var shouldReturn = false
         overlay.onToggleReturnToField = { shouldReturn.toggle() }
