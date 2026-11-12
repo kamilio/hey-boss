@@ -112,3 +112,7 @@ path = "tests/fixtures/signing-gh.rs"
 [[example]]
 name = "skill-ssh"
 path = "tests/fixtures/skill-ssh.rs"
+
+[[example]]
+name = "notification-latency-fixture"
+path = "tests/fixtures/notification-latency.rs"
