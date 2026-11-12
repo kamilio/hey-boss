@@ -80,6 +80,7 @@ final class SpeechPlayback {
     private(set) var text = ""
     private var next = 0
     private var queued = 0
+    private var onPlayed: ((String) -> Void)?
     private var streaming = false
     private var generating = false
     private var generation: UInt64 = 0
@@ -139,16 +140,25 @@ final class SpeechPlayback {
         chunks += parts.map { SpeechSegment(text: $0.text, range: NSRange(location: offset + $0.range.location, length: $0.range.length)) }
         onChange?(); pump()
     }
-    func finishStream() {
+    func finishStream(onPlayed: ((String) -> Void)? = nil) {
         guard streaming else { return }
         streaming = false
-        if completed == chunks.count { output.stop(); state = .idle }
-        onChange?()
+        self.onPlayed = onPlayed
+        if !finishIfPlayed() { onChange?() }
+    }
+    private func finishIfPlayed() -> Bool {
+        guard active, state != .paused, !streaming, completed == chunks.count else { return false }
+        let done = onPlayed, recap = text
+        onPlayed = nil
+        output.stop(); state = .idle; onChange?()
+        done?(recap)
+        return true
     }
     func togglePause() {
         guard active else { return }
         if state == .paused {
             state = queued > 0 ? .playing : .loading
+            if finishIfPlayed() { return }
             if queued > 0 { output.play(); markFirstAudio() }
         } else { output.pause(); state = .paused }
         onChange?()
@@ -156,7 +166,7 @@ final class SpeechPlayback {
     func stop() {
         generation &+= 1
         output.stop(); engine.cancel()
-        streaming = false; chunks = []; timings = [:]; next = 0; queued = 0; generating = false; completed = 0
+        onPlayed = nil; streaming = false; chunks = []; timings = [:]; next = 0; queued = 0; generating = false; completed = 0
         state = .idle; onChange?()
     }
     func fail(_ message: String) {
@@ -183,9 +193,7 @@ final class SpeechPlayback {
                     let start = try self.output.enqueue(audio) { [weak self] in
                         guard let self, self.generation == ticket, self.active else { return }
                         self.queued -= 1; if audio.final { self.completed += 1 }
-                        if !self.streaming && self.completed == self.chunks.count {
-                            self.output.stop(); self.state = .idle; self.onChange?()
-                        } else { self.onChange?(); self.pump() }
+                        if !self.finishIfPlayed() { self.onChange?(); self.pump() }
                     }
                     let beginning = self.timings[index]?.start ?? start
                     let duration = start - beginning + Double(audio.samples.count) / audio.sampleRate

@@ -155,7 +155,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         menuItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         menuItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Hey Talk")
         let menu = NSMenu()
-        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Start Conversation · Hyper+C", #selector(startConversation)), ("Chat with Context · Hyper+M", #selector(chatWithContext)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
+        for (title, action) in [("Dictation History…", #selector(showHistory)), ("Vocabulary…", #selector(openVocabulary)), ("Start Conversation · Hyper+C", #selector(startConversation)), ("Catch Up and Talk · Hyper+M", #selector(catchUpAndTalk)), ("Paste Permissions…", #selector(showAccessibilitySetup)), ("Start / Stop Dictation", #selector(toggle)), ("Cancel Dictation", #selector(cancelDictation)), ("Hide Pill", #selector(toggleOverlay)), ("Quit Hey Talk", #selector(quit))] {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
@@ -226,11 +226,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
         history.refresh()
         historyWindow.show(keepingFocus: session.phase == .recording)
     }
-    @objc private func startConversation() { openConversation(withContext: false) }
-    @objc private func chatWithContext() { openConversation(withContext: true) }
-    private func openConversation(withContext: Bool) {
+    @objc private func startConversation() { openConversation() }
+    @objc private func catchUpAndTalk() {
+        Task { @MainActor in
+            do { try await speech.catchUp { [weak self] recap in self?.openConversation(recap: recap) } }
+            catch { speech.onNotice?(error.localizedDescription) }
+        }
+    }
+    private func openConversation(recap: String? = nil) {
         guard !openingConversation, !switchingToDictation else { return }
-        let app = withContext ? NSWorkspace.shared.frontmostApplication : nil
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
             showOverlay(true); overlay?.error("Finish dictating before opening chat."); return
@@ -240,19 +244,12 @@ final class TalkService: NSObject, NSApplicationDelegate {
         openingConversation = true
         showOverlay(true)
         applyConversation(["active": true, "phase": "starting", "message": "Opening chat…", "action": "Cancel opening chat"])
-        let source = app.flatMap { $0.bundleIdentifier == "local.hey-boss.desktop" ? nil : $0.localizedName ?? "Current app" }
         let revision = conversationRevision
         Task { @MainActor in
             do {
-                let text = await Task.detached { () -> String? in
-                    guard source != nil, let app else { return nil }
-                    return try? await ConversationContext.text(app, window: ConversationContext.focusedWindow(app)) {
-                        AppContext.capture(pid: app.processIdentifier)
-                    }
-                }.value
                 guard openingConversation, conversationRevision == revision else { return }
-                var request: [String: Any] = ["command": withContext ? "conversation_context" : "conversation_start", "sync": false]
-                request["title"] = source; request["description"] = text
+                var request: [String: Any] = ["command": recap == nil ? "conversation_start" : "conversation_context", "sync": false]
+                if let recap { request["title"] = "Catch Up"; request["description"] = recap }
                 // Queue Stop behind Start if Escape arrives while the socket request is in flight.
                 let reply: [String: Any]? = try await withCheckedThrowingContinuation { continuation in
                     contextQueue.async { [request] in continuation.resume(with: Result { try self.chatRequest(request) }) }
@@ -402,7 +399,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case .toggleSpeechMode: speech.toggleEnabled()
         case .startConversation:
             if conversation == nil { startConversation() }
-        case .chatWithContext: chatWithContext()
+        case .catchUpAndTalk: catchUpAndTalk()
         case .cancel:
             if openingConversation { controlConversation("stop"); return }
             guard conversation == nil else { return }
@@ -447,7 +444,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onStartConversation = { [weak self] in self?.startConversation() }
             view.onPauseListening = { [weak self] paused in self?.controlConversation(paused ? "pause_listening" : "resume_listening") }
             view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
-            view.onChatWithContext = { [weak self] in self?.chatWithContext() }
+            view.onCatchUpAndTalk = { [weak self] in self?.catchUpAndTalk() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }
             view.onStopConversation = { [weak self] in self?.controlConversation("stop") }
             view.speechEnabled = { [weak self] in self?.speech.settings.enabled ?? false }

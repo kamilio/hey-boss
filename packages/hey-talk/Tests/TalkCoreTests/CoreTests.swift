@@ -151,11 +151,11 @@ final class CoreTests: XCTestCase {
     func testHyperMOpensChatOncePerPress() {
         var hotkey = HotkeyState()
         XCTAssertEqual(hotkey.keyDown(code: 46, hyper: false, repeated: false), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .chatWithContext)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .catchUpAndTalk)
         XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .none)
         XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: true), .none)
         _ = hotkey.keyUp(code: 46)
-        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .chatWithContext)
+        XCTAssertEqual(hotkey.keyDown(code: 46, hyper: true, repeated: false), .catchUpAndTalk)
     }
 
     func testEscCancelsWithoutRetriggeringHeldShortcut() {

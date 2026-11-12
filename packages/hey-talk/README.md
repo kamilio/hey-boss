@@ -128,7 +128,7 @@ Named text captures and **Hyper+M** share the same readers:
 
 Note and history attachments are bounded at 256 KiB. Requesting both text and an image keeps whichever succeeds and explains what is missing.
 
-Press **Hyper+M** (Control+Command+Option+Shift+M), or choose **Chat with Context** from the waveform menu, to start listening in the pill with context from the current app on macOS 26. The transcript stays hidden and the current app keeps focus. Choose **Open Transcript** to see the source above the message field; click it to inspect or remove the capture. Your next spoken or typed message shows a preview; click its paperclip to read the full capture. Ordinary chats send messages and captured text through Hey Proxy using the `gpt-6.1-sol` alias and its routing rules; folder chats send them to your configured Codex provider. If the app exposes no readable text, the pill still starts listening. Clicking the chat’s voice bubble starts voice, sends the current spoken message while recording, or turns voice off while waiting for speech. Elsewhere, **Hyper+R** still toggles Hey Talk dictation.
+Press **Hyper+M** or choose **Catch Up and Talk** in a T3 thread, Slack conversation, or Obsidian note. You’ll hear the usual Catch Up recap. After the last sentence finishes, the conversation pill starts listening. Your first follow-up includes the recap you heard. Pausing delays listening; stopping the recap leaves the microphone off. **Catch Up** and controller **B** still play the recap on its own.
 Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`;
 `history --json` also includes it. `null` means no context was attached.
 Context is saved locally with the original and final transcript, with the same
@@ -297,8 +297,8 @@ The default is `latticehq.com`. Hyper+E changes the current
 host; use the CLI to remove a parent-domain or browser-wide rule. On a browser
 page whose host cannot be identified, Hey Talk only pastes.
 
-In Chrome and Safari, AI Correction and Chat with Context read the active
-website’s hostname and visible page text through Accessibility. They omit the
+In Chrome and Safari, AI Correction reads the active
+website’s hostname and visible page text through Accessibility. It omits the
 address bar, other tabs, and the page URL’s path, query, and fragment.
 
 `record` stops on Enter or Ctrl-C. `stop` returns the transcript; `--json` also
