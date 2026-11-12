@@ -128,3 +128,92 @@ fn missing_artifact_returns_to_library_and_document_links_keep_the_reader_route(
     key(&mut p, "ArrowRight", "ArrowRight", 39, "");
     p.wait("document.activeElement.matches('#artifact-reading pre') && document.activeElement.scrollLeft>0");
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn selecting_passages_and_editing_long_drafts_keeps_controls_reachable() {
+    let f = installed_fixture();
+    let project = "Reading";
+    f.init(project).unwrap();
+    let body = format!(
+        "# A calmer workspace\n\n{}",
+        "Several lines of project notes.\n\n".repeat(40)
+    );
+    let doc = run(f.command(&[
+        "artifact",
+        "create",
+        "--project",
+        project,
+        "--title",
+        "Workspace design notes",
+        "--body",
+        &body,
+        "--json",
+    ]))
+    .unwrap();
+    let (_server, base) = web(&f, project);
+    let route = format!(
+        "{base}/artifacts#project=named%3AReading&artifact={}",
+        doc["artifact"]["id"].as_str().unwrap()
+    );
+    for (width, height) in [(1440, 1000), (390, 844)] {
+        let mut p = Page::open("about:blank");
+        p.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .unwrap();
+        p.command(
+            "Emulation.setEmulatedMedia",
+            json!({"features":[{"name":"prefers-reduced-motion","value":"reduce"}]}),
+        )
+        .unwrap();
+        p.command("Page.navigate", json!({"url":route})).unwrap();
+        p.wait("document.querySelector('#artifact-reading h1')?.innerText==='A calmer workspace'");
+        let visible = |selector: &str| {
+            format!(
+                "(()=>{{const el=document.querySelector({});if(!el?.checkVisibility())return false;const r=el.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight}})()",
+                json!(selector)
+            )
+        };
+        let box_expr = "(()=>{const r=document.querySelector('#artifact-reading').getBoundingClientRect();return [r.x,r.width]})()";
+        let before = p.eval(box_expr).unwrap();
+        p.eval("const range=document.createRange();range.selectNodeContents(document.querySelector('#artifact-reading h1').firstChild);getSelection().removeAllRanges();getSelection().addRange(range);document.querySelector('#artifact-reading').dispatchEvent(new Event('pointerup'))").unwrap();
+        p.wait("document.querySelector('#artifact-selection-comment')?.checkVisibility()");
+        assert_eq!(
+            p.eval("!!document.querySelector('#artifact-comments')?.checkVisibility()")
+                .unwrap(),
+            false
+        );
+        assert_eq!(p.eval(box_expr).unwrap(), before);
+        p.eval("document.querySelector('#artifact-selection-comment').click()")
+            .unwrap();
+        p.wait("document.querySelector('#artifact-quote')?.innerText==='A calmer workspace' && document.activeElement.id==='artifact-comment'");
+        if width == 390 {
+            p.wait(&visible("#artifact-comment"));
+        }
+        screenshot(
+            &mut p,
+            "out/artifact-reader",
+            &format!("selected-passage-{width}"),
+        );
+        p.eval("document.querySelector('#artifact-clear-quote').click();document.querySelector('#artifact-comments-close').click()").unwrap();
+        if width == 390 {
+            p.wait(&visible(".artifact-document-heading"));
+            p.eval("document.querySelector('#artifact-comments-toggle').click()")
+                .unwrap();
+            p.wait(&visible(".artifact-comments-heading"));
+            p.eval("document.querySelector('#artifact-comments-close').click()")
+                .unwrap();
+            p.wait(&visible(".artifact-document-heading"));
+            p.eval("document.querySelector('.artifact-menu summary').click();document.querySelector('#artifact-edit-browser').click()")
+                .unwrap();
+            p.wait("document.querySelector('#artifact-body')?.checkVisibility()");
+            p.eval(&format!("const field=document.querySelector('#artifact-body'); field.value={}; field.dispatchEvent(new Event('input',{{bubbles:true}}))",json!(body.repeat(2)))).unwrap();
+            p.wait("field.scrollHeight<=field.clientHeight+2");
+            p.eval("scrollTo(0,document.documentElement.scrollHeight)")
+                .unwrap();
+            p.wait(&visible("#artifact-editor button[type=submit]"));
+        }
+    }
+}
