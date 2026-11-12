@@ -1,4 +1,4 @@
-// Run against tools/serve_image_preview_fixture.mjs with playwright-cli run-code.
+// Run against the image-preview web-fixture scenario with playwright-cli run-code.
 async page => {
   const base = await page.evaluate(() => location.origin);
   if (base !== 'http://127.0.0.1:59661') throw Error('Use the isolated native fixture');

@@ -1,4 +1,4 @@
-// Run against serve_queue_placement_fixture.mjs; screenshots go to a temporary directory.
+// Run against the queue-placement web-fixture scenario; screenshots go to a temporary directory.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
@@ -23,7 +23,7 @@ async page => {
       check(await group.evaluate(el => !el.open && el.getBoundingClientRect().height <= 44),label+': one compact line');
       check(await page.locator('#comments .issue-activity').count() === 3,label+': complete history retained');
       await page.locator('.issue-discussion').scrollIntoViewIfNeeded();
-      await page.screenshot({path:`/tmp/hey-boss-timeline-qa/${surface}-${scheme}-${width}-collapsed.png`});
+      await page.screenshot({path:`out/compact-timeline/${surface}-${scheme}-${width}-collapsed.png`});
       const summary = group.locator(':scope > summary');
       await summary.focus();
       await page.keyboard.press('Enter');
@@ -36,7 +36,7 @@ async page => {
       await created.locator(':scope > summary').click();
       await created.getByText('Added to the top of the queue.',{exact:true}).waitFor();
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),label+': expanded content fits');
-      await page.screenshot({path:`/tmp/hey-boss-timeline-qa/${surface}-${scheme}-${width}-expanded.png`});
+      await page.screenshot({path:`out/compact-timeline/${surface}-${scheme}-${width}-expanded.png`});
       await summary.focus();
       await page.keyboard.press('Space');
       check(await group.evaluate(el=>!el.open),label+': keyboard collapses group');
@@ -71,7 +71,7 @@ async page => {
     check(await page.locator('#comment-body').inputValue()==='Draft survives pagination',surface+': draft preserved');
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),surface+': long expanded title fits');
     await page.locator('#comments > .comment-card').scrollIntoViewIfNeeded();
-    await page.screenshot({path:`/tmp/hey-boss-timeline-qa/${surface}-paginated.png`});
+    await page.screenshot({path:`out/compact-timeline/${surface}-paginated.png`});
   }
   check(errors.length===0,'No browser exceptions: '+errors.join('; '));
   return {checks:checks.length,errors};

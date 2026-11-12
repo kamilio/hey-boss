@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code --filename against serve_queue_placement_fixture.mjs.
+// Run with playwright-cli run-code --filename against the queue-placement web-fixture scenario.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
