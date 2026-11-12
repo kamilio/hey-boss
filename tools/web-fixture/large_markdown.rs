@@ -245,3 +245,75 @@ fn wide_tables_scroll_locally_and_prose_keeps_its_reading_width() {
         .unwrap();
     assert_eq!(p.eval("fits()").unwrap(), true);
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn large_draft_recovers_typed_text_after_undo_redo_and_reload() {
+    let f = installed_fixture();
+    let paragraph =
+        "A paragraph in a long document. Keep every line when editing. ".repeat(14) + "\n\n";
+    let body = paragraph.repeat(1_000_000 / paragraph.len());
+    let (id, _) = document(&f, &body);
+    let (_web, base) = web(&f, "Reading");
+    let mut p = Page::open("about:blank");
+    p.command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":390,"height":844,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .unwrap();
+    p.command("Page.enable", json!({})).unwrap();
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{base}/artifacts#project=named%3AReading&artifact={id}")}),
+    )
+    .unwrap();
+    fn shortcut(p: &mut Page, key: &str, code: &str, vk: i32, modifiers: u64) {
+        for event in ["keyDown", "keyUp"] {
+            p.command("Input.dispatchKeyEvent",json!({"type":event,"key":key,"code":code,"windowsVirtualKeyCode":vk,"modifiers":modifiers})).unwrap();
+        }
+    }
+    let open = |p: &mut Page| {
+        complete(p);
+        p.eval("window.violations=[];document.addEventListener('securitypolicyviolation',e=>violations.push(e.violatedDirective));document.querySelector('.artifact-menu summary').click();document.querySelector('#artifact-edit-browser').click()").unwrap();
+        p.wait("document.querySelector('#artifact-code-editor')?.shadowRoot?.querySelector('.cm-content')?.isContentEditable===true");
+        p.eval("window.writing=document.querySelector('#artifact-code-editor').shadowRoot.querySelector('.cm-content');writing.focus()").unwrap();
+        if cfg!(target_os = "macos") {
+            shortcut(p, "ArrowDown", "ArrowDown", 40, 4)
+        } else {
+            shortcut(p, "End", "End", 35, 2)
+        }
+    };
+    open(&mut p);
+    let suffix = " End-of-document typing check.";
+    let storage_key = json!(format!("hey-boss-artifact-draft:local:named:Reading:{id}"));
+    let ends = format!(
+        "JSON.parse(localStorage.getItem({storage_key}))?.body.endsWith({})",
+        json!(suffix)
+    );
+    p.eval("window.timing={gap:0,last:performance.now(),stop:false}; requestAnimationFrame(function tick(t){timing.gap=Math.max(timing.gap,t-timing.last);timing.last=t;if(!timing.stop)requestAnimationFrame(tick)})").unwrap();
+    for ch in suffix.chars() {
+        p.command("Input.insertText", json!({"text":ch.to_string()}))
+            .unwrap();
+        thread::sleep(Duration::from_millis(20));
+    }
+    p.wait(&ends);
+    let gap = p.eval("timing.stop=true;timing.gap").unwrap();
+    eprintln!("Largest frame gap while typing: {gap} ms");
+    let modifier = if cfg!(target_os = "macos") { 4 } else { 2 };
+    shortcut(&mut p, "z", "KeyZ", 90, modifier);
+    p.wait(&format!("!({ends})"));
+    shortcut(&mut p, "Z", "KeyZ", 90, modifier | 8);
+    p.wait(&ends);
+    assert_eq!(p.eval("violations").unwrap(), json!([]));
+    p.command("Page.reload", json!({})).unwrap();
+    open(&mut p);
+    p.wait("writing.innerText.includes('End-of-document typing check.')");
+    p.eval("document.querySelector('#artifact-preview').click()")
+        .unwrap();
+    p.wait("(()=>{const el=document.querySelector('#artifact-edit-preview');return el.checkVisibility() && !el.hasAttribute('aria-busy') && el.textContent.includes('End-of-document typing check.')})()");
+    p.eval("document.querySelector('#artifact-preview').click()")
+        .unwrap();
+    p.wait("writing.checkVisibility()");
+    assert_eq!(p.eval("violations").unwrap(), json!([]));
+    screenshot(&mut p, "out/artifact-reader", "large-draft");
+}
