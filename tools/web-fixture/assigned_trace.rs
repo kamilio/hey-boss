@@ -4,15 +4,7 @@ use super::*;
 #[test]
 #[ignore = "requires Chrome and a built hey-boss CLI"]
 fn assignment_cards_open_the_exact_saved_trace_with_keyboard_or_pointer() {
-    let f = std::env::var_os("HEY_BOSS_TEST_BINARY")
-        .map_or_else(fixture, |bin| Fixture::new(Path::new(&bin)).unwrap());
-    if let Ok(expected) = std::env::var("HEY_BOSS_EXPECTED_BUILD") {
-        let r = f.command(&["--version"]).output().unwrap();
-        assert!(
-            r.status.success() && String::from_utf8_lossy(&r.stdout).contains(&expected),
-            "Installed build mismatch"
-        );
-    }
+    let f = installed_fixture();
     f.init("Assignment QA").unwrap();
     fleet::assigned_agent(&f, "Assignment QA").unwrap();
     let (_web, base) = web(&f, "Assignment QA");

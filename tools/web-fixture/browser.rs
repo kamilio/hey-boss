@@ -65,6 +65,20 @@ fn fixture() -> Fixture {
     Fixture::new(&bin).unwrap()
 }
 
+// Point the install checks at a released CLI with HEY_BOSS_TEST_BINARY.
+fn installed_fixture() -> Fixture {
+    let f = std::env::var_os("HEY_BOSS_TEST_BINARY")
+        .map_or_else(fixture, |bin| Fixture::new(Path::new(&bin)).unwrap());
+    if let Ok(expected) = std::env::var("HEY_BOSS_EXPECTED_BUILD") {
+        let r = f.command(&["--version"]).output().unwrap();
+        assert!(
+            r.status.success() && String::from_utf8_lossy(&r.stdout).contains(&expected),
+            "Installed build mismatch"
+        );
+    }
+    f
+}
+
 #[test]
 #[ignore = "requires Chrome and a built hey-boss CLI"]
 fn workers_open_saved_conversations_and_retain_reading_position() {
@@ -298,3 +312,6 @@ mod workers;
 
 #[path = "quick_issue.rs"]
 mod quick_issue;
+
+#[path = "subtasks.rs"]
+mod subtasks;
