@@ -557,15 +557,13 @@ select source and repository before decoding bodies, so unrelated source data
 does not consume the page budget. Larger selected observations fail explicitly
 without advancing a cursor. HTTP clients use `GET /v1/pr-status` with optional `repository`,
 `cursor`, `limit`, `wait_seconds`, and the usual freshness parameters. Rust
-clients use `ApiClient::pr_status`; Node clients use `api.prStatus({ cursor,
-repository, limit, waitSeconds, read })`. `watch_account` / `watchAccount` can
+clients use `ApiClient::pr_status`. `ApiClient::watch_account` can
 set a custom polling interval (10..86,400 seconds).
 
 PR list/change `--json` selections also project the daemon HTTP response, reducing
 local transfer and caller JSON decoding. HTTP accepts `fields=number,state`;
-Rust uses `ApiClient::pr_status_selected(PrStatusSelection { fields: Some(&["number", "state"]), ..Default::default() }, ...)`;
-Node uses `api.prStatus({ fields: ['number', 'state'], cursor, read })` with types
-that reflect selected fields. HTTP/SDK projections always retain `complete` and
+Rust uses `ApiClient::pr_status_selected(PrStatusSelection { fields: Some(&["number", "state"]), ..Default::default() }, ...)`.
+HTTP/SDK projections always retain `complete` and
 `sourceErrors`; CLI stdout keeps its exact requested fields. Cursor scope,
 activity, lifecycle kinds, changed fields, and envelope health remain unchanged.
 Use the same selection for bootstrap and deltas. Omitted fields are unknown;
@@ -672,7 +670,7 @@ never cached or published; the last-good roster remains with explicit discovery
 errors. REST sources continue independently. Genuine HTTP failures and GraphQL
 rate limits retain their existing status/retry behavior.
 HTTP error envelopes retain `upstream_status` and `upstream_message` separately
-from the local API's gateway status. Rust and Node SDKs use these explicit fields
+from the local API's gateway status. The Rust SDK uses these explicit fields
 to preserve the original GitHub failure without duplicating its message.
 Invalid or absent upstream metadata falls back to the local response status for
 compatibility with older daemons. GraphQL operation errors have no invented
@@ -997,28 +995,6 @@ local. Oversized responses briefly suspend relay discovery so a fresh CLI proces
 can bootstrap and continue locally. A shared report's source cursor cannot continue
 against a local raw change feed. Explicit nondefault daemon ports stay direct.
 
-## JavaScript / TypeScript (napi-rs)
-
-The native Node package wraps the shared Rust daemon SDK, including PR/CI and required-check reports, repository commits, watches, and durable cursor reads. Start `hey-gh serve`, then build the addon:
-
-```sh
-cd bindings/node
-npm ci
-npm run build
-```
-
-```js
-import { ApiClient } from './bindings/node/index.mjs'
-
-const api = new ApiClient()
-await api.watchRepository('OWNER/REPO', { branches: ['release'], intervalSeconds: 30 })
-const ci = await api.ciForPr('OWNER/REPO', 123, { refresh: true })
-const baseline = await api.bootstrap()
-const updates = await api.changes({ cursor: baseline.cursor, waitSeconds: 30 })
-```
-
-All methods return Promises. Account PR pages use camelCase; other responses preserve the API's snake_case fields. TypeScript declarations cover the reports and incremental feed. `HeyGhError.code` supplies stable error codes, including `cursor_expired` and `rate_limited`; cached-only reads make no GitHub requests. Node callers use the daemon's automatically managed local credential, so no additional login is needed. See [bindings/node/README.md](bindings/node/README.md) for options, local packaging, and validation. The package has not been published to npm.
-
 ## HTTP routes
 
 | Method | Route | Purpose |
@@ -1048,7 +1024,7 @@ cargo test --locked -j 2
 cargo clippy --locked --workspace --all-targets -j 2 -- -D warnings
 ```
 
-The tests use a local GitHub mock, require no real login, and exercise persistence, cancellation/deduplication, overload, independent quota buckets, secondary cooldowns, pagination and thread replies, reruns, head changes, partial errors, cursor recovery, auth consumption, and daemon SDK access. The 125 Rust tests cover bounded log rotation, safe offline summaries, offline incremental reads, PR identity isolation across cache reuse, delayed responses, separate clients, and restart, repository-case aliases without cursor churn, false discovery lifecycle events, or case-sensitive ref confusion, and selected-field decoding with unchanged cursor boundaries and explicit corruption errors. The napi-rs addon has 11 passing Node integration tests plus TypeScript checks, including the authenticated Rust daemon, payload conversion, options, watches, replay/long polling/expiry, credential reload after restart, and stable error details. A read-only live smoke test also exercised an actual PR's checks, statuses, workflow jobs, comments, threads, review-event query, timeline, and conflicts through the existing `gh` login, plus repository commit snapshots, zero-network cache-only reads, and denied-policy handling.
+The tests use a local GitHub mock, require no real login, and exercise persistence, cancellation/deduplication, overload, independent quota buckets, secondary cooldowns, pagination and thread replies, reruns, head changes, partial errors, cursor recovery, auth consumption, and daemon SDK access. The 125 Rust tests cover bounded log rotation, safe offline summaries, offline incremental reads, PR identity isolation across cache reuse, delayed responses, separate clients, and restart, repository-case aliases without cursor churn, false discovery lifecycle events, or case-sensitive ref confusion, and selected-field decoding with unchanged cursor boundaries and explicit corruption errors. A read-only live smoke test also exercised an actual PR's checks, statuses, workflow jobs, comments, threads, review-event query, timeline, and conflicts through the existing `gh` login, plus repository commit snapshots, zero-network cache-only reads, and denied-policy handling.
 
 A broader source search located `../ashby-mcp/github_scrape_pull_requests.py`, a concrete PR scraper. Its all-state discovery, issue/inline comment fields, review IDs/author types/state/timestamps, review-request/removal history (including GraphQL event IDs), merge/close timestamps, and thread reply/review associations are exposed by `prs --state all` and PR source snapshots. Its purpose-built archival SQLite schema and staged migration commands are not reproduced; hey-gh uses the durable snapshot/feed model. The candidate is not confirmed as the originally intended script.
 

@@ -45,7 +45,7 @@ jobs:
           plutil -lint "out/Hey Boss.app/Contents/Info.plist"
       - run: cargo test --locked -p hey-boss --test desktop_package -- --ignored
       - run: cargo build --locked --release
-      - run: cargo package --locked --allow-dirty --workspace --exclude hey-gh-node
+      - run: cargo package --locked --allow-dirty --workspace
   linux:
     runs-on: ubuntu-latest
     steps:

@@ -15,7 +15,7 @@ include = ["packages/git-shelf/**", "packages/hey-boss-secrets/**", "packages/he
 
 [workspace]
 exclude = ["worker-tui"]
-members = ["packages/hey-proxy", "packages/hey-boss-http", "packages/hey-gh", "packages/hey-gh/bindings/node", "packages/hey-boss-sync", "packages/hey-boss-secrets"]
+members = ["packages/hey-proxy", "packages/hey-boss-http", "packages/hey-gh", "packages/hey-boss-sync", "packages/hey-boss-secrets"]
 default-members = ["packages/hey-proxy", ".", "packages/hey-gh", "packages/hey-boss-http"]
 resolver = "3"
 
