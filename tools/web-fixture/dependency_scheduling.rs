@@ -272,9 +272,13 @@ fn web_distinguishes_manual_hold_sibling_and_rework() {
     }
     p.wait("document.activeElement.id==='project-more'");
     settings(&mut p);
+    p.eval("document.querySelector('#project-worker-reasoning').value='none'")
+        .unwrap();
     p.eval("document.querySelector('#project-prs').click();document.querySelector('#project-settings-form button[type=submit]').click()").unwrap();
     p.wait("!document.querySelector('#project-settings-dialog').open");
-    assert_eq!(issue(&["settings", "show"])["prs_enabled"], true);
+    let saved = issue(&["settings", "show"]);
+    assert_eq!(saved["prs_enabled"], true);
+    assert_eq!(saved["worker_reasoning"], "none");
     view(&mut p, 3);
     p.wait("model.detail.issue.state==='open' && model.detail.issue.parent.number===1");
     view(&mut p, 1);
