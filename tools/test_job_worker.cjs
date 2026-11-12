@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {spawn, spawnSync} = require('node:child_process');
+const {spawn, spawnSync, execFileSync} = require('node:child_process');
 const {DatabaseSync} = require('node:sqlite');
 const {createHash} = require('node:crypto');
 const assert = require('node:assert/strict');
@@ -18,7 +18,7 @@ const env = {...process.env, HOME:path.join(root,'home'), CODEX_HOME:path.join(r
   HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:state,
   HEY_BOSS_FLEET_CONFIG:path.join(root,'inventory.json'), HEY_BOSS_FLEET_DESIRED:path.join(root,'desired.json'),
   HEY_BOSS_INBOX_SOCKET:path.join(root,'inbox.sock'), HEY_BOSS_AGENT_ID:'human:fixture',
-  HEY_BOSS_CODEX:path.resolve('tests/fixtures/agent-runtime.mjs'), HEY_BOSS_FIXTURE_PROVIDER:'codex',
+  HEY_BOSS_CODEX:execFileSync('cargo',['run','--quiet','--locked','-p','hey-boss','--example','agent-runtime','--','--print-path'],{encoding:'utf8'}).trim(), HEY_BOSS_FIXTURE_PROVIDER:'codex',
   HEY_BOSS_FIXTURE_EXPECT_MODEL:'exact-model', HEY_BOSS_FIXTURE_JOB_HOLD:'1',
   HEY_BOSS_FIXTURE_JOB_AUDIT:path.join(root,'launches.jsonl'),
 };

@@ -85,3 +85,7 @@ path = "tests/fixtures/workers/requirements-handoff.rs"
 [[example]]
 name = "codex-worker"
 path = "tests/fixtures/workers/codex-worker.rs"
+
+[[example]]
+name = "agent-runtime"
+path = "tests/fixtures/agent-runtime/main.rs"

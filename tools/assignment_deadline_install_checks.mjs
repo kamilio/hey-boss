@@ -3,9 +3,8 @@ import assert from 'node:assert/strict';
 import {mkdtempSync, realpathSync, existsSync, writeFileSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
-import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
-import {spawn, spawnSync} from 'node:child_process';
+import {spawn, spawnSync, execFileSync} from 'node:child_process';
 import {DatabaseSync} from 'node:sqlite';
 import {setTimeout as delay} from 'node:timers/promises';
 
@@ -18,7 +17,7 @@ writeFileSync(join(root,'desired.json'), '{"machines":{}}');
 const env = {...process.env, HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:root,
   HEY_BOSS_FLEET_CONFIG:join(root,'inventory.json'), HEY_BOSS_FLEET_DESIRED:join(root,'desired.json'),
   HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock'),
-  HEY_BOSS_CODEX:fileURLToPath(new URL('../tests/fixtures/agent-runtime.mjs',import.meta.url)),
+  HEY_BOSS_CODEX:execFileSync('cargo',['run','--quiet','--locked','-p','hey-boss','--example','agent-runtime','--','--print-path'],{cwd:new URL('../',import.meta.url),encoding:'utf8'}).trim(),
   HEY_BOSS_FIXTURE_PROVIDER:'codex', HEY_BOSS_FIXTURE_JOB_HOLD:'1', HEY_BOSS_FIXTURE_FRESH_THREADS:'1'};
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR','HEY_BOSS_AGENT_ID','HEY_BOSS_WORKER_RUN','CODEX_THREAD_ID']) delete env[key];
 const children = [];
