@@ -270,38 +270,10 @@
       b.append(icon, main, arrow);
       const row = e("div", undefined, "review-index-row");
       row.append(b);
-      if (!selected) {
-        const actions = e("div", undefined, "review-quick-actions");
-        const key = "code-review-like:" + JSON.stringify([host, project, r.id]);
-        const like = btn("", () => {
-          const next = like.getAttribute("aria-pressed") !== "true";
-          try {
-            if (next) localStorage.setItem(key, "1");
-            else localStorage.removeItem(key);
-            showLike(next);
-          } catch {
-            error("This browser could not save your Like.");
-          }
-        });
-        function showLike(on) {
-          like.textContent = on ? "Liked" : "Like";
-          like.setAttribute("aria-pressed", String(on));
-        }
-        try {
-          showLike(localStorage.getItem(key) === "1");
-        } catch {
-          showLike(false);
-          like.disabled = true;
-        }
-        like.classList.add("small");
-        like.title = "Mark this review on this device";
-        actions.append(like);
-        if (r.stage === "submitted") {
-          const publish = publishButton(r);
-          publish.classList.add("small");
-          actions.append(publish);
-        }
-        row.append(actions);
+      if (!selected && r.stage === "submitted") {
+        const publish = publishButton(r);
+        publish.classList.add("small", "review-quick-publish");
+        row.append(publish);
       }
       list.append(row);
       if (selected) list.append(pane);

@@ -61,9 +61,8 @@
 }
 .review-preview:has(+ .review-preview), .review-preview + .review-preview { -webkit-line-clamp: 1; }
 .review-preview + .review-preview { margin-top: 2px; }
-.review-quick-actions { display: flex; align-items: center; gap: 6px; padding-right: 20px; }
-.review-quick-actions [aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+.review-quick-publish { margin-right: 20px; }
 @media (max-width: 700px) {
   .review-index-row { display: block; }
-  .review-quick-actions { padding: 0 14px 14px 42px; flex-wrap: wrap; }
+  .review-quick-publish { margin: 0 14px 14px 42px; }
 }

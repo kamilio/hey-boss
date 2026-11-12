@@ -113,15 +113,10 @@ try {
   assert.ok((await indexRow.textContent()).includes(first.comments[0].body));
   assert.ok((await indexRow.textContent()).includes("1 inline comment"));
   const item = page.locator(".review-index-row").filter({ has: indexRow });
-  await item.getByRole("button", { name: "Like", exact: true }).click();
-  await page.reload();
-  await item.getByRole("button", { name: "Liked", pressed: true }).waitFor();
-  assert.equal(await page.locator("#reviews-detail").count(), 0);
+  assert.deepEqual(await item.locator("button:not([aria-expanded])").allTextContents(), ["Publish requested changes"]);
   const draft = page.locator(".review-index-row").filter({hasText:"#73"});
   assert.ok((await draft.textContent()).includes(first.comments[0].body));
   assert.equal(await draft.locator(".button.primary").count(), 0);
-  await item.getByRole("button", {name:"Liked"}).click();
-  await item.getByRole("button", {name:"Like", pressed:false}).waitFor();
   await indexRow.click();
   await page
     .getByRole("button", { name: /#71/, expanded: true })
