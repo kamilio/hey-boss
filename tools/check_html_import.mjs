@@ -1,10 +1,14 @@
-// PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node tools/check_html_import.mjs
+// In one terminal: mkdir -p out && cargo build --bin hey-boss && cargo run --example web-fixture -- html >out/html.json
+// Then run: node tools/check_html_import.mjs out/html.json
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {startFixture} from './serve_html_fixture.mjs';
+const fixture=JSON.parse(readFileSync(process.argv[2],'utf8'));
+assert.equal(new URL(fixture.native).hostname,'127.0.0.1');
+assert.equal(fixture.project,'named:HTML QA');
+const fullBody=readFileSync(new URL('../tests/fixtures/html-page.html',import.meta.url),'utf8');
 const {chromium,webkit}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
 for(const engine of [chromium,webkit]){
- const fixture=await startFixture();let browser;
+ let browser;
  try{
   browser=await engine.launch({headless:true,...(engine===chromium?{channel:'chrome'}:{})});
   for(const width of [1280,390]){
@@ -19,7 +23,7 @@ for(const engine of [chromium,webkit]){
    const field=page.locator('#artifact-body'),input=page.locator('#artifact-import');
    const choose=(name,text,mimeType='text/html')=>input.setInputFiles({name,mimeType,buffer:Buffer.from(text)});
    for(const name of ['page.HTML','page.htm']){
-    const source=(name.endsWith('htm')?'\uFEFF':'')+fixture.fullBody.replace('</body>','\n\n[Literal](missing.csv)\n\n</body>')+'\n<!-- '+label+' '+name+' -->\n';
+    const source=(name.endsWith('htm')?'\uFEFF':'')+fullBody.replace('</body>','\n\n[Literal](missing.csv)\n\n</body>')+'\n<!-- '+label+' '+name+' -->\n';
     await choose(name,source,name.endsWith('htm')?'':'text/html');
     await page.waitForFunction(source=>document.querySelector('#artifact-body')?.value===source,source);
     assert.equal(await page.locator('#artifact-error:visible').count(),0);
@@ -54,5 +58,5 @@ for(const engine of [chromium,webkit]){
    console.log('PASS',label,'HTML/HTM import, exact source, full height, save/reload/export, invalid-file recovery, Markdown compatibility');
    await context.close();
   }
- }finally{await browser?.close();await fixture.close();}
+ }finally{await browser?.close();}
 }
