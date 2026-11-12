@@ -13,12 +13,15 @@ use std::{
     time::Duration,
 };
 mod archive;
+mod desktop;
 mod fleet;
 mod origin;
 mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Scenario {
+    LocalHttp,
+    NativeArtifactEditor,
     AgentsNavigation,
     AssignedAgent,
     Origin,
@@ -43,6 +46,8 @@ enum Scenario {
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
+            Self::LocalHttp => ("Local HTTP QA", 0),
+            Self::NativeArtifactEditor => ("Native editor QA", 0),
             Self::Origin => ("Origin QA", 59675),
             Self::AssignedAgent => ("Assignment QA", 59668),
             Self::AgentsNavigation => ("Home", 59643),
@@ -212,35 +217,53 @@ fn main() -> Result<()> {
     let stdout = web.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
-        let _ = tx.send(reader.read_line(&mut line).map(|_| line));
-        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line).is_err() {
+                break;
+            }
+        }
     });
     let result = (|| -> Result<()> {
-        let line = rx.recv_timeout(Duration::from_secs(15))??;
-        if line.is_empty() {
-            return Err("fixture server exited before reporting its URL".into());
-        }
-        let ready: Value = serde_json::from_str(&line)?;
-        let url = ready["url"]
-            .as_str()
-            .ok_or_else(|| format!("fixture server did not start: {ready}"))?;
-        let boot: Value = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .timeout(Duration::from_secs(10))
-            .build()?
-            .get(format!("{}/api/bootstrap", url.trim_end_matches('/')))
-            .send()?
-            .error_for_status()?
-            .json()?;
-        info["fixture_pid"] = json!(std::process::id());
-        info["owner_pid"] = info["fixture_pid"].clone();
-        info["url"] = json!(url);
-        info["native"] = json!(url.trim_end_matches('/'));
-        info["project"] = boot["project"]["id"].clone();
-        println!("{info}");
+        let mut starts = 0;
+        let pid = web.id();
+        let mut report = |line: String| -> Result<()> {
+            let ready: Value = serde_json::from_str(&line)?;
+            let url = ready["url"]
+                .as_str()
+                .ok_or_else(|| format!("fixture server did not start: {ready}"))?;
+            let boot: Value = reqwest::blocking::Client::builder()
+                .no_proxy()
+                .timeout(Duration::from_secs(10))
+                .build()?
+                .get(format!("{}/api/bootstrap", url.trim_end_matches('/')))
+                .send()?
+                .error_for_status()?
+                .json()?;
+            info["fixture_pid"] = json!(std::process::id());
+            info["owner_pid"] = info["fixture_pid"].clone();
+            info["url"] = json!(url);
+            info["native"] = json!(url.trim_end_matches('/'));
+            info["project"] = boot["project"]["id"].clone();
+            if matches!(args.scenario, Scenario::LocalHttp) {
+                starts += 1;
+                let mut state = ready;
+                state["pid"] = json!(pid);
+                state["starts"] = json!(starts);
+                let pending = f.root.path().join("ready.new");
+                fs::write(&pending, serde_json::to_vec(&state)?)?;
+                fs::rename(pending, f.root.path().join("ready.json"))?;
+                info["event"] = json!("ready");
+                info["pid"] = json!(pid);
+                info["starts"] = json!(starts);
+            }
+            println!("{info}");
+            Ok(())
+        };
+        report(rx.recv_timeout(Duration::from_secs(15))??)?;
         loop {
+            if let Ok(line) = rx.try_recv() {
+                report(line?)?;
+            }
             if let Some(status) = web.try_wait()? {
                 return Err(format!("fixture server exited: {status}").into());
             }
