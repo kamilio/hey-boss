@@ -26,6 +26,7 @@ fn with_client(f: impl FnOnce(u16, mpsc::Receiver<(String, Value)>)) {
 
 fn serve_client(server: Server, tx: mpsc::Sender<(String, Value)>, done: mpsc::Receiver<()>) {
     let routes = hey_boss::routes::javascript();
+    let guide = hey_boss::agent_guidance::decorate("<head></head><body></body>");
     while matches!(done.try_recv(), Err(mpsc::TryRecvError::Empty)) {
         let Some(mut r) = server.recv_timeout(Duration::from_millis(100)).unwrap() else {
             continue;
@@ -35,6 +36,8 @@ fn serve_client(server: Server, tx: mpsc::Sender<(String, Value)>, done: mpsc::R
                 "<meta charset=utf-8><script src='/routes.js'></script><script src='/components.js'></script><script src='/assignments.js'></script><script src='/artifacts.js'></script>",
                 "text/html",
             ),
+            "/guide" => (guide.as_str(), "text/html"),
+            "/agent-guide.js" => (hey_boss::agent_guidance::SCRIPT, "text/javascript"),
             "/routes.js" => (routes.as_str(), "text/javascript; charset=utf-8"),
             "/components.js" => (
                 include_str!("../src/issues/web/components.js"),
@@ -296,5 +299,58 @@ fn assignment_runtime_uses_live_time_only_while_connected() {
             );
             assert_eq!(page.eval(&expr).unwrap(), "Unavailable", "{start}");
         }
+    });
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn agent_guide_tracks_the_current_route_and_quotes_the_lookup_argument() {
+    with_client(|port, _| {
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut page = Page::open(&format!("{origin}/guide"));
+        let guide = "document.getElementById('hey-boss-agent-guide').textContent";
+        let check = |page: &mut Page, path: &str| {
+            let arg = format!("{origin}{path}").replace('\'', "'\"'\"'");
+            let cmd = json!(format!("hey-boss lookup '{arg}' --json"));
+            page.wait(&format!("{guide}.includes({cmd})"));
+        };
+        check(&mut page, "/guide");
+        let routes: Vec<Value> =
+            serde_json::from_str(include_str!("fixtures/lookup-routes.json")).unwrap();
+        for route in routes {
+            // Use the fixture server as the origin; preserve the entire request target.
+            let (_, target) = route["url"].as_str().unwrap().split_once("://").unwrap();
+            let path = &target[target.find('/').unwrap()..];
+            page.eval(&format!("history.replaceState(null,'',{})", json!(path)))
+                .unwrap();
+            check(&mut page, path);
+        }
+        let path = "/artifacts?view=one#project=Bob's&artifact=doc";
+        page.eval(&format!("history.pushState(null,'',{})", json!(path)))
+            .unwrap();
+        check(&mut page, path);
+        page.eval(r#"history.pushState(null,'',"?view=two#project=Bob's&artifact=doc")"#)
+            .unwrap();
+        check(&mut page, "/artifacts?view=two#project=Bob's&artifact=doc");
+        page.eval("history.back()").unwrap();
+        check(&mut page, path); // Only the query changed, so no hashchange event fires.
+        page.eval("location.hash='artifact=next'").unwrap();
+        check(&mut page, "/artifacts?view=one#artifact=next");
+        page.eval("document.body.appendChild(document.createElement('main')).id='root';history.replaceState(null,'','/')").unwrap();
+        page.wait(&format!("{guide}.includes('hey-boss notif inbox --json')"));
+        page.eval("history.replaceState(null,'','/?task=notice-id')")
+            .unwrap();
+        check(&mut page, "/?task=notice-id");
+
+        // Pages without the guide do not install navigation hooks.
+        let mut empty = Page::open(&format!("{origin}/"));
+        empty
+            .eval("window.beforeGuide = history.pushState; void 0")
+            .unwrap();
+        empty.eval(hey_boss::agent_guidance::SCRIPT).unwrap();
+        assert_eq!(
+            empty.eval("history.pushState === beforeGuide").unwrap(),
+            true
+        );
     });
 }
