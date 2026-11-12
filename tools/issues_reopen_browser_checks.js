@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code --filename against serve_issue_reopen_fixture.mjs.
+// Run with playwright-cli run-code --filename against the issue-reopen web-fixture scenario.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };
@@ -17,7 +17,7 @@ async page => {
   await page.route('**/api/inbox', route => route.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.goto(base + path, {waitUntil:'domcontentloaded'});
   await page.waitForFunction(() => model.csrf && model.project && model.signature);
-  const project = 'named:Reopen QA ' + Date.now();
+  const project = 'named:Reopen QA';
   const action = operation => page.evaluate(({operation, project}) => api(operation, project), {operation, project});
   const view = async number => (await action({action:'view',number})).issue;
   const detail = async number => {

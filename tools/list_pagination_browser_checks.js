@@ -27,9 +27,9 @@ async page => {
   const issues=()=>Array.from({length:count},(_,index)=>({...sample.issue,number:index+1,title:`Pagination task ${String(index+1).padStart(4,'0')}`,labels:index===2004?['last-page']:[],draft:false,comment_count:0}));
   await page.route('**/api/action',async route=>{
     const op=route.request().postDataJSON().operation;
-    if(op.action==='list'){
+    if(op.action==='list'||op.action==='search'){
       let rows=issues().map(issue=>({...issue,state:op.state,closed_at:op.state==='closed'?Date.now():null}));
-      if(op.search)rows=rows.filter(issue=>issue.title.includes(op.search));
+      if(op.query)rows=rows.filter(issue=>issue.title.includes(op.query));
       if(op.labels?.length)rows=rows.filter(issue=>op.labels.every(label=>issue.labels.includes(label)));
       return route.fulfill({json:{ok:true,project:sample.project,order_version:1,issues:rows,next_offset:null}});
     }
@@ -94,7 +94,7 @@ async page => {
     await page.evaluate(()=>scrollTo(0,0));
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Issues fit ${theme}/${width}`);
     check(await top().locator('a').evaluateAll(links=>links.every(link=>link.getBoundingClientRect().height>=44)),`Touch targets ${theme}/${width}`);
-    await page.screenshot({path:`/tmp/hb-list-pagination-${paired?'paired':'desktop'}-${theme}-${width}.png`});
+    await page.screenshot({path:`out/list-pagination/${paired?'paired':'desktop'}-${theme}-${width}.png`});
   }
   await page.goto(base+path+'#view=inbox&inbox_page=2');
   await page.waitForFunction(()=>document.querySelectorAll('.notice-row').length===1000);
@@ -121,7 +121,7 @@ async page => {
     await page.emulateMedia({colorScheme:theme});
     await page.evaluate(()=>scrollTo(0,0));
     check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`Inbox fits ${theme}/320`);
-    await page.screenshot({path:`/tmp/hb-list-pagination-inbox-${paired?'paired':'desktop'}-${theme}.png`});
+    await page.screenshot({path:`out/list-pagination/inbox-${paired?'paired':'desktop'}-${theme}.png`});
   }
   check(errors.length===0,'No browser runtime errors: '+errors.join('; '));
   return {checks:checks.length,passed:checks};

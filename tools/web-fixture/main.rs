@@ -12,6 +12,7 @@ use std::{
     thread,
     time::Duration,
 };
+mod archive;
 mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -26,6 +27,11 @@ enum Scenario {
     AgentLaunches,
     CreatorModel,
     IssueListOrigins,
+    IssueReopen,
+    ImagePreview,
+    ListPagination,
+    QueuePlacement,
+    Archive,
 }
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
@@ -35,6 +41,11 @@ impl Scenario {
             Self::LivePrompt => ("Prompt Studio", 4883),
             Self::ProjectPicker => ("Project 01", 59687),
             Self::ProjectNames => ("github.com/poe-internal/poe2", 59692),
+            Self::IssueReopen => ("Reopen QA", 59661),
+            Self::ImagePreview => ("Image Preview QA", 59661),
+            Self::ListPagination => ("Pagination QA", 59671),
+            Self::QueuePlacement => ("Queue placement QA", 59701),
+            Self::Archive => ("Archive QA", 59662),
             Self::LongTitle => ("Long title QA", 59653),
             Self::StatusDot => ("Status Dot QA", 4798),
             Self::AgentLaunches => ("Launch QA", 4794),
@@ -159,6 +170,9 @@ fn main() -> Result<()> {
     let f = Fixture::new(&binary)?;
     f.init(project)?;
     seed::seed(&f, args.scenario, project)?;
+    if matches!(args.scenario, Scenario::Archive) && !archive::wait(&f, &signal)? {
+        return Ok(());
+    }
     if signal.try_recv().is_ok() {
         return Ok(());
     }
@@ -216,7 +230,15 @@ fn main() -> Result<()> {
     })();
     if web.try_wait()?.is_none() {
         unsafe { libc::kill(web.id() as i32, libc::SIGTERM) };
-        let _ = web.wait()?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while web.try_wait()?.is_none() {
+            if std::time::Instant::now() >= deadline {
+                web.kill()?;
+                web.wait()?;
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
     }
     result
 }

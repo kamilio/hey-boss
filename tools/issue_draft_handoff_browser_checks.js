@@ -1,4 +1,4 @@
-// Playwright CLI run-code --filename, against serve_issue_reopen_fixture.mjs.
+// Playwright CLI run-code --filename, against the issue-reopen web-fixture scenario.
 async page => {
   const checks=[],errors=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
@@ -10,7 +10,7 @@ async page => {
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.goto(base+path);
   await page.waitForFunction(()=>model.csrf&&model.project&&model.signature);
-  const project='named:Draft handoff QA '+Date.now();
+  const project = 'named:Reopen QA';
   const action=operation=>page.evaluate(({operation,project})=>api(operation,project),{operation,project});
   const view=async n=>(await action({action:'view',number:n})).issue;
   await action({action:'create',title:'Published API source with follow-up repair',body:'Useful for dependent development. Keep this source in draft; review, CI and repair work remain separate.',labels:[],draft:true});
@@ -20,7 +20,7 @@ async page => {
   await page.goto(base+path+'#project='+encodeURIComponent(project)+'&issue=1');
   await page.waitForFunction(()=>model.detail?.issue.number===1);
   const button=page.getByRole('button',{name:'Development handoff',exact:true});
-  check(await button.isDisabled(),'Draft handoff requires an attached PR');
+  check(await button.isEnabled(),'Draft handoff is available without an attached PR');
   check(await page.getByRole('button',{name:'Mark ready',exact:true}).isVisible(),'Ordinary undraft action remains separate');
   await action({action:'add_pull_request',number:1,url:'https://github.com/example/repo/pull/684'});
   await page.reload();await button.waitFor();

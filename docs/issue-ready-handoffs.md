@@ -115,7 +115,7 @@ source pickup rejects Ready instead of releasing the new owner.
 
 Verification: `cargo test --test issue_ready_guards`, focused Ready worker and
 explicit dependency regressions, and `tools/issue_ready_browser_checks.js` through
-Playwright CLI against `tools/serve_issue_reopen_fixture.mjs`. Browser checks use
-synthetic native and paired stores, cover concurrent changes and retry recovery,
+Playwright CLI against `cargo run --example web-fixture -- issue-reopen`. Browser checks use
+an isolated native store, cover concurrent changes and retry recovery,
 and inspect desktop/tablet/phone layouts in light and dark modes. Draft-preserving
-handoffs use `tools/issue_draft_handoff_browser_checks.js` against the same fixture.
+handoffs use `tools/issue_draft_handoff_browser_checks.js` against a fresh run of the same fixture so issue numbering starts at one.

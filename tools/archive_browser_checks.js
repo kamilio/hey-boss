@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code --filename against serve_archive_fixture.mjs.
+// Run with playwright-cli run-code --filename against the archive web-fixture scenario.
 async page => {
   const checks=[],errors=[];
   const check=(ok,label)=>{if(!ok)throw Error(label);checks.push(label);};
@@ -6,7 +6,7 @@ async page => {
   page.setDefaultTimeout(20000);
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   for(const [surface,base] of [['desktop','http://127.0.0.1:59662/']]) {
-    const detail=async n=>{await page.goto(base+'#project=named%3AArchive%20QA&issue='+n);await page.locator('.issue-description').waitFor();await page.locator('.issue-activity').first().waitFor();};
+    const detail=async n=>{await page.goto(base+'#project=named%3AArchive%20QA&issue='+n);await page.locator('.issue-description').waitFor();await page.locator('.issue-activity').first().waitFor({state:'attached'});};
     await detail(1);
     const run=await page.evaluate(()=>api({action:'worker_run',run_id:'archive-ui-run'},'named:Archive QA'));
     check(run.prompt==='Saved expanded prompt'&&run.config.prompt==='Saved prompt',surface+': archived worker prompt and settings remain retrievable');
@@ -47,8 +47,11 @@ async page => {
   check((await page.locator('.issue-description').innerText()).includes('cold-search-needle'),'Reopen preserves body');
   await page.locator('#comment-body').fill('New comment after restoration');await page.locator('#comment-submit').click();
   await page.waitForFunction(()=>document.querySelector('#comments')?.textContent.includes('New comment after restoration'));
+  await page.getByRole('button',{name:'Load earlier activity'}).click();
+  await page.locator('.history-more').waitFor({state:'hidden'});
   check(await page.locator('#comments .comment-card').count()===2,'Reopened issue accepts new comments');
-  await page.goto(phone+'/issues#project=named%3AArchive%20QA&issue=3');
+  await page.setViewportSize({width:390,height:900});
+  await page.goto('http://127.0.0.1:59662/#project=named%3AArchive%20QA&issue=3');
   await page.getByRole('button',{name:'Restore issue',exact:true}).first().click();
   await page.locator('#comment-form').waitFor();
   check((await page.locator('.issue-description').innerText()).includes('cold-search-needle'),'Phone restore preserves body');

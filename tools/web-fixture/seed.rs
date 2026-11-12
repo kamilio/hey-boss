@@ -33,7 +33,32 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<()> {
                 "Save instructions without restarting active work.",
             ])?;
         }
-        LongTitle => {}
+        LongTitle | IssueReopen | ImagePreview | ListPagination => {}
+        Archive => archive::seed(f, p)?,
+        QueuePlacement => {
+            for (actor, title, options) in [
+                ("human:boss", "Recovery second", &[][..]),
+                ("human:boss", "Recovery first", &[]),
+                ("fixture-agent", "Ordinary follow-up", &[]),
+                ("fixture-agent", "Explicit MCP priority", &["--at-top"]),
+                ("fixture-agent", "Draft follow-up", &["--draft"]),
+            ] {
+                let mut c = f.issue(p, &["--agent", actor, "create", "--title", title]);
+                c.args(options);
+                run(c)?;
+            }
+            let project = format!("named:{p}");
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_millis() as i64;
+            let event = json!({"worker_id":"fixture-worker","worker_name":"MCP recovery worker",
+                "required_tags":["mcp"],"projects":[project],"sort_order":-1,"issue_created_at":now,
+                "order_by":["sort_order","created_at","project_id","number"],"rule":"First eligible issue in queue order with a valid checkout."});
+            rusqlite::Connection::open(&f.db)?.execute(
+                "INSERT INTO events(project_id,issue_number,actor,action,created_at,data) VALUES(?1,2,'fixture-agent','worker_selected',?2,?3)",
+                rusqlite::params![project, now, event.to_string()],
+            )?;
+        }
         ProjectPicker | ProjectNames => {
             let projects = if matches!(s, ProjectPicker) {
                 (1..=20)
