@@ -226,8 +226,3 @@ pub(super) fn replace_editor(p: &mut Page, text: &str) {
         text.trim_end_matches('\n')
     );
 }
-pub(super) fn key(p: &mut Page, key: &str, code: &str, vk: i32, text: &str) {
-    for kind in ["keyDown", "keyUp"] {
-        p.command("Input.dispatchKeyEvent",json!({"type":kind,"key":key,"code":code,"windowsVirtualKeyCode":vk,"text":if kind=="keyDown"{text}else{""}})).unwrap();
-    }
-}
