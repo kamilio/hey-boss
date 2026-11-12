@@ -13,8 +13,12 @@ impl backend::Backend for Memory {
     fn get(&self, key: &str) -> Result<Option<Secret>> {
         Ok(self.0.lock().unwrap().get(key).cloned().map(Secret::new))
     }
-    fn put(&self, key: &str, value: &[u8]) -> Result<()> {
-        self.0.lock().unwrap().insert(key.into(), value.into());
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
+        let mut data = self.0.lock().unwrap();
+        if data.contains_key(key) {
+            return Err(Error::Conflict);
+        }
+        data.insert(key.into(), value.into());
         Ok(())
     }
 }
@@ -124,7 +128,7 @@ fn replication_requires_trust_and_grant_and_survives_writer_offline() {
 }
 
 #[test]
-fn revocation_and_deletion_override_local_cached_values() {
+fn revocation_and_deletion_deny_previously_read_values() {
     let (_a, mut a) = setup("writer");
     let (_b, mut b) = setup("reader");
     a.trust(&b.enrollment().unwrap()).unwrap();
@@ -244,7 +248,18 @@ fn binary_max_size_and_restart() {
     let mut a = open();
     a.initialize("test").unwrap();
     let bytes: Vec<u8> = (0..MAX_SECRET).map(|i| (i % 256) as u8).collect();
-    a.put("binary", &bytes, "cookies", None).unwrap();
+    let record = a.put("binary", &bytes, "cookies", None).unwrap();
+    assert_eq!(a.get("binary").unwrap().expose(), bytes);
+    assert_eq!(
+        memory.0.lock().unwrap().len(),
+        1,
+        "only the machine identity belongs in platform storage"
+    );
+    // An old local cache is not the signed, encrypted revision.
+    memory.0.lock().unwrap().insert(
+        format!("records/{}", record.revision),
+        b"stale cache".to_vec(),
+    );
     drop(a);
     let mut b = open();
     assert_eq!(b.get("binary").unwrap().expose(), bytes);

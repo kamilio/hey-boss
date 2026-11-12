@@ -19,13 +19,9 @@ function run() {
   if (request.op === 'put') {
     const data = $.NSData.alloc.initWithBase64EncodedStringOptions($(request.data), 0);
     if (!data) return JSON.stringify({ status: -50 });
-    const attrs = $({ v_Data: data });
-    let status = $.SecItemUpdate(query, attrs);
-    if (status === -25300) {
-      const dict = query.mutableCopy;
-      dict.setObjectForKey(data, $('v_Data'));
-      status = $.SecItemAdd(dict, null);
-    }
+    const dict = query.mutableCopy;
+    dict.setObjectForKey(data, $('v_Data'));
+    const status = $.SecItemAdd(dict, null);
     return JSON.stringify({ status });
   }
   return JSON.stringify({ status: -50 });
