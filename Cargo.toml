@@ -136,3 +136,7 @@ path = "tests/fixtures/search-provider.rs"
 [[example]]
 name = "code-reviews-gh"
 path = "tools/code_reviews_gh_checks.rs"
+
+[[example]]
+name = "workspace-chat-check"
+path = "tools/workspace_chat_checks.rs"
