@@ -32,6 +32,7 @@ impl Drop for Browser {
 pub struct Page {
     socket: WebSocket<TcpStream>,
     _browser: Browser,
+    pub beforeunload_dialogs: usize,
 }
 impl Page {
     pub fn open(url: &str) -> Self {
@@ -110,6 +111,7 @@ impl Page {
         let mut page = Self {
             socket,
             _browser: browser,
+            beforeunload_dialogs: 0,
         };
         page.wait(&format!(
             "location.href === {} && document.readyState === 'complete'",
@@ -156,6 +158,7 @@ impl Page {
             if reply["method"] == "Page.javascriptDialogOpening"
                 && reply["params"]["type"] == "beforeunload"
             {
+                self.beforeunload_dialogs += 1;
                 self.socket.send(Message::Text(json!({"id":2,"method":"Page.handleJavaScriptDialog","params":{"accept":true}}).to_string().into())).unwrap();
             }
             if reply["id"] != 1 {
