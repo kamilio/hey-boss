@@ -19,8 +19,7 @@ pub trait Backend {
 pub fn native(home: &Path) -> Box<dyn Backend> {
     #[cfg(target_os = "macos")]
     {
-        let _ = home;
-        Box::new(Keychain)
+        Box::new(Keychain::new(home))
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -270,63 +269,10 @@ impl Backend for Pass {
 }
 
 #[cfg(target_os = "macos")]
-pub struct Keychain;
+#[path = "macos.rs"]
+mod macos;
 #[cfg(target_os = "macos")]
-impl Keychain {
-    fn call(service: &str, account: &str, value: Option<&[u8]>) -> Result<Option<Secret>> {
-        use base64::{Engine, engine::general_purpose::STANDARD as B64};
-        // System-signed helper avoids tying credentials to an ad-hoc CLI hash.
-        // Its Security calls explicitly forbid interaction, including on a locked Keychain.
-        let mut request = serde_json::json!({"op":if value.is_some(){"put"}else{"get"},"service":service,"account":account});
-        if let Some(value) = value {
-            request["data"] = B64.encode(value).into();
-        }
-        let input = Secret::new(serde_json::to_vec(&request).map_err(|_| Error::InvalidInput)?);
-        if let Some(serde_json::Value::String(data)) = request.get_mut("data") {
-            zeroize::Zeroize::zeroize(data);
-        }
-        let mut cmd = Command::new("/usr/bin/osascript");
-        cmd.args(["-l", "JavaScript", "-e", include_str!("keychain.js")]);
-        let output = command(cmd, input.expose())?;
-        #[derive(serde::Deserialize)]
-        struct Reply {
-            status: i32,
-            data: Option<String>,
-        }
-        let reply: Reply =
-            serde_json::from_slice(output.expose()).map_err(|_| Error::StoreUnavailable)?;
-        match reply.status {
-            -25300 if value.is_none() => Ok(None),
-            -25299 if value.is_some() => Err(Error::Conflict),
-            0 => match reply.data {
-                Some(data) => {
-                    let data = zeroize::Zeroizing::new(data);
-                    Ok(Some(Secret::new(
-                        B64.decode(data.as_bytes())
-                            .map_err(|_| Error::InvalidRecord)?,
-                    )))
-                }
-                None => Ok(None),
-            },
-            _ => Err(Error::StoreUnavailable),
-        }
-    }
-    pub fn read_service(service: &str, account: &str) -> Result<Option<Secret>> {
-        Self::call(service, account, None)
-    }
-}
-#[cfg(target_os = "macos")]
-impl Backend for Keychain {
-    fn name(&self) -> &'static str {
-        "keychain"
-    }
-    fn get(&self, key: &str) -> Result<Option<Secret>> {
-        Self::read_service("hey-boss.secrets", key)
-    }
-    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
-        Self::call("hey-boss.secrets", key, Some(value)).map(|_| ())
-    }
-}
+pub use macos::Keychain;
 
 /// Only explicit initialization may create a Linux store/key. Existing keys stay intact.
 #[cfg(not(target_os = "macos"))]
@@ -370,41 +316,6 @@ pub fn prepare_native(home: &Path) -> Result<()> {
     Ok(())
 }
 #[cfg(target_os = "macos")]
-pub fn prepare_native(_home: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, target_os = "macos"))]
-#[test]
-#[ignore = "uses an unlocked macOS Keychain with a disposable synthetic identity"]
-fn keychain_identity_creation_never_replaces_an_existing_key() {
-    struct Fixture(String);
-    impl Drop for Fixture {
-        fn drop(&mut self) {
-            let _ = Command::new("/usr/bin/security")
-                .args(["delete-generic-password", "-s", &self.0, "-a", "identity"])
-                .output();
-        }
-    }
-    let fixture = Fixture(format!(
-        "local.hey-boss.keychain-test.{}",
-        rand::random::<u128>()
-    ));
-    assert!(
-        Keychain::read_service(&fixture.0, "identity")
-            .unwrap()
-            .is_none()
-    );
-    Keychain::call(&fixture.0, "identity", Some(b"fixture\0key")).unwrap();
-    assert_eq!(
-        Keychain::call(&fixture.0, "identity", Some(b"replacement")).unwrap_err(),
-        Error::Conflict
-    );
-    assert_eq!(
-        Keychain::read_service(&fixture.0, "identity")
-            .unwrap()
-            .unwrap()
-            .expose(),
-        b"fixture\0key"
-    );
+pub fn prepare_native(home: &Path) -> Result<()> {
+    Keychain::new(home).prepare()
 }
