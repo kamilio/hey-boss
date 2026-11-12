@@ -8,3 +8,8 @@ The CLI terminal walkthroughs run against built binaries. For example,
 `cargo run --locked --manifest-path tools/terminal-checks/Cargo.toml -- project target/debug/hey-boss`
 exercises project setup at three widths and writes PNGs under `out/terminal-checks/project`.
 Use `--help` for the other suites. Add `--serve` to `transactions` to keep its private web fixture open until Ctrl+C.
+
+For browser checks, build the CLI with `cargo build --locked -p hey-boss --bin hey-boss`.
+Run `cargo run --locked -p hey-boss --example web-fixture -- artifact-diagrams`
+and open the printed URL. Use `--help` in place of the scenario to list fixtures.
+Ctrl+C stops the server and removes its test data.

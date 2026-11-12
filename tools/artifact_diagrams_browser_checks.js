@@ -1,4 +1,4 @@
-// Run via playwright-cli run-code on serve_artifact_diagrams_fixture.mjs.
+// Run on the URL printed by cargo run --example web-fixture -- artifact-diagrams.
 async page => {
   const checks=[],errors=[];
   const assert=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};

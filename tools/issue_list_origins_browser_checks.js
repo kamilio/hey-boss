@@ -1,4 +1,4 @@
-// Run via playwright-cli run-code with serve_issue_list_origins_fixture.mjs.
+// Run on the URL printed by cargo run --example web-fixture -- issue-list-origins.
 async page => {
   const checks=[], errors=[];
   page.on('pageerror', error => errors.push(error.message));

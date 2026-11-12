@@ -1,5 +1,5 @@
 // playwright-cli --session issue253 run-code --filename tools/long_title_browser_checks.js
-// Use tools/serve_long_title_fixture.mjs; run once on native and once on /issues.
+// Run on the URL printed by cargo run --example web-fixture -- long-title.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };

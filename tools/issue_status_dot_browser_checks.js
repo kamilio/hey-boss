@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code and serve_status_dot_fixture.mjs.
+// Run on the URL printed by cargo run --example web-fixture -- status-dot.
 async page => {
  const checks=[],errors=[];
  page.setDefaultNavigationTimeout(90000);
