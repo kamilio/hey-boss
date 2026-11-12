@@ -42,6 +42,26 @@ impl Agent {
         };
         let mut ack = json!({"id":id,"type":"response","command":command,"success":true});
         match command {
+            "get_commands" => {
+                ack["data"] = json!({"commands":[
+                    {"name":"local","source":"extension"}, {"name":"model","source":"extension"},
+                    {"name":"template","source":"prompt"}
+                ]});
+            }
+            "prompt" if text.starts_with("/local") => {
+                if text == "/local fail" {
+                    send(json!({"type":"extension_error","event":"command","error":"handler failed"}));
+                }
+                send(ack);
+                return;
+            }
+            "prompt" if text == "/model" => {
+                send(json!({"type":"agent_start"}));
+                send(ack);
+                self.output = "model reply".into();
+                self.later(100);
+                return;
+            }
             "extension_ui_response" => {
                 if let Some((id, reject)) = self.preflight.take() {
                     let mut v =

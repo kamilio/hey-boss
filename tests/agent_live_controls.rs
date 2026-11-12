@@ -23,12 +23,12 @@ fn scratch(provider: Provider) -> PathBuf {
     eprintln!("SCRATCH {}", root.display());
     root
 }
-fn launch(provider: Provider, root: &Path, binary: Option<PathBuf>) -> AgentSession {
+fn launch(provider: Provider, root: &Path) -> AgentSession {
     AgentSession::launch(Launch {
         codex_execution: Default::default(),
         model: None,
         provider,
-        binary,
+        binary: None,
         cwd: root.into(),
         resume: None,
         env: BTreeMap::new(),
@@ -79,8 +79,8 @@ fn running_tool(agent: &mut AgentSession, root: &Path, started: &str) {
         }
     }
 }
-fn controls(provider: Provider, root: &Path, binary: Option<PathBuf>) {
-    let mut agent = launch(provider, root, binary);
+fn controls(provider: Provider, root: &Path) {
+    let mut agent = launch(provider, root);
     let turn = agent.prompt("Use the bash tool to run exactly: printf started > steer-started; sleep 8. Wait for that tool, then respond ORIGINAL_DONE. Run in the foreground. Do not use any other tools.", None).unwrap();
     running_tool(&mut agent, root, "steer-started");
     assert!(agent.steer("stale-turn", "wrong instruction").is_err());
@@ -182,7 +182,7 @@ fn controls(provider: Provider, root: &Path, binary: Option<PathBuf>) {
 #[ignore = "real authenticated Codex CLI; invokes models and scratch-only tools"]
 fn real_codex_steering_and_interruption() {
     let root = scratch(Provider::Codex);
-    controls(Provider::Codex, &root, None);
+    controls(Provider::Codex, &root);
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn real_codex_steering_and_interruption() {
 fn real_codex_stop_and_drop_cancel_foreground_tools() {
     for stop in [true, false] {
         let root = scratch(Provider::Codex);
-        let mut agent = launch(Provider::Codex, &root, None);
+        let mut agent = launch(Provider::Codex, &root);
         agent.prompt("Use the bash tool to run exactly: printf started > shutdown-started; sleep 10; printf BAD > shutdown-finished. Run in the foreground. Do not use other tools.", None).unwrap();
         running_tool(&mut agent, &root, "shutdown-started");
         let started = Instant::now();
@@ -225,8 +225,8 @@ fn real_claude_steering_interruption_and_approvals() {
         json!({"permissions":{"ask":["Bash", "Write", "Edit"]}}).to_string(),
     )
     .unwrap();
-    controls(Provider::Claude, &root, None);
-    let mut agent = launch(Provider::Claude, &root, None);
+    controls(Provider::Claude, &root);
+    let mut agent = launch(Provider::Claude, &root);
     for (name, allow) in [("denied.txt", false), ("allowed.txt", true)] {
         agent.prompt(&format!("Use the Write tool once to create {name} with content APPROVAL_TEST. If permission is denied, do not retry, do not use alternative tools, and reply DENIED. If it succeeds, reply ALLOWED."), None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(180);
@@ -255,105 +255,101 @@ fn real_claude_steering_interruption_and_approvals() {
 }
 
 #[test]
-#[ignore = "real authenticated Pi CLI; invokes models and scratch-only tools/extension UI"]
-fn real_pi_steering_interruption_and_extension_input() {
-    use std::os::unix::fs::PermissionsExt;
-    let root = scratch(Provider::Pi);
-    let extension = root.join("live-dialogs.ts");
-    fs::write(&extension, r#"import { writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-export default function(pi) {
-  pi.on('before_agent_start', async (event, ctx) => {
-    if (!event.prompt.startsWith('HB_DIALOG')) return;
-    const selected = await ctx.ui.select('Live select', ['one', 'two']);
-    if (event.prompt.startsWith('HB_DIALOG_CANCEL')) {
-      writeFileSync(join(ctx.cwd, 'dialog-cancel.json'), JSON.stringify({cancelled: selected === undefined}));
-      return;
-    }
-    const confirmed = await ctx.ui.confirm('Live confirm', 'Approve scratch operation?');
-    const typed = await ctx.ui.input('Live input', 'type here');
-    const edited = await ctx.ui.editor('Live editor', 'initial');
-    writeFileSync(join(ctx.cwd, 'dialog-results.json'), JSON.stringify({selected, confirmed, typed, editorCancelled: edited === undefined}));
-  });
+#[ignore = "real authenticated Pi CLI; invokes models and scratch-only tools"]
+fn real_pi_steering_and_interruption() {
+    controls(Provider::Pi, &scratch(Provider::Pi));
 }
-"#).unwrap();
-    let wrapper = root.join("real-pi");
-    fs::write(
-        &wrapper,
-        format!(
-            "#!/bin/sh\nexec '{}' -e '{}' \"$@\"\n",
-            Provider::Pi.binary().unwrap().display(),
-            extension.display()
-        ),
-    )
+
+#[test]
+#[ignore = "requires installed Pi with its bundled example extensions; no model calls"]
+fn real_pi_extension_dialogs() {
+    let binary = Provider::Pi.binary().unwrap().canonicalize().unwrap();
+    let examples = binary
+        .ancestors()
+        .map(|dir| dir.join("examples/extensions"))
+        .find(|dir| dir.join("rpc-demo.ts").is_file())
+        .expect("install Pi with its example extensions");
+    let root = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let extensions = root.path().join("extensions");
+    fs::create_dir(&extensions).unwrap();
+    for example in ["rpc-demo.ts", "timed-confirm.ts"] {
+        fs::copy(examples.join(example), extensions.join(example)).unwrap();
+    }
+    let mut agent = AgentSession::launch(Launch {
+        codex_execution: Default::default(),
+        model: None,
+        provider: Provider::Pi,
+        binary: Some(binary),
+        cwd: root.path().into(),
+        resume: None,
+        env: [
+            ("PI_CODING_AGENT_DIR".into(), root.path().into()),
+            ("HOME".into(), root.path().into()),
+            ("PI_OFFLINE".into(), "1".into()),
+        ]
+        .into(),
+        output_schema: None,
+    })
     .unwrap();
-    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
-    controls(Provider::Pi, &root, Some(wrapper.clone()));
-    let mut agent = launch(Provider::Pi, &root, Some(wrapper));
-    agent
-        .prompt("HB_DIALOG: Reply DIALOG_DONE only; do not use tools.", None)
-        .unwrap();
-    assert!(agent.state().awaiting_prompt_ack);
-    let deadline = Instant::now() + Duration::from_secs(180);
-    let mut methods = Vec::new();
-    loop {
-        match event(&mut agent, deadline) {
-            Event::Input { id, payload } => {
-                let method = payload["method"].as_str().unwrap();
-                methods.push(method.to_owned());
-                let answer = match method {
-                    "select" => {
-                        assert!(agent.respond_input(&id, Some("invalid")).is_err());
-                        Some("two")
-                    }
-                    "confirm" => Some("false"),
-                    "input" => Some("typed answer"),
-                    "editor" => None,
-                    _ => panic!("Unexpected dialog {method}"),
-                };
-                assert!(agent.respond_input("unknown-input", Some("two")).is_err());
-                agent.respond_input(&id, answer).unwrap();
-                assert!(agent.respond_input(&id, answer).is_err());
-            }
-            Event::TurnCompleted { status, .. } => {
-                assert_eq!(status, TurnStatus::Completed);
-                break;
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(methods, ["select", "confirm", "input", "editor"]);
-    let results: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join("dialog-results.json")).unwrap()).unwrap();
-    assert_eq!(
-        results,
-        json!({"selected":"two", "confirmed":false, "typed":"typed answer", "editorCancelled":true})
-    );
-    assert!(!agent.state().awaiting_prompt_ack);
-    agent
-        .prompt(
-            "HB_DIALOG_CANCEL: Reply CANCEL_DONE only; do not use tools.",
-            None,
-        )
-        .unwrap();
-    loop {
-        if let Event::Input { id, .. } = event(&mut agent, deadline) {
-            agent.respond_input(&id, None).unwrap();
-            break;
-        }
-    }
-    assert_eq!(completed(&mut agent, false).1, TurnStatus::Completed);
-    let results: serde_json::Value =
-        serde_json::from_slice(&fs::read(root.join("dialog-cancel.json")).unwrap()).unwrap();
-    assert_eq!(results, json!({"cancelled":true}));
     assert!(!agent.capabilities().tool_approvals);
-    agent
-        .prompt(
-            "HB_DIALOG_PENDING: Reply MUST_NOT_RUN only; do not use tools.",
+    for (command, method, answer, notification) in [
+        (
+            "/timed-select",
+            "select",
+            Some("Option B"),
+            "Selected: Option B",
+        ),
+        ("/timed", "confirm", Some("true"), "Confirmed by user!"),
+        ("/timed", "confirm", Some("false"), "Cancelled or timed out"),
+        (
+            "/rpc-input",
+            "input",
+            Some("typed answer"),
+            "You entered: typed answer",
+        ),
+        ("/rpc-editor", "editor", None, "Editor cancelled"),
+        (
+            "/timed-select",
+            "select",
             None,
-        )
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
+            "Selection cancelled or timed out",
+        ),
+    ] {
+        let turn = agent.prompt(command, None).unwrap();
+        assert!(agent.state().awaiting_prompt_ack);
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut answered = false;
+        let mut notified = false;
+        loop {
+            match event(&mut agent, deadline) {
+                Event::Input { id, payload } => {
+                    assert!(!answered);
+                    assert_eq!(payload["method"], method);
+                    assert!(agent.respond_input("unknown-input", answer).is_err());
+                    if method == "select" {
+                        assert!(agent.respond_input(&id, Some("invalid")).is_err());
+                    }
+                    agent.respond_input(&id, answer).unwrap();
+                    assert!(agent.respond_input(&id, answer).is_err());
+                    answered = true;
+                }
+                Event::Other(v) if v["method"] == "notify" => {
+                    assert_eq!(v["message"], notification);
+                    notified = true;
+                }
+                Event::TurnCompleted { id, status, .. } => {
+                    assert_eq!(id, turn);
+                    assert_eq!(status, TurnStatus::Completed);
+                    assert!(answered && notified);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(!agent.state().awaiting_prompt_ack);
+    }
+    agent.prompt("/rpc-input", None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(12);
     let pending = loop {
         if let Event::Input { id, .. } = event(&mut agent, deadline) {
             break id;
@@ -362,10 +358,5 @@ export default function(pi) {
     agent.interrupt().unwrap();
     assert_eq!(completed(&mut agent, false).1, TurnStatus::Interrupted);
     assert!(agent.state().stopped);
-    assert!(agent.respond_input(&pending, Some("two")).is_err());
-    eprintln!("PASS live Pi pending-dialog interruption");
-    agent.stop().unwrap();
-    eprintln!(
-        "PASS live Pi select, confirm, input, editor, invalid/repeated responses and cancellation"
-    );
+    assert!(agent.respond_input(&pending, Some("late")).is_err());
 }

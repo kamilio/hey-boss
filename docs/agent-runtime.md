@@ -11,7 +11,7 @@ claims, steering, goals, approvals/input, cancellation, and exact-session retry.
 | --- | --- | --- | --- |
 | Start/resume | app-server thread/start or thread/resume | stream-json with exact --resume ID | RPC with exact --session file |
 | Activity | item events | SDK messages and partial stream events | message/tool RPC events |
-| Completion | turn/completed | parent result, accounting for tracked delegated tasks | agent_settled, after retries and queued work |
+| Completion | turn/completed | parent result, accounting for tracked delegated tasks | agent_settled for model runs; command acknowledgment for extension-only work |
 | Steering | expected-turn direct input | queued next user turn | before next model call |
 | Interrupt | turn/interrupt plus confirmed termination of thread shell sessions | SDK interrupt; stop when queued input exists | clear_queue then abort; stop for pending dialogs |
 | Tool approvals | command/file/network and turn-scoped permissions | can_use_tool; original input, no permanent grant | no native permission broker |
@@ -144,9 +144,9 @@ content. It passed locally with Codex 0.155.1, Claude Code 2.1.278 and Pi 0.84.4
 use the installed CLI versions reported by the test environment when reproducing.
 
 The opt-in live control suite uses the real authenticated Codex, Claude and Pi CLIs,
-timed foreground shell tools and scratch-only files. Pi loads a small local
-extension through a transparent executable wrapper; its dialogs and replies
-travel through the actual Pi RPC implementation, not a protocol fixture.
+timed foreground shell tools and scratch-only files. The Pi dialog test runs
+offline in a private home using the installed CLI’s own `rpc-demo` and
+`timed-confirm` extensions. Each answer is checked against Pi’s notification.
 
 ```sh
 cargo test --locked --test agent_live_controls -- --ignored --nocapture --test-threads=1
