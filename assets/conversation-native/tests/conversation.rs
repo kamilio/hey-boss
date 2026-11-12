@@ -119,7 +119,7 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
             && prompt.contains("Organize notes")
             && !prompt.contains("Private skill body")
     );
-    assert_eq!(req[0]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(req[0]["tools"].as_array().unwrap().len(), 5);
     assert_eq!(fs::read_to_string(cwd.join("one.txt"))?, "one\n");
     assert!(
         req[2]["input"].to_string().contains("function_call_output")
@@ -206,6 +206,8 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
     std::os::unix::fs::symlink(sock.canonicalize()?, endpoint.join("control.sock"))?;
     let socket_home = Path::new(short.path().file_name().unwrap()).join("h");
     std::os::unix::fs::symlink(cwd.canonicalize()?, &socket_home)?;
+    let paste = json!({"type":"function","name":"paste","description":"from the dictation service","strict":true,"parameters":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}});
+    let declared = paste.clone();
     let task = tokio::spawn(async move {
         let (mut s, _) = listener.accept().await?;
         let mut line = String::new();
@@ -222,7 +224,7 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
             serde_json::from_str::<Value>(&line)?,
             json!({"command":"spoken_context"})
         );
-        s.write_all(br#"{"ok":true,"id":"captured-field","observed":{"app":"Fixture","window":"Original window","field":"AXTextArea"}}"#).await?;
+        s.write_all(json!({"ok":true,"id":"captured-field","observed":{"app":"Fixture","window":"Original window","field":"AXTextArea"},"paste_tool":declared}).to_string().as_bytes()).await?;
         drop(s);
         for reply in [
             r#"{"ok":true}"#,
@@ -253,7 +255,7 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
         .call("inspect_window", &json!({"target":"Gmail","mode":"both"}))
         .await?;
     let args = json!({"text":"  Hi 🌍\n"});
-    let (url, server) = mock(vec![tool("paste_text", args.clone()), msg("Pasted.")]).await?;
+    let (url, server) = mock(vec![tool("paste", args.clone()), msg("Pasted.")]).await?;
     agent::run(
         &cwd.join("paste-session.json"),
         &url,
@@ -262,6 +264,14 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
     )
     .await?;
     let requests = server.await??;
+    assert!(requests[0]["tools"].as_array().unwrap().contains(&paste));
+    assert!(
+        !requests[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "paste_text")
+    );
     assert!(requests[0]["input"].to_string().contains("Original window"));
     assert!(
         requests[1]["input"]
@@ -269,7 +279,7 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
             .contains("Pasted without submitting.")
     );
     assert!(
-        p.call("paste_text", &args)
+        p.call("paste", &args)
             .await
             .unwrap_err()
             .to_string()

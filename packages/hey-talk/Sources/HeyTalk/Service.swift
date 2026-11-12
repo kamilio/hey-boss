@@ -677,8 +677,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if conversation == nil || conversationFocus == nil { conversationFocus = ConversationFocus() }
             reply(["ok": true])
         case "spoken_context":
-            guard let context = conversationFocus else { reply(failure("No pre-focus observation is available.")); return }
-            reply(["ok": true, "id": context.id, "observed": context.evidence])
+            do {
+                var result: [String: Any] = ["ok": true, "paste_tool": try Correction.pasteTool]
+                if let context = conversationFocus { result["id"] = context.id; result["observed"] = context.evidence }
+                reply(result)
+            } catch { reply(failure(error.localizedDescription)) }
         case "paste_text", "spoken_window":
             if command == "paste_text", !AXIsProcessTrusted() { reply(failure(ConversationFocus.permission)); return }
             guard let context = conversationFocus, request["focus"] as? String == context.id else {

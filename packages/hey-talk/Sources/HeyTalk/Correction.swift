@@ -59,22 +59,25 @@ final class Correction {
         return configuration
     }())) { self.session = session }
 
-    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, canAddVocabularyTerm: Bool = true, recent: [[String]] = [], history: [[String: Any]] = [], settings: CorrectionSettings = CorrectionSettings()) throws -> URLRequest {
+    private static func prompt(_ name: String) throws -> String {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
-        func prompt(_ name: String) throws -> String {
-            guard let url = bundle.url(forResource: name, withExtension: "md") else {
-                throw TalkError("Correction prompt is missing. Reinstall Hey Talk.")
-            }
-            let text = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { throw TalkError("Correction prompt is empty.") }
-            return text
+        guard let url = bundle.url(forResource: name, withExtension: "md") else {
+            throw TalkError("Correction prompt is missing. Reinstall Hey Talk.")
         }
-        func tool(_ name: String, _ arguments: String...) throws -> [String: Any] {
-            ["type": "function", "name": name, "description": try prompt(name), "strict": true,
-             "parameters": ["type": "object", "properties": Dictionary(uniqueKeysWithValues: arguments.map { ($0, ["type": "string"]) }),
-                            "required": arguments, "additionalProperties": false]]
-        }
-        var tools = [try tool("paste", "text")]
+        let text = try String(contentsOf: url, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { throw TalkError("Correction prompt is empty.") }
+        return text
+    }
+    private static func tool(_ name: String, _ arguments: String...) throws -> [String: Any] {
+        ["type": "function", "name": name, "description": try prompt(name), "strict": true,
+         "parameters": ["type": "object", "properties": Dictionary(uniqueKeysWithValues: arguments.map { ($0, ["type": "string"]) }),
+                        "required": arguments, "additionalProperties": false]]
+    }
+
+    static var pasteTool: [String: Any] { get throws { try tool("paste", "text") } }
+
+    static func request(text: String, vocabulary: [String], appContext: String? = nil, app: [String: String]? = nil, package: ToolPackage? = nil, canClear: Bool = false, canAddVocabularyTerm: Bool = true, recent: [[String]] = [], history: [[String: Any]] = [], settings: CorrectionSettings = CorrectionSettings()) throws -> URLRequest {
+        var tools = [try pasteTool]
         if canAddVocabularyTerm { tools.append(try tool("add_dictation_vocabulary_term", "term")) }
         if canClear { tools.append(try tool("clear_input")) }
         if let package { tools += try package.definitions(prompt: prompt) }

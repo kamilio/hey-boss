@@ -16,6 +16,16 @@ private final class CorrectionProtocol: URLProtocol {
 }
 
 final class CorrectionTests: XCTestCase {
+    func testConversationReceivesDictationsActualPasteTool() throws {
+        let request = try Correction.request(text: "Hello", vocabulary: [])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        let tools = try XCTUnwrap(body["tools"] as? [[String: Any]])
+        let paste = try XCTUnwrap(tools.first { $0["name"] as? String == "paste" })
+        var context = [String: Any]()
+        TalkService(headless: true).command(["command": "spoken_context"]) { context = $0 }
+        XCTAssertEqual(context["paste_tool"] as? NSDictionary, paste as NSDictionary)
+    }
+
     func testT3ToolsAndAppIdentityAreScopedToTheDictationTarget() throws {
         let app = ["name": "T3 Code", "bundle_id": "com.t3tools.t3code", "thread": "Voice tools"]
         for allowed in [false, true] {

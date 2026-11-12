@@ -32,12 +32,15 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         .as_ref()
         .and_then(|v| v["id"].as_str())
         .map(str::to_owned);
+    let mut schemas = schemas();
+    if let Some(paste) = observation.as_ref().and_then(|v| v.get("paste_tool")) {
+        schemas.push(paste.clone());
+    }
     let observed = observation
-        .map(|v| v["observed"].clone())
+        .and_then(|v| v.get("observed").cloned())
         .unwrap_or(json!("unavailable"));
     book.push(json!({"role":"user","content":format!("Observed pre-focus desktop context: {observed}\n\n{turn}")}))?;
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
-    let schemas = schemas();
     loop {
         let msg = provider::complete(
             tools.http,
