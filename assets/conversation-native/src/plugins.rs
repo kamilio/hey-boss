@@ -28,7 +28,6 @@ pub fn schemas() -> Vec<Value> {
     [
         ("shell",include_str!("../../conversation-tools/shell.md"),cmd.clone()),
         ("batch",include_str!("../../conversation-tools/batch.md"),object(json!({"commands":{"type":"array","items":cmd,"minItems":1,"maxItems":8}}),&["commands"])),
-        ("paste_text",include_str!("../../conversation-tools/paste_text.md"),object(json!({"text":s}),&["text"])),
         ("inspect_window",include_str!("../../conversation-tools/inspect_window.md"),object(json!({"target":s,"mode":{"type":"string","enum":["accessibility","screenshot","both"]}}),&["target","mode"])),
         ("show_media",include_str!("../../conversation-tools/show_media.md"),object(json!({"title":s,"file":s,"url":s,"image":image,"svg":s,"graphviz":s,"mermaid":s}),&[])),
         ("hide_media",include_str!("../../conversation-tools/hide_media.md"),object(json!({}),&[])),
@@ -148,7 +147,11 @@ impl Plugins<'_> {
     }
     pub async fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {
-            "paste_text" => {
+            "paste" => {
+                ensure!(
+                    args.as_object().is_some_and(|v| v.len() == 1),
+                    "Expected only text."
+                );
                 let text = args["text"].as_str().context("Missing text")?;
                 timeout(
                     Duration::from_secs(5),
