@@ -23,6 +23,7 @@ mod fleet;
 mod issue_design;
 mod markdown_attachments;
 mod origin;
+mod reviewed_evidence;
 mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -47,6 +48,7 @@ enum Scenario {
     QuietHours,
     ArtifactDiagrams,
     MarkdownAttachments,
+    ReviewedEvidence,
     PlanPrompt,
     LivePrompt,
     ProjectPicker,
@@ -82,6 +84,7 @@ impl Scenario {
             Self::AgentsNavigation => ("Home", 59643),
             Self::ProjectSettings => ("Settings fixture", 59642),
             Self::QuietHours => ("Quiet hours QA", 59651),
+            Self::ReviewedEvidence => ("Reviewed evidence QA", 0),
             Self::MarkdownAttachments => (markdown_attachments::PROJECT, 0),
             Self::ArtifactDiagrams => ("Flowchart QA", 59549),
             Self::PlanPrompt => ("Plan QA", 59693),

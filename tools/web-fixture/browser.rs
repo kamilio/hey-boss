@@ -330,3 +330,11 @@ mod issue_list;
 
 #[path = "artifact_import_browser.rs"]
 mod artifact_import;
+
+#[test]
+fn installed_reviewed_evidence_handoff_is_atomic_and_replayable() {
+    let f = installed_fixture();
+    let (project, _) = Scenario::ReviewedEvidence.destination();
+    f.init(project).unwrap();
+    reviewed_evidence::verify(&f, project).unwrap();
+}
