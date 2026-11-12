@@ -13,10 +13,10 @@ npm ci --ignore-scripts
 npm run corpus
 ```
 
-This runs every original assertion against the copied reference implementation
-and runs the Rust exporter. The exporter checks each passing test name against
-its capture before writing the corpus. Import instrumentation does not alter
-the original files or assertions. The checked-in corpus records every test name,
+This runs every original assertion against the copied reference implementation.
+During a corpus run, Vitest records calls to the Markdown modules in each test’s
+JSON report entry. The Rust exporter requires a passing result and observations
+for every test before writing the corpus. The checked-in corpus records every test name,
 309 unique Markdown inputs, 31 code inputs, and 46 direct renderer inputs.
 Type-only, invalid-option, invalid-frontmatter, and subprocess theme tests retain
 their original assertions even where they have no native Markdown input.

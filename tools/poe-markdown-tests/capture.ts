@@ -1,30 +1,43 @@
-import fs from 'node:fs';
-import {createHash} from 'node:crypto';
-import {afterEach, beforeEach, expect} from 'vitest';
-import {parse} from './upstream/packages/toolcraft-design/src/terminal-markdown/parser.js';
-let calls: unknown[] = [];
-function plain(value: unknown) {
+import { beforeEach, vi } from 'vitest';
+import { parse } from './upstream/packages/toolcraft-design/src/terminal-markdown/parser.js';
+
+function snapshot(value: unknown) {
   const parents: object[] = [];
-  return JSON.parse(JSON.stringify(value,function (_,v) {
-    if (v && typeof v === 'object') {
+  return JSON.parse(JSON.stringify(value, function (_, item) {
+    if (item && typeof item === 'object') {
       while (parents.length && parents.at(-1) !== this) parents.pop();
-      if (parents.includes(v)) return '[Circular]';
-      parents.push(v);
+      if (parents.includes(item)) return '[Circular]';
+      parents.push(item);
     }
-    return v;
-  }) ?? 'null');
+    return item;
+  }));
 }
-(globalThis as any).__poeCapture = (operation: string, args: any[], result: any) => {
-  if (!process.env.POE_MARKDOWN_CAPTURE) return;
-  let source = typeof args[0] === 'string' ? args[0] : undefined;
-  if(operation === 'getMarkdownDemo') source=result;
-  const ast = source !== undefined ? parse(source).ast : args[0]?.type ? args[0] : undefined;
-  calls.push(plain({operation,args,result,source,ast}));
-};
-beforeEach(()=>{calls=[];});
-afterEach(()=>{
-  if (!process.env.POE_MARKDOWN_CAPTURE) return;
-  const name=expect.getState().currentTestName!;
-  fs.mkdirSync('captured',{recursive:true});
-  fs.writeFileSync('captured/'+createHash('sha256').update(name).digest('hex')+'.json',JSON.stringify({name,calls},null,2)+'\n');
-});
+
+if (process.env.POE_MARKDOWN_CAPTURE) {
+  const modules = import.meta.glob('./upstream/packages/toolcraft-design/src/terminal-markdown/{index,parser,plaintext-renderer,demo-content,parser/{block,inline,frontmatter,code-highlight}}.ts');
+  let calls: unknown[];
+  let inside = false;
+  beforeEach(({ task }) => { task.meta.calls = calls = []; });
+
+  for (const load of Object.values(modules)) {
+    const module = await load() as Record<string, (...args: any[]) => any>;
+    for (const [operation, original] of Object.entries(module)) {
+      if (typeof original !== 'function') continue;
+      vi.spyOn(module, operation).mockImplementation((...args) => {
+        // Keep calls made by the test; exclude the implementation's own calls.
+        if (inside || !calls) return original(...args);
+        inside = true;
+        try {
+          const result = original(...args);
+          const first = args[0];
+          const source = operation === 'getMarkdownDemo' ? result : typeof first === 'string' ? first : undefined;
+          const ast = source !== undefined ? (operation === 'parse' ? result : parse(source)).ast : first?.type ? first : undefined;
+          calls.push(snapshot(operation === 'highlightCodeBlock' ? { operation, code: first, result } : { operation, source, ast }));
+          return result;
+        } finally {
+          inside = false;
+        }
+      });
+    }
+  }
+}
