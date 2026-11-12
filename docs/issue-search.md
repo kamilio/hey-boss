@@ -37,3 +37,14 @@ rebuildable cache is next to the issue database at `<database>.search.db`.
 
 `issue list --search TEXT` keeps its literal behavior. `issue search TEXT
 --literal` also uses the old title/body filter and queue order without an API call.
+
+To measure search latency against a disposable 9,000-issue corpus, build the
+synthetic provider and run the workload against the installed CLI:
+
+```sh
+cargo build --example search-provider
+HEY_BOSS_TEST_BINARY="$(command -v hey-boss)" cargo test --example web-fixture full_index_search_with_foreground -- --ignored --nocapture
+```
+
+It reports keyword and hybrid retrieval times, plus foreground read and write
+times during indexing and a simulated provider outage. No external provider is contacted.
