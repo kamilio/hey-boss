@@ -1,5 +1,5 @@
-// Run through playwright-cli against serve_jobs_ui_fixture.mjs only.
-async (page, outputDir='/tmp/hb-jobs-ui-qa') => {
+// Run through playwright-cli against the Rust web-fixture jobs-ui scenario only.
+async (page, outputDir='out/hb-jobs-ui-qa') => {
  const origin=await page.evaluate(()=>location.origin);
  if(!['http://127.0.0.1:59649','http://hey-boss.test:59649'].includes(origin))throw Error('Isolated fixture required');
  const params=value=>Object.entries(value).map(([k,v])=>encodeURIComponent(k)+'='+encodeURIComponent(v)).join('&');

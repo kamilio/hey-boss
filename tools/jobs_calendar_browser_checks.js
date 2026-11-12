@@ -1,4 +1,4 @@
-// Run through playwright-cli against serve_jobs_ui_fixture.mjs. Temporary PNGs go under /tmp.
+// Run through playwright-cli against the Rust web-fixture jobs-ui scenario. Temporary PNGs go under out/.
 async page=>{
  const origin=await page.evaluate(()=>location.origin),surface='desktop';
  if(!['http://127.0.0.1:59649'].includes(origin))throw Error('Isolated fixture required');
@@ -39,7 +39,7 @@ async page=>{
   for(const width of [1440,768,390])for(const colorScheme of ['light','dark']){
    await page.setViewportSize({width,height:1000});await page.emulateMedia({colorScheme});
    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${mode} ${width} ${colorScheme}: no overflow`);
-   if(width!==768)await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-${mode}-${width}-${colorScheme}.png`,fullPage:true});
+   if(width!==768)await page.screenshot({path:`out/hb-calendar-qa/${surface}-${mode}-${width}-${colorScheme}.png`,fullPage:true});
   }
  }
  await page.setViewportSize({width:1440,height:1100});await page.emulateMedia({colorScheme:'light'});
@@ -54,11 +54,11 @@ async page=>{
   await page.waitForFunction(()=>document.querySelector('.calendar-facts'));
   const text=await page.locator('#calendar-detail').textContent();
   check(text.includes('Schedule timezone')&&text.includes('Scheduled time')&&text.includes('Actual start')&&text.includes('Actual finish'),'Separate schedule and actual '+record.state);
-  if(record.state==='pending')check(text.includes('runtime is unavailable')||text.includes('No connected job service'),'Pending reason visible');
+  if(record.state==='pending')check(text.includes('runtime is unavailable')||text.includes('Waiting for a running worker with this project checkout'),'Pending reason visible');
   if(record.state==='skipped')check(text.includes('overlap')&&text.includes('Not run'),'Skipped reason and no actual start');
   if(record.state==='cancelled'){
    const href=await page.locator('#calendar-detail a[href^="/agents/session"]').getAttribute('href');
-   await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-run-detail.png`});
+   await page.screenshot({path:`out/hb-calendar-qa/${surface}-run-detail.png`});
    const newPage=await page.context().newPage();await newPage.goto(origin+href);await newPage.waitForFunction(()=>document.body.textContent.includes('Synthetic saved job result.'));await newPage.close();
    check(true,'Saved session opens from calendar');
   }
@@ -81,7 +81,7 @@ async page=>{
  check(await page.locator('.calendar-overflow').count()===0,'Hourly runs do not create day overflow');
  check(await page.locator('.calendar-day').evaluateAll(days=>days.every(day=>day.querySelectorAll('.calendar-event').length===1)),'One hourly job item per day');
  check((await page.locator('.calendar-group').first().textContent()).includes('24 runs'),'Grouped item shows occurrence count');
- await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-grouped-hourly.png`,fullPage:true});
+ await page.screenshot({path:`out/hb-calendar-qa/${surface}-grouped-hourly.png`,fullPage:true});
  await page.locator('.calendar-group').first().click();await page.waitForFunction(()=>document.querySelector('.calendar-day-list .calendar-event'));
  check(await page.locator('.calendar-day-list .calendar-event').count()>=23,'Dense hourly day expands all entries');await page.keyboard.press('Escape');
  const dense=(await create('-dense','Minute density test','* * * * *','UTC')).job;
@@ -95,9 +95,9 @@ async page=>{
  let fail=true;
  const failure=async route=>{if(route.request().postDataJSON()?.operation?.operation?.command==='calendar'&&fail)return route.fulfill({json:{ok:false,error:{message:'Synthetic offline failure'}}});return route.continue();};
  await page.route('**/api/action',failure);await page.locator('#calendar-refresh').click();await page.waitForFunction(()=>document.querySelector('[data-calendar-retry]'));
- check((await page.locator('#calendar-status').textContent()).includes('Synthetic offline'),'Error state is actionable');await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-error.png`});fail=false;await page.locator('[data-calendar-retry]').click();await ready();await page.unroute('**/api/action',failure);
+ check((await page.locator('#calendar-status').textContent()).includes('Synthetic offline'),'Error state is actionable');await page.screenshot({path:`out/hb-calendar-qa/${surface}-error.png`});fail=false;await page.locator('[data-calendar-retry]').click();await ready();await page.unroute('**/api/action',failure);
  const delay=async route=>{if(route.request().postDataJSON()?.operation?.operation?.command==='calendar')await page.waitForTimeout(1000);return route.continue();};
- await page.route('**/api/action',delay);await page.locator('#calendar-refresh').click();check((await page.locator('#calendar-status').textContent()).includes('Loading'),'Loading state');await page.screenshot({path:`/tmp/hb-calendar-qa/${surface}-loading.png`});await ready();await page.unroute('**/api/action',delay);
+ await page.route('**/api/action',delay);await page.locator('#calendar-refresh').click();check((await page.locator('#calendar-status').textContent()).includes('Loading'),'Loading state');await page.screenshot({path:`out/hb-calendar-qa/${surface}-loading.png`});await ready();await page.unroute('**/api/action',delay);
  check(queries.filter(q=>q.command==='calendar').every(q=>q.days<=42),'All summary requests bounded to visible range');check(queries.filter(q=>q.command==='calendar_entries').every(q=>q.days===1),'Detail requests limited to one day');check(errors.length===0,'No browser JS errors');
  page.off('request',watch);
  return {surface,checks:checks.length,calendarRequests:queries.filter(q=>q.command==='calendar').length};

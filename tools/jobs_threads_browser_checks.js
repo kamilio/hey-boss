@@ -1,4 +1,4 @@
-// Run against serve_jobs_ui_fixture.mjs; mutations stay in its disposable store.
+// Run against the Rust web-fixture jobs-ui scenario; mutations stay in its disposable store.
 async (page) => {
   const origin = 'http://127.0.0.1:59649';
   const check = (ok, name) => { if (!ok) throw Error(name); };
@@ -29,7 +29,7 @@ async (page) => {
     await page.setViewportSize({width, height: 900});
     await page.locator('#job-thread-mode').scrollIntoViewIfNeeded();
     check(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), 'No horizontal overflow');
-    await page.screenshot({path: '/tmp/hey-boss-job-thread-' + width + '.png'});
+    await page.screenshot({path: 'out/hey-boss-job-thread-' + width + '.png'});
   }
   await page.locator('#job-thread-mode').selectOption('new');
   await page.getByRole('button', {name: 'Save changes', exact: true}).click();

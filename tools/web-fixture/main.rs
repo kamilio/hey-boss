@@ -32,6 +32,7 @@ enum Scenario {
     IssueStatus,
     IssueListActions,
     ScheduledJobs,
+    JobsUi,
     LocalHttp,
     NativeArtifactEditor,
     Agents,
@@ -66,6 +67,7 @@ impl Scenario {
             Self::IssueTimeline => ("Timeline QA", 48948),
             Self::IssueStatus => ("Progress Studio", 4796),
             Self::IssueListActions | Self::ScheduledJobs => ("Quick action QA", 59639),
+            Self::JobsUi => ("Jobs UI QA", 59649),
             Self::LocalHttp => ("Local HTTP QA", 0),
             Self::NativeArtifactEditor => ("Native editor QA", 0),
             Self::Origin => ("Origin QA", 59675),
@@ -241,6 +243,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     let controls = match args.scenario {
+        Scenario::JobsUi => Some(52049),
         Scenario::IssueStatus => Some(52070),
         Scenario::IssueListActions | Scenario::ScheduledJobs => Some(52039),
         _ => None,
@@ -252,7 +255,7 @@ fn main() -> Result<()> {
     .transpose()?;
     let records = info["records"].clone();
     let mut sequence = 0;
-    let mut supervisor = if matches!(args.scenario, Scenario::WorkerConfig) {
+    let mut supervisor = if matches!(args.scenario, Scenario::WorkerConfig | Scenario::JobsUi) {
         Some(agents::supervisor(&f)?)
     } else {
         None
