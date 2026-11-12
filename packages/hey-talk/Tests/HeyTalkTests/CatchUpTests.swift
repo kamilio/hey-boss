@@ -2,6 +2,29 @@ import XCTest
 @testable import HeyTalk
 
 final class CatchUpTests: XCTestCase {
+    func testObsidianRecapsOnlyTheOpenMarkdownNote() throws {
+        let note = try ObsidianNote(output: "=> [\"Research\",\"Ideas/Launch.md\"]\n\n## Draft\nCurrent edit.\n")
+        XCTAssertEqual(note.path, "Ideas/Launch.md")
+        XCTAssertEqual(try note.recapText(), "## Draft\nCurrent edit.")
+        let empty = try ObsidianNote(output: "=> [\"Research\",\"Empty.md\"]\n \n")
+        XCTAssertThrowsError(try empty.recapText())
+        let canvas = try ObsidianNote(output: "=> [\"Research\",\"Board.canvas\"]\n")
+        XCTAssertThrowsError(try canvas.recapText())
+        XCTAssertThrowsError(try ObsidianNote(output: "Error: CLI disabled"))
+    }
+
+    func testEditedNoteKeepsPlaybackButAnotherNoteStartsANewRecap() async throws {
+        func source(_ path: String, _ body: String) throws -> CatchUpSource {
+            .obsidian(try ObsidianNote(output: "=> [\"Research\",\"" + path + "\"]\n" + body))
+        }
+        let current = try source("Plan.md", "Current edits")
+        XCTAssertTrue(current.sameLocation(as: try source("Plan.md", "Earlier draft")))
+        XCTAssertFalse(current.sameLocation(as: try source("Archive/Plan.md", "Current edits")))
+        let payload = try await current.passage()
+        let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(payload)) as? [String: String]
+        XCTAssertEqual(json, ["note": "Current edits"])
+    }
+
     func testStreamEmitsCompleteSentencesBeforeCompletionWithoutSplittingDecimals() throws {
         var stream = RecapStream()
         var sentences = [String]()
