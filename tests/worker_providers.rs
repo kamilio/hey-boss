@@ -2,6 +2,8 @@
 mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use hey_boss::{agent_runtime::Provider, issues::worker::Settings};
 use serde_json::json;
 use std::{
@@ -67,21 +69,14 @@ impl Fixture {
     }
     fn command(&self) -> Command {
         let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        let fixture = worker_fixtures::binary("provider-worker");
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", self.root.join("issues.db"))
             .env("HEY_BOSS_ISSUE_PROJECT", "named:Provider test")
             .env("HEY_BOSS_AGENT_ID", "human:provider-test")
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
-            .env(
-                "HEY_BOSS_CLAUDE",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/provider-worker.mjs"),
-            )
-            .env(
-                "HEY_BOSS_PI",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("tests/fixtures/provider-worker.mjs"),
-            )
+            .env("HEY_BOSS_CLAUDE", &fixture)
+            .env("HEY_BOSS_PI", &fixture)
             .env_remove("HEY_BOSS_WORKER_RUN")
             .env_remove("HEY_BOSS_ISSUE_HOST");
         c
