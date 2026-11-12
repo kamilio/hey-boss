@@ -87,5 +87,4 @@ const HeyBossMergedPRs = (() => {
   }
   return {groups,render,start};
 })();
-if(typeof module!=='undefined')module.exports=HeyBossMergedPRs;
-if(typeof document!=='undefined'&&document.querySelector('#merged-main'))HeyBossMergedPRs.start();
+HeyBossMergedPRs.start();

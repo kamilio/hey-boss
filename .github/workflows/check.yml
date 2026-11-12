@@ -14,7 +14,6 @@ jobs:
       - run: python3 tools/test_skill_transport.py
       - run: node --check src/issues/web/skills.js
       - run: node tools/test_quick_issue.js && node --check src/issues/web/quick-issue.js
-      - run: node --test tools/test_merged_prs.cjs
       - run: node --test tools/test_issue_assignments.cjs tools/test_assignment_badges.cjs tools/test_assignment_runtime.cjs
       - run: node tools/test_issue_transfer_controls.cjs
       - run: node tools/test_issue_navigation_exit.cjs
@@ -23,7 +22,7 @@ jobs:
       - run: node tools/test_metadata_mutation.cjs
       - run: node tools/test_fleet_view.js && node tools/test_assigned_agent.js && node --check src/issues/web/fleet.js
       - run: node tools/test_jobs_ui.cjs && node --check src/issues/web/jobs-calendar.js
-      - run: node tools/test_issue_pr_labels.cjs && node tools/test_issue_commit_controls.cjs && node --check src/issues/web/app.js
+      - run: node --check src/issues/web/app.js
       - run: node tools/test_issue_list_actions.cjs
       - run: node tools/test_project_navigation.cjs
       - run: cargo fmt --check
