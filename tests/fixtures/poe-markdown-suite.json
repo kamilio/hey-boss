@@ -3,6 +3,10 @@
   "testCount": 346,
   "tests": [
     {
+      "name": "MdNode > matches the planned discriminated union",
+      "operations": []
+    },
+    {
       "name": "block nodes > alerts > > [!CAUTION]\\n> c",
       "operations": [
         "renderMarkdownPlaintext"
@@ -39,13 +43,13 @@
       ]
     },
     {
-      "name": "block nodes > blockquotes > > - item a\\n> - item b",
+      "name": "block nodes > blockquotes > > # heading\\n> para",
       "operations": [
         "renderMarkdownPlaintext"
       ]
     },
     {
-      "name": "block nodes > blockquotes > > # heading\\n> para",
+      "name": "block nodes > blockquotes > > - item a\\n> - item b",
       "operations": [
         "renderMarkdownPlaintext"
       ]
@@ -93,12 +97,6 @@
       ]
     },
     {
-      "name": "block nodes > headings > # [link](http://x.com) text with default options",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
       "name": "block nodes > headings > # **bold** and *italic*",
       "operations": [
         "renderMarkdownPlaintext"
@@ -118,6 +116,12 @@
     },
     {
       "name": "block nodes > headings > # Title with default options",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "block nodes > headings > # [link](http://x.com) text with default options",
       "operations": [
         "renderMarkdownPlaintext"
       ]
@@ -279,18 +283,6 @@
       ]
     },
     {
-      "name": "code highlighting tokenizer > highlights expanded C-like and JVM language families",
-      "operations": [
-        "highlightCodeBlock"
-      ]
-    },
-    {
-      "name": "code highlighting tokenizer > highlights expanded scripting, functional, and config-oriented languages",
-      "operations": [
-        "highlightCodeBlock"
-      ]
-    },
-    {
       "name": "code highlighting tokenizer > highlights Go comments, keywords, strings, numbers, booleans, and nil",
       "operations": [
         "highlightCodeBlock"
@@ -321,12 +313,6 @@
       ]
     },
     {
-      "name": "code highlighting tokenizer > highlights shell comments, commands, strings, flags, and variables",
-      "operations": [
-        "highlightCodeBlock"
-      ]
-    },
-    {
       "name": "code highlighting tokenizer > highlights SQL comments, keywords, strings, numbers, and nulls case-insensitively",
       "operations": [
         "highlightCodeBlock"
@@ -334,6 +320,24 @@
     },
     {
       "name": "code highlighting tokenizer > highlights TOML comments, keys, strings, numbers, booleans, and dates enough for config examples",
+      "operations": [
+        "highlightCodeBlock"
+      ]
+    },
+    {
+      "name": "code highlighting tokenizer > highlights expanded C-like and JVM language families",
+      "operations": [
+        "highlightCodeBlock"
+      ]
+    },
+    {
+      "name": "code highlighting tokenizer > highlights expanded scripting, functional, and config-oriented languages",
+      "operations": [
+        "highlightCodeBlock"
+      ]
+    },
+    {
+      "name": "code highlighting tokenizer > highlights shell comments, commands, strings, flags, and variables",
       "operations": [
         "highlightCodeBlock"
       ]
@@ -553,7 +557,37 @@
       ]
     },
     {
-      "name": "inline nodes > [](https://x.com)",
+      "name": "inline nodes > ***both***",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "inline nodes > **bold**",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "inline nodes > *italic*",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "inline nodes > *outer **inner** end*",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "inline nodes > <em>hi</em>",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
+      "name": "inline nodes > Hello world",
       "operations": [
         "renderMarkdownPlaintext"
       ]
@@ -583,6 +617,12 @@
       ]
     },
     {
+      "name": "inline nodes > [](https://x.com)",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
+    },
+    {
       "name": "inline nodes > [email me](mailto:foo@bar.com)",
       "operations": [
         "renderMarkdownPlaintext"
@@ -590,30 +630,6 @@
     },
     {
       "name": "inline nodes > [foo](https://x.com) expandLinks and showLinks",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > ***both***",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > **bold**",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > *italic*",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > *outer **inner** end*",
       "operations": [
         "renderMarkdownPlaintext"
       ]
@@ -637,24 +653,6 @@
       ]
     },
     {
-      "name": "inline nodes > <em>hi</em>",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > ~~strike~~",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
-      "name": "inline nodes > Hello world",
-      "operations": [
-        "renderMarkdownPlaintext"
-      ]
-    },
-    {
       "name": "inline nodes > line one  \\nline two",
       "operations": [
         "renderMarkdownPlaintext"
@@ -667,8 +665,10 @@
       ]
     },
     {
-      "name": "MdNode > matches the planned discriminated union",
-      "operations": []
+      "name": "inline nodes > ~~strike~~",
+      "operations": [
+        "renderMarkdownPlaintext"
+      ]
     },
     {
       "name": "option combinations > expands links while suppressing heading and code announcements",
@@ -719,13 +719,13 @@
       ]
     },
     {
-      "name": "parseBlocks > applies inline parsing inside alerts (test 101)",
+      "name": "parseBlocks > applies inline parsing inside ATX headings",
       "operations": [
         "parseBlocks"
       ]
     },
     {
-      "name": "parseBlocks > applies inline parsing inside ATX headings",
+      "name": "parseBlocks > applies inline parsing inside alerts (test 101)",
       "operations": [
         "parseBlocks"
       ]
@@ -845,6 +845,54 @@
       ]
     },
     {
+      "name": "parseBlocks > parses ATX headings from level 1 through 6",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses ATX headings indented by up to three spaces",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses ATX headings with closing hashes",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses CAUTION alerts before regular blockquotes (test 99)",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses IMPORTANT alerts before regular blockquotes (test 97)",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses NOTE alerts before regular blockquotes (test 95)",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses TIP alerts before regular blockquotes (test 96)",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
+      "name": "parseBlocks > parses WARNING alerts before regular blockquotes (test 98)",
+      "operations": [
+        "parseBlocks"
+      ]
+    },
+    {
       "name": "parseBlocks > parses a minimal table with a header, separator, and one row (test 63)",
       "operations": [
         "parseBlocks"
@@ -881,24 +929,6 @@
       ]
     },
     {
-      "name": "parseBlocks > parses ATX headings from level 1 through 6",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
-      "name": "parseBlocks > parses ATX headings indented by up to three spaces",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
-      "name": "parseBlocks > parses ATX headings with closing hashes",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
       "name": "parseBlocks > parses backtick fenced code blocks",
       "operations": [
         "parseBlocks"
@@ -924,12 +954,6 @@
     },
     {
       "name": "parseBlocks > parses blockquotes without a space after the marker",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
-      "name": "parseBlocks > parses CAUTION alerts before regular blockquotes (test 99)",
       "operations": [
         "parseBlocks"
       ]
@@ -989,12 +1013,6 @@
       ]
     },
     {
-      "name": "parseBlocks > parses IMPORTANT alerts before regular blockquotes (test 97)",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
       "name": "parseBlocks > parses list item continuation from indented text (spec test 86)",
       "operations": [
         "parseBlocks"
@@ -1044,12 +1062,6 @@
     },
     {
       "name": "parseBlocks > parses nested unordered lists inside unordered lists (spec test 29)",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
-      "name": "parseBlocks > parses NOTE alerts before regular blockquotes (test 95)",
       "operations": [
         "parseBlocks"
       ]
@@ -1139,12 +1151,6 @@
       ]
     },
     {
-      "name": "parseBlocks > parses TIP alerts before regular blockquotes (test 96)",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
       "name": "parseBlocks > parses trailing empty quote markers as an empty blockquote (spec example 132)",
       "operations": [
         "parseBlocks"
@@ -1164,12 +1170,6 @@
     },
     {
       "name": "parseBlocks > parses unordered lists with plus markers (spec test 26)",
-      "operations": [
-        "parseBlocks"
-      ]
-    },
-    {
-      "name": "parseBlocks > parses WARNING alerts before regular blockquotes (test 98)",
       "operations": [
         "parseBlocks"
       ]
@@ -1235,13 +1235,13 @@
       ]
     },
     {
-      "name": "parseBlocks > treats an unclosed fence as code through the end of the document",
+      "name": "parseBlocks > treats ATX headings made only of closing hashes as empty headings",
       "operations": [
         "parseBlocks"
       ]
     },
     {
-      "name": "parseBlocks > treats ATX headings made only of closing hashes as empty headings",
+      "name": "parseBlocks > treats an unclosed fence as code through the end of the document",
       "operations": [
         "parseBlocks"
       ]
@@ -1673,6 +1673,36 @@
       ]
     },
     {
+      "name": "terminal markdown integration > renders API documentation with headings, parameter tables, and code examples (test 156)",
+      "operations": [
+        "renderMarkdown"
+      ]
+    },
+    {
+      "name": "terminal markdown integration > renders CLI help pasted as indented code without crashing (test 160)",
+      "operations": [
+        "renderMarkdown"
+      ]
+    },
+    {
+      "name": "terminal markdown integration > renders LLM-generated markdown with inconsistent headings and extra blank lines (test 161)",
+      "operations": [
+        "renderMarkdown"
+      ]
+    },
+    {
+      "name": "terminal markdown integration > renders README-style markdown with badges, headings, code blocks, and links (test 155)",
+      "operations": [
+        "renderMarkdown"
+      ]
+    },
+    {
+      "name": "terminal markdown integration > renders a GitHub issue template with frontmatter, task list, and code (test 159)",
+      "operations": [
+        "renderMarkdown"
+      ]
+    },
+    {
       "name": "terminal markdown integration > renders a blog post with frontmatter, images, code, and blockquotes (test 158)",
       "operations": [
         "renderMarkdown"
@@ -1709,12 +1739,6 @@
       ]
     },
     {
-      "name": "terminal markdown integration > renders a GitHub issue template with frontmatter, task list, and code (test 159)",
-      "operations": [
-        "renderMarkdown"
-      ]
-    },
-    {
       "name": "terminal markdown integration > renders a long fenced code block with a language tag (test 164)",
       "operations": [
         "renderMarkdown"
@@ -1739,19 +1763,7 @@
       ]
     },
     {
-      "name": "terminal markdown integration > renders API documentation with headings, parameter tables, and code examples (test 156)",
-      "operations": [
-        "renderMarkdown"
-      ]
-    },
-    {
       "name": "terminal markdown integration > renders changelog headings with nested lists (test 157)",
-      "operations": [
-        "renderMarkdown"
-      ]
-    },
-    {
-      "name": "terminal markdown integration > renders CLI help pasted as indented code without crashing (test 160)",
       "operations": [
         "renderMarkdown"
       ]
@@ -1764,12 +1776,6 @@
     },
     {
       "name": "terminal markdown integration > renders inline formatting inside a referenced footnote definition (test 108)",
-      "operations": [
-        "renderMarkdown"
-      ]
-    },
-    {
-      "name": "terminal markdown integration > renders LLM-generated markdown with inconsistent headings and extra blank lines (test 161)",
       "operations": [
         "renderMarkdown"
       ]
@@ -1788,12 +1794,6 @@
     },
     {
       "name": "terminal markdown integration > renders paragraph continuation across adjacent text lines (test 83)",
-      "operations": [
-        "renderMarkdown"
-      ]
-    },
-    {
-      "name": "terminal markdown integration > renders README-style markdown with badges, headings, code blocks, and links (test 155)",
       "operations": [
         "renderMarkdown"
       ]

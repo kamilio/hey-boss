@@ -15,8 +15,9 @@ npm run corpus
 ```
 
 This runs every original assertion against the copied reference implementation
-and exports all observed inputs. Import instrumentation does not alter the
-original files or assertions. The checked-in corpus records every test name,
+and runs the Rust exporter. The exporter checks each passing test name against
+its capture before writing the corpus. Import instrumentation does not alter
+the original files or assertions. The checked-in corpus records every test name,
 309 unique Markdown inputs, 31 code inputs, and 46 direct renderer inputs.
 Type-only, invalid-option, invalid-frontmatter, and subprocess theme tests retain
 their original assertions even where they have no native Markdown input.

@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "FORCE_COLOR=1 vitest run --reporter=default --reporter=json --outputFile=report.json",
-    "corpus": "node -e \"require('fs').rmSync('captured',{recursive:true,force:true})\" && POE_MARKDOWN_CAPTURE=1 npm test && node corpus.mjs"
+    "corpus": "rm -rf captured && POE_MARKDOWN_CAPTURE=1 npm test && cargo run --quiet --locked -p hey-boss --example export-markdown-corpus --features serde_json/preserve_order"
   },
   "devDependencies": {
     "vitest": "4.1.11",
