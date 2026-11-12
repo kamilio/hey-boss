@@ -2,18 +2,18 @@
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use std::io::Write;
+#[path = "assignment_deadline.rs"]
+mod assignment_deadline;
 #[path = "../../tests/support/chrome.rs"]
 mod chrome;
 #[path = "../../tests/support/managed_worker.rs"]
 mod managed_worker;
-#[path = "assignment_deadline.rs"]
-mod assignment_deadline;
+#[path = "pr_handoff.rs"]
+mod pr_handoff;
 #[path = "project_checkouts.rs"]
 mod project_checkouts;
 #[path = "settings_heading.rs"]
 mod settings_heading;
-#[path = "pr_handoff.rs"]
-mod pr_handoff;
 #[path = "../../tests/support/worker_fixtures.rs"]
 mod worker_fixtures;
 use chrome::Page;
@@ -47,6 +47,12 @@ fn start_web(mut command: Command) -> (Service, String) {
         service,
         ready["url"].as_str().unwrap().trim_end_matches('/').into(),
     )
+}
+
+fn key(p: &mut Page, key: &str, code: &str, vk: i32, text: &str) {
+    for kind in ["keyDown", "keyUp"] {
+        p.command("Input.dispatchKeyEvent",json!({"type":kind,"key":key,"code":code,"windowsVirtualKeyCode":vk,"text":if kind=="keyDown"{text}else{""}})).unwrap();
+    }
 }
 
 fn screenshot(page: &mut Page, directory: &str, name: &str) {
@@ -339,6 +345,9 @@ mod assignment_states;
 
 #[path = "issue_list.rs"]
 mod issue_list;
+
+#[path = "artifact_reader.rs"]
+mod artifact_reader;
 
 #[path = "artifact_import_browser.rs"]
 mod artifact_import;
