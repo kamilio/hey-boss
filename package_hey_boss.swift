@@ -36,7 +36,7 @@ func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
     let rust = "assets/conversation-native"
-    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
+    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/package-smart-turn.sh", "assets/smart-turn-LICENSE", "assets/onnxruntime-LICENSE", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
     for folder in ["assets", "assets/conversation-tools"] {
         inputs += try files.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)
             .filter { $0.hasSuffix(".md") }.map { folder + "/" + $0 }
@@ -188,7 +188,14 @@ for name in ["conversation-agent", "conversation-diagram"] {
     try files.copyItem(at: target.appendingPathComponent("release/" + name), to: dest)
     try sign(dest, identifier: "local.hey-boss." + name)
 }
-for name in ["poe-code-LICENSE", "mermaid-LICENSE"] {
+let prepareTurn = Process()
+prepareTurn.executableURL = URL(fileURLWithPath: "/bin/bash")
+prepareTurn.arguments = [root.appendingPathComponent("assets/package-smart-turn.sh").path, contents.path]
+try prepareTurn.run(); prepareTurn.waitUntilExit()
+require(prepareTurn.terminationStatus == 0, "Could not package the local turn detector")
+try sign(contents.appendingPathComponent("Frameworks/libonnxruntime.dylib"), identifier: "local.hey-boss.onnxruntime")
+for name in ["poe-code-LICENSE", "mermaid-LICENSE", "smart-turn-LICENSE", "onnxruntime-LICENSE"] {
+
     try Data(contentsOf: root.appendingPathComponent("assets/" + name)).write(to: resources.appendingPathComponent(name), options: .atomic)
 }
 for name in ["node", "mmdr", "poe-agent.mjs", "viz.mjs", "conversation-agent.mjs", "conversation-media.mjs", "conversation-dot.mjs", "poe-agent-revision", "conversation-tools", "conversation-visuals.md"] {

@@ -1,3 +1,4 @@
+mod smart_turn;
 use std::io::{self, Read, Write};
 use webrtc_vad::{SampleRate, Vad, VadMode};
 
@@ -164,6 +165,10 @@ pub fn stream(
     let mut probability = 0.0;
     let mut voiced = false;
     let mut turn = Turn::new(conversation);
+    let mut smart = conversation
+        .then(|| std::env::var_os("HEY_BOSS_TURN_RESOURCES"))
+        .flatten()
+        .map(|path| smart_turn::SmartTurn::new(path.into()));
     let mut elapsed_ms = 0_u64;
     // Keep quiet opening words as well as the detector's confirmation delay.
     let history_frames = if conversation { 75 } else { 20 }; // 1.5 s / 400 ms
@@ -230,10 +235,32 @@ pub fn stream(
             }
             history.push_back(frame);
         }
-        match turn.push(speech, confident_onset) {
+        let mut edge = turn.push(speech, confident_onset);
+        if let Some(model) = &mut smart {
+            if edge == Some(Edge::Start) {
+                model.clear();
+                for prior in history.iter().take(history.len().saturating_sub(1)) {
+                    model.buffer(std::array::from_fn(|i| {
+                        i16::from_le_bytes([prior[2 * i], prior[2 * i + 1]])
+                    }));
+                }
+            }
+            if turn.active && model.push(samples, speech, turn.consecutive) {
+                eprintln!(
+                    "Smart Turn confirmed end after {}ms quiet",
+                    turn.consecutive * 20
+                );
+                turn = Turn::new(true);
+                edge = Some(Edge::End);
+                history.clear(); // An early endpoint has less silence than the microphone preroll.
+            }
+        }
+        match edge {
             Some(Edge::Start) => {
                 if conversation {
-                    eprintln!("speech confirmed at {elapsed_ms}ms score={probability:.3} fast={confident_onset}");
+                    eprintln!(
+                        "speech confirmed at {elapsed_ms}ms score={probability:.3} fast={confident_onset}"
+                    );
                 }
                 output.write_all(&0u16.to_le_bytes())?;
                 for prior in history.drain(..) {
@@ -242,6 +269,9 @@ pub fn stream(
                 }
             }
             Some(Edge::End) => {
+                if conversation {
+                    eprintln!("speech ended at {elapsed_ms}ms");
+                }
                 if let Some(detector) = &mut chat_vad {
                     detector.reset();
                     pending.clear();
