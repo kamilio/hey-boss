@@ -15,10 +15,10 @@ server's ownership and transfer checks.
 On narrow phones, the overflow control stays right-aligned when header buttons
 wrap, keeping its menu within the screen.
 
-The Rust `web-fixture` test `transfer_controls_survive_optional_section_failures`
-checks this in Chrome in CI. `tools/issues_transfer_browser_checks.js` exercises
-the native and paired interfaces with Playwright: component failures, keyboard access, light/dark
-phone layouts, stale revisions, lost-response retries, and old-link redirects.
+The Rust browser checks exercise keyboard access, light and dark phone layouts,
+failed components, stale revisions, lost replies, and old-link redirects. After
+building the CLI, run `cargo test --locked --example web-fixture browser::issue_transfer -- --ignored`.
+Screenshots are written to `out/issue-transfer/`.
 
 The terminal equivalent is:
 
