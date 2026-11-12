@@ -163,3 +163,85 @@ fn large_documents_preserve_lists_code_footnotes_and_selection_comments() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn wide_tables_scroll_locally_and_prose_keeps_its_reading_width() {
+    let f = installed_fixture();
+    let mut body = String::from(
+        "# PR merge order\n\nKeep verified prerequisites ahead of dependent changes.\n\n| Order | PR | What it does | Current blocker | Order notes |\n| ---: | --- | --- | --- | --- |\n",
+    );
+    for i in 0..8 {
+        use std::fmt::Write;
+        writeln!(body,"| {} | [#1492{i}](https://example.com/pr/{i}) | Keep accepted chat replies safe | Waiting for two requested reviews | {} |",i+1,"Keep prerequisites ahead of dependent changes. Verify current reviews, checks and conflicts before merging. ".repeat(i%3+1)).unwrap();
+    }
+    let (id, _) = document(&f, &body);
+    let (_web, base) = web(&f, "Reading");
+    let mut p = Page::open("about:blank");
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{base}/artifacts#project=named%3AReading&artifact={id}")}),
+    )
+    .unwrap();
+    complete(&mut p);
+    let resize = |p: &mut Page, width: u64| {
+        p.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":1000,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .unwrap();
+    };
+    p.eval("const reader=document.querySelector('#artifact-reading'), table=reader.querySelector('table'), fits=()=>document.documentElement.scrollWidth<=innerWidth+1").unwrap();
+    for theme in ["light", "dark"] {
+        p.command(
+            "Emulation.setEmulatedMedia",
+            json!({"features":[{"name":"prefers-color-scheme","value":theme}]}),
+        )
+        .unwrap();
+        for width in [1920, 1440, 1024, 820, 390, 320] {
+            resize(&mut p, width);
+            p.eval("table.scrollIntoView({block:'start'})").unwrap();
+            assert_eq!(p.eval("fits() && table.querySelector('tbody a').getClientRects().length===1 && [...table.querySelectorAll('th')].every(h=>h.scrollHeight<=48) && getComputedStyle(table.querySelector('tbody td:last-child')).verticalAlign==='top'").unwrap(),true,"table layout at {width}");
+            let reader_width = p.eval("reader.clientWidth").unwrap().as_u64().unwrap();
+            if width == 1920 {
+                assert!(reader_width >= 1600)
+            } else if width == 1440 {
+                assert!(reader_width >= 1200)
+            }
+            let overflow = p.eval("table.scrollWidth>table.clientWidth+1").unwrap() == true;
+            if width <= 390 {
+                assert!(overflow)
+            } else if width >= 1440 {
+                assert!(!overflow)
+            }
+            if overflow {
+                assert_eq!(
+                    p.eval("table.scrollLeft=table.scrollWidth; table.scrollLeft>0")
+                        .unwrap(),
+                    true
+                );
+                p.eval("table.scrollLeft=0").unwrap();
+            }
+            screenshot(
+                &mut p,
+                "out/artifact-reader",
+                &format!("table-{theme}-{width}"),
+            );
+        }
+    }
+    resize(&mut p, 1920);
+    p.eval("document.querySelector('#artifact-comments-toggle').click()")
+        .unwrap();
+    p.wait("document.querySelector('#artifact-comments').checkVisibility() && reader.clientWidth>=1200");
+    screenshot(&mut p, "out/artifact-reader", "table-comments-desktop");
+    p.eval("document.querySelector('#artifact-comments-close').click();reader.innerHTML='<p>Ordinary prose keeps a comfortable reading width.</p>'").unwrap();
+    assert!(p.eval("reader.clientWidth").unwrap().as_u64().unwrap() <= 820);
+    p.eval("reader.innerHTML='<table><thead><tr><th>Item</th><th>Notes</th></tr></thead><tbody><tr><td class=markdown-align-right>42</td><td>Read the <a href=https://example.com>source</a> and keep surrounding text able to wrap.</td></tr></tbody></table>'").unwrap();
+    for width in [1920, 320] {
+        resize(&mut p, width);
+        assert_eq!(p.eval("fits() && getComputedStyle(reader.querySelector('td')).textAlign==='right' && getComputedStyle(reader.querySelector('td+td')).whiteSpace==='normal'").unwrap(),true);
+    }
+    p.eval("reader.querySelector('a').textContent='https://example.com/'+ 'long-path'.repeat(50)")
+        .unwrap();
+    assert_eq!(p.eval("fits()").unwrap(), true);
+}
