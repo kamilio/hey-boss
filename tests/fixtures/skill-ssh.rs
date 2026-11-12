@@ -10,7 +10,8 @@ fn main() -> ExitCode {
     let [host, remote] = args.as_slice() else {
         panic!("unexpected ssh call: {args:?}")
     };
-    if host == "offline" {
+    let studio = std::path::PathBuf::from(env::var_os("SKILL_TEST_STUDIO").unwrap());
+    if host == "offline" || (host == "studio" && studio.join(".offline").exists()) {
         eprintln!("Offline test machine");
         return ExitCode::from(255);
     }
@@ -33,9 +34,5 @@ fn main() -> ExitCode {
         c.args(["skill", action]);
         c
     };
-    panic!(
-        "{}",
-        cmd.env("HOME", env::var_os("SKILL_TEST_STUDIO").unwrap())
-            .exec()
-    );
+    panic!("{}", cmd.env("HOME", studio).exec());
 }
