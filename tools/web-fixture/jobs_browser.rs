@@ -68,6 +68,7 @@ fn job_thread_choice_persists_across_reloads() {
     let _supervisor = agents::supervisor(&f).unwrap();
     let (_web, base) = web(&f, project);
     let mut page = Page::open("about:blank");
+    page.command("Page.enable", json!({})).unwrap();
     page.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"addEventListener('error',e=>sessionStorage.setItem('pageError',e.message));addEventListener('unhandledrejection',e=>sessionStorage.setItem('pageError',String(e.reason)))"})).unwrap();
     page.command(
         "Page.navigate",
@@ -126,6 +127,7 @@ fn legacy_job_issues_show_job_ownership_and_run_state() {
     assert_eq!(records.len(), 5);
     let (_web, base) = web(&f, project);
     let mut page = Page::open("about:blank");
+    page.command("Page.enable", json!({})).unwrap();
     page.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"addEventListener('error', e => sessionStorage.setItem('pageError', e.message));addEventListener('unhandledrejection', e => sessionStorage.setItem('pageError', String(e.reason)))"})).unwrap();
     let list = format!("{base}/#project=named%3AQuick%20action%20QA");
     for width in [1440, 390] {
@@ -182,3 +184,9 @@ fn legacy_job_issues_show_job_ownership_and_run_state() {
         Value::Null
     );
 }
+
+#[path = "job_schedule.rs"]
+mod schedules;
+
+#[path = "job_placement.rs"]
+mod placement;
