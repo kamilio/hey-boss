@@ -562,10 +562,18 @@ document.addEventListener('pointerdown', event => {
 });
 document.addEventListener('pointerup', () => { assignmentPointerDown = false; });
 document.addEventListener('pointercancel', () => { assignmentPointerDown = false; });
-window.addEventListener('resize', () => closeAssignmentCard(true));
-window.addEventListener('scroll', event => {
-  if (assignmentCardContext && !assignmentCardContext.card.contains(event.target)) closeAssignmentCard(true);
-}, true);
+function updateAssignmentCardPosition(event) {
+  if (!assignmentCardContext || assignmentCardContext.card.contains(event.target instanceof Node ? event.target : null)) return;
+  const {trigger, card} = assignmentCardContext;
+  const anchor = trigger.getBoundingClientRect();
+  if (card.contains(document.activeElement) && anchor.top < innerHeight && anchor.bottom > 0) {
+    positionAssignmentCard();
+  } else {
+    closeAssignmentCard(true);
+  }
+}
+window.addEventListener('resize', updateAssignmentCardPosition);
+window.addEventListener('scroll', updateAssignmentCardPosition, true);
 
 const projectPicker = new HeyBossUI.ProjectPicker({
   onSelect(project) { navigate({project, issue:null, ...IssueFilters.empty, state:"open"}); },
