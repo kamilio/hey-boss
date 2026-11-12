@@ -96,10 +96,9 @@ The bare variable uses the current project. Six worker prompt unit tests and
 23 HTTP/worker integration tests passed, including full IDs, quoting, native
 goals, single-pass expansion, preview/claim equality, and executing the command
 against another project while `HEY_BOSS_ISSUE_PROJECT` pins the worker project.
-Six browser checks passed in Chromium and WebKit for live previews, goal prefix,
-full IDs, persistence, claim equality, and mobile bounds. Strict Clippy passed.
-Evidence: `out/create-command-*.log`; browser script:
-`tools/issues_create_command_checks.js`.
+The Rust integration test in `tests/issues_web.rs` checks that the preview and claim
+produce the same command and that executing it creates the issue in the target project.
+The Markdown prompt editor is checked in `tools/web-fixture/settings_heading.rs`.
 Installed Mac verification checked the live Poe2 preview and cancellation without
 saving user settings. An isolated devbox smoke confirmed preview/claim equality,
 native goal detection, and executing the expanded cross-project command.

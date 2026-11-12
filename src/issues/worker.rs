@@ -2513,6 +2513,13 @@ mod tests {
             prompt: "/goal If safe-bash fails, report with `{{create_issue_command poe-code}}`. {{create_issue_command}} | {{ create_issue_command  Team's project $(touch nope); x }} | {{unknown}} | {{title}}".into(),
             ..ProjectConfig::default()
         };
+        let repo = ProjectConfig {
+            prompt: "{{create_issue_command github.com/poe-internal/poe-code}}".into(),
+            ..ProjectConfig::default()
+        };
+        assert!(preview(&repo, &project(), issue()).0.starts_with(
+            "hey-boss issue create --project 'github.com/poe-internal/poe-code' --title '<title>' --body '<markdown>'"
+        ));
         let (text, goal, objective) = preview(&config, &project(), issue());
         assert!(goal);
         assert_eq!(objective, text);
