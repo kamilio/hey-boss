@@ -108,6 +108,17 @@ pub fn worker_title(snapshot: &Value, worker_id: Option<&str>) -> Option<String>
         .as_array()?
         .iter()
         .find(|w| w["id"].as_str() == worker_id)?;
+    let config = &worker["config"];
+    // Registration can arrive one refresh before the worker publishes its checkout.
+    if worker["pid"].is_null()
+        && config["projects"].as_array().is_none_or(Vec::is_empty)
+        && config["directories"]
+            .as_object()
+            .is_none_or(|dirs| dirs.is_empty())
+        && config["directory"].as_str().unwrap_or_default().is_empty()
+    {
+        return None;
+    }
     Some(format!(
         "hey-boss · {} · {}",
         scope(worker, snapshot),
@@ -853,6 +864,19 @@ mod tests {
     }
 
     use super::*;
+    #[test]
+    fn a_worker_registration_without_context_does_not_rename_the_tab() {
+        let mut snapshot = serde_json::json!({"workers": [{
+            "id":"worker", "pid":null, "config":{"enabled":false,"projects":[],"directory":""}
+        }]});
+        assert_eq!(worker_title(&snapshot, Some("worker")), None);
+        snapshot["workers"][0]["config"]["directory"] = "/checkout".into();
+        assert_eq!(
+            worker_title(&snapshot, Some("worker")).as_deref(),
+            Some("hey-boss · All projects · /checkout")
+        );
+    }
+
     #[test]
     fn multi_project_checkout_labels_use_registered_names() {
         let local = "local:machine:/workspace/hey-gh";
