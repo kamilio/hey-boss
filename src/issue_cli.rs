@@ -1990,7 +1990,25 @@ pub(crate) fn print_text(value: &Value) {
         return;
     }
     let project = &value["project"];
-    if value["scope"] != "global" {
+    let claim = value["instructions"].as_str();
+    if claim.is_some() {
+        let issue = &value["issue"];
+        println!(
+            "#{} [{}] {}",
+            issue["number"],
+            line(&issue["state"]),
+            line(&issue["title"])
+        );
+        if !text(&issue["body"]).is_empty() {
+            println!("\n{}", markdown(&issue["body"]));
+        }
+        if let Some(labels) = issue["labels"].as_array().filter(|v| !v.is_empty()) {
+            println!(
+                "\nLabels: {}",
+                labels.iter().map(line).collect::<Vec<_>>().join(", ")
+            );
+        }
+    } else if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
     }
     if let Some(receipt) = value.get("request") {
@@ -2072,13 +2090,6 @@ pub(crate) fn print_text(value: &Value) {
         issues::worker::print_status(value, false);
         return;
     }
-    if let Some(instructions) = value["instructions"].as_str() {
-        println!(
-            "Iterations started: {} (agent launches)",
-            value["issue"]["agent_launch_count"].as_u64().unwrap_or(0)
-        );
-        println!("Instructions: {instructions}");
-    }
     if let Some(placement) = value["placement"].as_str() {
         println!(
             "Queue placement: {placement} (use --at-top or --at-bottom to choose explicitly)."
@@ -2123,7 +2134,7 @@ pub(crate) fn print_text(value: &Value) {
         ("worktree_enabled", "Worktrees allowed"),
         ("prs_enabled", "PRs enabled"),
     ] {
-        if value[key] == true {
+        if claim.is_none() && value[key] == true {
             println!("{label}: true");
         }
     }
@@ -2263,7 +2274,11 @@ pub(crate) fn print_text(value: &Value) {
         }
     }
     if let Some(issue) = value.get("issue") {
-        print_issue_line(issue);
+        if claim.is_some() {
+            print_issue_context(issue);
+        } else {
+            print_issue_line(issue);
+        }
         if let Some(hold) = issue.get("attempt_hold").filter(|v| v.is_object()) {
             println!(
                 "Task attempt protected · pickup paused\nOwner: {} · Attempt: {}\nProcess: {} · {} · {}\nSource: {} · {}\nLog: {}",
@@ -2349,7 +2364,7 @@ pub(crate) fn print_text(value: &Value) {
             if !text(&issue["body"]).is_empty() {
                 println!("\n{}", markdown(&issue["body"]));
             }
-        } else if value["changed"] == false {
+        } else if claim.is_none() && value["changed"] == false {
             println!("Already in the requested state.");
         }
     }
@@ -2482,6 +2497,13 @@ pub(crate) fn print_text(value: &Value) {
     if let Some(id) = value.get("comment_id").filter(|n| !n.is_null()) {
         println!("Saved comment {id}.");
     }
+    if let Some(instructions) = claim {
+        println!("\n{}\n", instructions.trim_end());
+        println!(
+            "Iterations started: {} (agent launches)",
+            value["issue"]["agent_launch_count"].as_u64().unwrap_or(0)
+        );
+    }
 }
 fn status_datetime(value: &Value) -> String {
     let seconds = value.as_i64().unwrap_or(0) / 1000;
@@ -2578,6 +2600,10 @@ fn print_issue_line(issue: &Value) {
             .map(|_| format!(" · created by Codex · {}", line(&issue["origin"]["model"])))
             .unwrap_or_default()
     );
+    print_issue_context(issue);
+}
+
+fn print_issue_context(issue: &Value) {
     if issue["origin_error"]["message"].is_string() {
         println!(
             "  Origin unavailable: {}",
