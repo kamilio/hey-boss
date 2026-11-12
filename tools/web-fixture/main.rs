@@ -13,6 +13,7 @@ use std::{
     time::Duration,
 };
 mod archive;
+mod controls;
 mod desktop;
 mod fleet;
 mod origin;
@@ -20,6 +21,9 @@ mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Scenario {
+    IssueStatus,
+    IssueListActions,
+    ScheduledJobs,
     LocalHttp,
     NativeArtifactEditor,
     AgentsNavigation,
@@ -46,6 +50,8 @@ enum Scenario {
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
+            Self::IssueStatus => ("Progress Studio", 4796),
+            Self::IssueListActions | Self::ScheduledJobs => ("Quick action QA", 59639),
             Self::LocalHttp => ("Local HTTP QA", 0),
             Self::NativeArtifactEditor => ("Native editor QA", 0),
             Self::Origin => ("Origin QA", 59675),
@@ -200,6 +206,18 @@ fn main() -> Result<()> {
     if signal.try_recv().is_ok() {
         return Ok(());
     }
+    let controls = match args.scenario {
+        Scenario::IssueStatus => Some(52070),
+        Scenario::IssueListActions | Scenario::ScheduledJobs => Some(52039),
+        _ => None,
+    }
+    .map(|port| {
+        tiny_http::Server::http((std::net::Ipv4Addr::LOCALHOST, port))
+            .map_err(std::io::Error::other)
+    })
+    .transpose()?;
+    let records = info["records"].clone();
+    let mut sequence = 0;
     let mut web = f
         .command(&[
             "issue",
@@ -261,6 +279,11 @@ fn main() -> Result<()> {
         };
         report(rx.recv_timeout(Duration::from_secs(15))??)?;
         loop {
+            if let Some(ref controls) = controls
+                && let Some(request) = controls.try_recv()?
+            {
+                controls::respond(request, &f, args.scenario, project, &records, &mut sequence);
+            }
             if let Ok(line) = rx.try_recv() {
                 report(line?)?;
             }

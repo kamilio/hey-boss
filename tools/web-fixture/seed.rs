@@ -122,7 +122,9 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
             rusqlite::Connection::open(&f.db)?.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1234)
               INSERT INTO issue_agent_launches(run_id, project_id, issue_number, launched_at) SELECT 'fixture-'||issues.number||'-'||n.x,project_id,number,created_at FROM issues JOIN n ON n.x<=CASE number WHEN 2 THEN 1 WHEN 3 THEN 12 WHEN 4 THEN 1234 ELSE 0 END;")?;
         }
-        StatusDot => {
+        IssueListActions => {}
+        ScheduledJobs => return controls::jobs(f, p),
+        StatusDot | IssueStatus => {
             for (title, level, comment) in [
                 (
                     "Reconnect after waking from sleep",
@@ -147,17 +149,31 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
                     "<img src=x onerror=alert(1)> & \"quoted\" status stays plain text.",
                 ),
             ] {
-                let created = issue(&[
-                    "create",
-                    "--at-bottom",
+                let mut args = vec!["create", "--at-bottom"];
+                if matches!(s, IssueStatus) {
+                    args.extend(["--label", "enhancement"]);
+                }
+                args.extend([
                     "--title",
                     title,
                     "--body",
-                    "Keep the work easy to follow.",
-                ])?;
+                    if matches!(s, IssueStatus) { "## What needs to happen\n\nKeep the work easy to follow, with clear updates and lasting findings in comments." } else { "Keep the work easy to follow." },
+                ]);
+                let created = issue(&args)?;
                 if !level.is_empty() {
                     let number = created["issue"]["number"].to_string();
                     issue(&["claim", &number])?;
+                    if matches!(s, IssueStatus) && number == "1" {
+                        for n in 0..24 {
+                            issue(&[
+                                "status",
+                                "1",
+                                if n % 3 == 0 { "orange" } else { "green" },
+                                "--comment",
+                                &format!("Checking the reconnect behavior, step {}.", n + 1),
+                            ])?;
+                        }
+                    }
                     issue(&["status", &number, level, "--comment", comment])?;
                 }
             }

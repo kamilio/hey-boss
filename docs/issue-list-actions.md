@@ -22,7 +22,7 @@ The browser suite, `tools/issues_list_actions_browser_checks.js`, runs with
 creates synthetic issues and must never be pointed at the live issue database.
 
 Build with `cargo build --locked --bin hey-boss` and `cargo run --locked --manifest-path tools/web-assets/Cargo.toml` (after `npm ci --ignore-scripts --prefix tools/web-assets`),
-then start `node tools/serve_issue_list_actions_fixture.mjs`. The fixture exposes
+then start `cargo run --locked -p hey-boss --example web-fixture -- issue-list-actions`. The fixture exposes
 the web UI at `http://127.0.0.1:59639`. Run the suite against the compiled assets.
 Review the light/dark desktop and phone screenshots in
 `output/playwright/issue139`, including the short phone viewport and ownership

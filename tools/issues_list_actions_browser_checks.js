@@ -182,12 +182,7 @@ async page => {
   check(await item('Move to draft').count()===0, 'Ready handoff must be reopened before drafting');
   await item('Unassign').click();
   await idle();
-  check(await page.evaluate(async () => {const {issue}=await api({action:'view',number:5});return issue.state==='open'&&!issue.assignee;}), 'Unassign returns Ready issue to unassigned work');
-  await page.evaluate(async () => {
-    const detail=await api({action:'view',number:5});
-    await mutate({action:'ready',number:5,guard:detail.ready_guard,force:false});
-    await refresh(false);
-  });
+  check(await page.evaluate(async () => {const {issue}=await api({action:'view',number:5});return issue.state==='ready'&&!issue.assignee;}), 'Unassign releases ownership and preserves the Ready handoff');
   await trigger(5).click();
   await item('Reopen issue').click();
   await idle();
