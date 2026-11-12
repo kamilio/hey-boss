@@ -4,8 +4,6 @@ use std::{
     os::unix::fs::{PermissionsExt, symlink},
     time::Instant,
 };
-#[path = "../../tests/support/worker_fixtures.rs"]
-mod worker_fixtures;
 
 fn put(path: PathBuf, bytes: impl AsRef<[u8]>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();

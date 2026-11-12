@@ -34,6 +34,14 @@ fn agent_message(session: &str, text: String) {
 }
 
 fn turn_events(mode: &str, session: &str, turn: &str, task: Option<&Value>) {
+    if mode == "assign-to-boss" {
+        issue(
+            session,
+            &["assign-to-boss", &task.unwrap()["number"].to_string()],
+        );
+        report(session, turn, "completed", "Handed over for review.");
+        return;
+    }
     if mode == "disconnect" {
         process::exit(9);
     }

@@ -4,6 +4,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use std::io::Write;
 #[path = "../../tests/support/chrome.rs"]
 mod chrome;
+#[path = "pr_handoff.rs"]
+mod pr_handoff;
+#[path = "../../tests/support/worker_fixtures.rs"]
+mod worker_fixtures;
 use chrome::Page;
 
 fn web(f: &Fixture, project: &str) -> (Service, String) {
