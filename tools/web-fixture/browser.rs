@@ -443,3 +443,6 @@ fn pointer_click(p: &mut Page, selector: &str) {
         .unwrap();
     }
 }
+
+#[path = "search_performance.rs"]
+mod search_performance;

@@ -128,3 +128,7 @@ path = "tests/fixtures/inspect-hey-talk-window.rs"
 [[example]]
 name = "checkout-git"
 path = "tests/fixtures/checkout-git.rs"
+
+[[example]]
+name = "search-provider"
+path = "tests/fixtures/search-provider.rs"
