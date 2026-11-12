@@ -48,7 +48,8 @@ include CommonMark indented code/reference links/code-span spaces, HTTPS default
 and early URL sanitization. No input is skipped; stale or unused overrides fail.
 A dialect override must never be generated automatically to accept a regression.
 
-To refresh the complete upstream copy, run `node import.mjs /path/to/poe-code`,
+To refresh from the HEAD commit of a local Poe Code checkout, run
+`cargo run --locked --example import-markdown-suite -- /path/to/poe-code`,
 then run the full suite and review the corpus/dialect changes. To compare an installed CLI with the
 raw upstream expectations, run this from the repository root:
 
