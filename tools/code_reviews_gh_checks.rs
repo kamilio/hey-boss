@@ -89,6 +89,10 @@ fn main() {
         .expect("expected hey-boss, hey-gh and native gh paths");
     let dir = tempfile::tempdir_in(".").unwrap();
     let root = dir.path().canonicalize().unwrap();
+    let db = root.join("issue.db");
+    let _owner = hey_boss::database::Owner::start(&db)
+        .unwrap()
+        .expect("private fixture database");
     let bin = root.join(".local/bin");
     let upstream = root.join("native-bin");
     let config = root.join("config");
@@ -140,7 +144,8 @@ fn main() {
             .env("GH_NO_UPDATE_NOTIFIER", "1")
             .env("GH_NO_EXTENSION_UPDATE_NOTIFIER", "1")
             .env("HEY_BOSS_AGENT_ID", "human:test")
-            .env("HEY_BOSS_ISSUE_DB", root.join("issue.db"))
+            .env("HEY_BOSS_ISSUE_DB", &db)
+            .env("GIT_CEILING_DIRECTORIES", root.parent().unwrap())
             .env("HEY_BOSS_FLEET_STATE", &root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
