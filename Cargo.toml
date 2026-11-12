@@ -132,3 +132,7 @@ path = "tests/fixtures/checkout-git.rs"
 [[example]]
 name = "search-provider"
 path = "tests/fixtures/search-provider.rs"
+
+[[example]]
+name = "code-reviews-gh"
+path = "tools/code_reviews_gh_checks.rs"
