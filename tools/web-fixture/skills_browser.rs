@@ -164,3 +164,6 @@ fn skills_library_reports_diffs_coverage_and_conflicts() {
             .contains("data-refresh-inventory")
     );
 }
+
+#[path = "skills_wire.rs"]
+mod wire;
