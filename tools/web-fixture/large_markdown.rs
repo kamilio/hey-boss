@@ -64,13 +64,12 @@ fn maximum_checklist_keeps_every_item_and_frames_responsive() {
         .as_f64()
         .unwrap();
     assert!(gap <= 150.0, "Reader stalled for {gap:.1} ms");
-    assert!(
-        p.eval("location.hash")
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .contains(&id)
-    );
+    assert!(p
+        .eval("location.hash")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .contains(&id));
     assert_eq!(
         p.eval("document.querySelectorAll('#artifact-reading ul > li').length")
             .unwrap(),
@@ -316,4 +315,65 @@ fn large_draft_recovers_typed_text_after_undo_redo_and_reload() {
     p.wait("writing.checkVisibility()");
     assert_eq!(p.eval("violations").unwrap(), json!([]));
     screenshot(&mut p, "out/artifact-reader", "large-draft");
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn phone_typing_coalesces_draft_writes_in_both_editors() {
+    for size in [16_000, 64_000] {
+        let f = installed_fixture();
+        let paragraph = "A paragraph for measuring reading and typing.\n\n";
+        let body = paragraph.repeat(size / paragraph.len());
+        let (id, _) = document(&f, &body);
+        let (_web, base) = web(&f, "Reading");
+        let mut p = Page::open("about:blank");
+        p.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":390,"height":844,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .unwrap();
+        p.command(
+            "Page.navigate",
+            json!({"url":format!("{base}/artifacts#project=named%3AReading")}),
+        )
+        .unwrap();
+        p.wait("!!document.querySelector('.artifact-row-link')");
+        p.eval("window.mark=()=>{const m={gap:0,at:performance.now(),last:null};requestAnimationFrame(function frame(t){if(m.last!==null)m.gap=Math.max(m.gap,t-m.last);m.last=t;if(!m.done)requestAnimationFrame(frame)});return m};window.reading=mark()").unwrap();
+        p.wait("reading.last!==null");
+        p.eval("document.querySelector('.artifact-row-link').click()")
+            .unwrap();
+        complete(&mut p);
+        assert_eq!(
+            p.eval("document.querySelectorAll('#artifact-reading p').length")
+                .unwrap(),
+            body.matches(paragraph).count()
+        );
+        let read=p.eval("new Promise(resolve=>requestAnimationFrame(()=>{reading.done=true;resolve({elapsed:performance.now()-reading.at,gap:reading.gap})}))").unwrap();
+        p.eval("document.querySelector('.artifact-menu summary').click();document.querySelector('#artifact-edit-browser').click()").unwrap();
+        let field = if size > 32_000 {
+            "document.querySelector('#artifact-code-editor')?.shadowRoot?.querySelector('.cm-content')"
+        } else {
+            "document.querySelector('#artifact-body')"
+        };
+        p.wait(&format!("{field}?.checkVisibility()"));
+        let key = json!(format!("hey-boss-artifact-draft:local:named:Reading:{id}"));
+        p.eval(&format!("window.field={field};field.focus();window.typing=mark();window.inputs=0;window.writes=0;window.inputTime=0;window.writeTime=0;let before=0;field.addEventListener('beforeinput',()=>before=performance.now());field.addEventListener('input',()=>{{inputs++;inputTime=Math.max(inputTime,performance.now()-before)}});const put=Storage.prototype.setItem;Storage.prototype.setItem=function(k,v){{const t=performance.now();const result=put.call(this,k,v);if(k==={key}){{writes++;writeTime=Math.max(writeTime,performance.now()-t)}}return result}}")).unwrap();
+        for c in "Typing check".chars() {
+            p.command("Input.insertText", json!({"text":c.to_string()}))
+                .unwrap();
+            thread::sleep(Duration::from_millis(20));
+        }
+        p.wait(&format!(
+            "JSON.parse(localStorage.getItem({key}))?.body.includes('Typing check')===true"
+        ));
+        let stats = p
+            .eval("typing.done=true;({inputs,writes,inputTime,writeTime,gap:typing.gap})")
+            .unwrap();
+        eprintln!("{size} bytes: reading {read}, typing {stats}");
+        assert_eq!(stats["inputs"], "Typing check".len());
+        assert!(
+            stats["writes"].as_u64().unwrap() < stats["inputs"].as_u64().unwrap(),
+            "Typing wrote a draft on every keystroke: {stats}"
+        );
+    }
 }
