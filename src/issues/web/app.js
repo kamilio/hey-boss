@@ -363,7 +363,7 @@ function updateHeader() {
   $("#all-count").textContent = (p.open || 0) + (p.blocked || 0) + (p.ready || 0) + (p.closed || 0);
   $("#blocked-count").textContent = p.blocked || 0;
   $("#ready-count").textContent = p.ready || 0;
-  $('[data-state="ready"]').hidden = false;
+  $('[role="tab"][data-state="ready"]').hidden = false;
   $("#closed-count").textContent = p.closed;
   $("#deleted-count").textContent = p.deleted;
   $(".page-description").textContent =
@@ -372,7 +372,7 @@ function updateHeader() {
     model.detail && model.route.issue
       ? `${model.detail.issue.title} · Hey Boss`
       : `${p.name} · Issues · Hey Boss`;
-  $$("[data-state]").forEach((b) => {
+  $$('[role="tab"][data-state]').forEach((b) => {
     const selected = b.dataset.state === model.route.state;
     b.classList.toggle("selected", selected);
     b.setAttribute("aria-selected", selected);
@@ -1033,7 +1033,7 @@ $("#issue-search").oninput = () => {
   );
 };
 IssueFilters.init();
-$$("[data-state]").forEach(
+$$('[role="tab"][data-state]').forEach(
   (b) => (b.onclick = () => navigate({ state: b.dataset.state, blocked: "", search: $("#issue-search").value })),
 );
 $("#refresh").onclick = () => refresh(false);

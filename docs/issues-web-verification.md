@@ -111,7 +111,7 @@ reloads, mobile bounds, and dark appearance with JavaScript disabled. Six
 accessibility states in each browser had zero violations. The nine existing
 HTTP integration tests passed. Existing browser/theme audits now emulate the
 system preference. Evidence: `out/auto-theme-*.log`; scripts:
-`tools/issues_auto_theme_checks.js`, `tools/issues_auto_theme_accessibility.js`.
+`tools/web-fixture/issue_accessibility.rs`.
 The optimized update was installed on Mac and devbox. The live Poe2 UI passed
 read-only checks for both system appearances and removal of the switcher.
 
@@ -357,6 +357,8 @@ playwright-cli -s=issues-webkit --raw run-code --filename tools/issues_web_brows
 playwright-cli -s=issues-webkit --raw run-code --filename tools/issues_web_resilience_checks.js
 
 npm install --prefix out/issues-web-tools --no-save axe-core@4.10.3
+cargo build -p hey-boss --bin hey-boss
+cargo test -p hey-boss --example web-fixture issue_accessibility:: -- --ignored
 python3 tools/prepare_issues_web_accessibility.py \
   --axe out/issues-web-tools/node_modules/axe-core/axe.min.js \
   --output out/issues-web-review/axe-matrix.js
@@ -565,6 +567,6 @@ read-only fleet check against the committed release export confirmed all three
 installations; unrelated in-progress changes in the shared checkout were
 excluded from that release comparison.
 
-Repeatable suites: tools/issues_draft_browser_checks.js and
-tools/issues_draft_accessibility.js. Synthetic screenshots, reports, browsers,
+Repeatable suites: `tools/web-fixture/draft_readiness.rs` and
+`tools/web-fixture/issue_accessibility.rs`. Synthetic screenshots, reports, browsers,
 servers, and temporary files are removed after review as requested.
