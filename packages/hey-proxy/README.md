@@ -472,3 +472,7 @@ before workspace integration. Build from this workspace with
 `cargo build --locked -p hey-proxy`; the public `hey_proxy::usage` SDK and the
 `hey-proxy` executable remain available. `hey-boss proxy` forwards to that same
 executable without starting a Boss service.
+
+From the workspace, run the dashboard and account checks in Chrome with
+`cargo test -p hey-boss --example web-fixture browser::proxy -- --ignored`.
+Set `SCREENSHOTS` to a directory to save the account layouts in both themes.
