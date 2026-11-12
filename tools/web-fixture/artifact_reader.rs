@@ -390,3 +390,262 @@ fn reply_drafts_survive_resolution_and_retry_an_unacknowledged_save_once() {
         1
     );
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn external_links_preserve_the_document_and_isolate_the_opened_tab() {
+    let f = installed_fixture();
+    f.init("Reading").unwrap();
+    let (_web, base) = web(&f, "Reading");
+    let destination = tiny_http::Server::http(("127.0.0.1", 0)).unwrap();
+    let external = format!("http://{}", destination.server_addr());
+    let body=format!("# Reference notes\n\n[Source]({external}/source) · <https://example.org/automatic> · https://example.org/bare\n\n[Protocol relative](//example.org/relative) · [Local library](/artifacts) · [Same site]({base}/artifacts) · [Email](mailto:hello@example.org)\n\nA footnote.[^note]\n\n[^note]: Keep the document open.");
+    let client = reqwest::blocking::Client::new();
+    let boot: Value = client
+        .get(format!("{base}/api/bootstrap"))
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    let action = |operation: Value| {
+        let response:Value=client.post(format!("{base}/api/action")).header("X-Hey-Boss-CSRF",boot["csrf"].as_str().unwrap()).json(&json!({"project":"named:Reading","request_id":uuid::Uuid::new_v4().to_string(),"operation":{"action":"artifact","operation":operation}})).send().unwrap().json().unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response
+    };
+    let doc = action(json!({"command":"create","title":"References","body":body}));
+    let id = doc["artifact"]["id"].as_str().unwrap();
+    run(f.command(&[
+        "artifact",
+        "comment",
+        id,
+        "--project",
+        "Reading",
+        "--body",
+        "[Discussion source](https://example.org/discussion)",
+        "--json",
+    ]))
+    .unwrap();
+    let url = format!("{base}/artifacts#project=named%3AReading&artifact={id}");
+    let mut p = Page::open(&url);
+    let audit = |p: &mut Page, root: &str| {
+        let links=p.eval(&format!("Array.from(document.querySelector({}).querySelectorAll('a'),a=>({{href:a.href,external:['http:','https:'].includes(a.protocol)&&a.origin!==location.origin,blank:a.target==='_blank',safe:a.relList.contains('noopener')&&a.relList.contains('noreferrer')}}))",json!(root))).unwrap();
+        let links = links.as_array().unwrap();
+        assert!(links.iter().any(|a| a["external"] == true));
+        for a in links {
+            assert_eq!(a["external"], a["blank"], "{a}");
+            if a["external"] == true {
+                assert_eq!(a["safe"], true, "{a}");
+            }
+        }
+    };
+    let popup = |p: &mut Page, keyboard: bool| {
+        let point=p.eval("(()=>{const a=document.querySelector('#artifact-reading a[href$=\"/source\"]');a.scrollIntoView({block:'center'});a.focus();const r=a.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2,a.href]})()").unwrap();
+        assert_eq!(point[2], format!("{external}/source"));
+        if keyboard {
+            key(p, "Enter", "Enter", 13, "\r")
+        } else {
+            for event in ["mousePressed", "mouseReleased"] {
+                p.command(
+                    "Input.dispatchMouseEvent",
+                    json!({"type":event,"x":point[0],"y":point[1],"button":"left","clickCount":1}),
+                )
+                .unwrap();
+            }
+        }
+        let request = destination
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap()
+            .expect("external tab did not load");
+        assert_eq!(request.url(), "/source");
+        assert!(!request.headers().iter().any(|h| h.field.equiv("Referer")));
+        request.respond(tiny_http::Response::from_string("<link rel='icon' href='data:,'><script>document.title=window.opener===null?'Isolated source':'Has opener'</script>").with_header(tiny_http::Header::from_bytes("Content-Type","text/html").unwrap())).unwrap();
+        let end = std::time::Instant::now() + Duration::from_secs(5);
+        let target = loop {
+            let targets = p.command("Target.getTargets", json!({})).unwrap();
+            if let Some(t) = targets["targetInfos"].as_array().unwrap().iter().find(|t| {
+                t["url"] == format!("{external}/source") && t["title"] == "Isolated source"
+            }) {
+                break t["targetId"].clone();
+            }
+            assert!(
+                std::time::Instant::now() < end,
+                "Popup was not isolated: {targets}"
+            );
+            thread::sleep(Duration::from_millis(30));
+        };
+        p.command("Target.closeTarget", json!({"targetId":target}))
+            .unwrap();
+        assert_eq!(p.eval("location.href").unwrap(), url);
+    };
+    for theme in ["light", "dark"] {
+        p.command("Emulation.setEmulatedMedia",json!({"features":[{"name":"prefers-color-scheme","value":theme},{"name":"prefers-reduced-motion","value":"reduce"}]})).unwrap();
+        for width in [1440, 390, 320] {
+            p.command(
+                "Emulation.setDeviceMetricsOverride",
+                json!({"width":width,"height":900,"deviceScaleFactor":1,"mobile":false}),
+            )
+            .unwrap();
+            p.wait("!!document.querySelector('#artifact-reading .footnote-reference a')");
+            audit(&mut p, "#artifact-reading");
+            if theme == "light" && width == 1440 {
+                popup(&mut p, false);
+            }
+            p.eval("document.querySelector('#artifact-reading .footnote-reference a').click();if(document.querySelector('#artifact-comments').hidden)document.querySelector('#artifact-comments-toggle').click()").unwrap();
+            assert_eq!(p.eval("location.href").unwrap(), url);
+            audit(&mut p, "#artifact-threads");
+            assert_eq!(
+                p.eval("document.documentElement.scrollWidth<=innerWidth+1")
+                    .unwrap(),
+                true
+            );
+            screenshot(
+                &mut p,
+                "out/artifact-reader",
+                &format!("external-{theme}-{width}"),
+            );
+            p.eval("document.querySelector('.artifact-menu summary').click();document.querySelector('#artifact-edit-browser').click();document.querySelector('#artifact-preview').click()").unwrap();
+            p.wait("!!document.querySelector('#artifact-edit-preview .footnote-reference a')");
+            audit(&mut p, "#artifact-edit-preview");
+            p.eval("document.querySelector('#artifact-cancel').click()")
+                .unwrap();
+        }
+    }
+    let large = body
+        + "\n\n"
+        + &"Paragraph with [another source](https://example.org/large).\n\n".repeat(900);
+    action(json!({"command":"edit","id":id,"if_version":1,"body":large}));
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait("document.querySelectorAll('#artifact-reading a[href=\"https://example.org/large\"]').length===900 && !document.querySelector('#artifact-reading').hasAttribute('aria-busy')");
+    audit(&mut p, "#artifact-reading");
+    popup(&mut p, true);
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn quoted_drafts_survive_reload_and_publish_with_mouse_keyboard_and_touch() {
+    let f = installed_fixture();
+    f.init("Reading").unwrap();
+    let body = (1..=32)
+        .map(|i| {
+            format!("## Passage {i}\n\nKeep the original context when reviewing this document.\n\n")
+        })
+        .collect::<String>();
+    let doc = run(f.command(&[
+        "artifact",
+        "create",
+        "--project",
+        "Reading",
+        "--title",
+        "Review notes",
+        "--body",
+        &body,
+        "--json",
+    ]))
+    .unwrap();
+    let id = doc["artifact"]["id"].as_str().unwrap();
+    let (_web, base) = web(&f, "Reading");
+    let route = format!("{base}/artifacts#project=named%3AReading&artifact={id}");
+    let mut p = Page::open("about:blank");
+    p.command("Page.enable", json!({})).unwrap();
+    p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);window.passage=()=>document.querySelectorAll('#artifact-reading h2')[20];window.readerBox=()=>{const r=el('#artifact-reading').getBoundingClientRect();return [r.x,r.width]};addEventListener('error',e=>window.name=e.message);addEventListener('unhandledrejection',e=>window.name=String(e.reason))"})).unwrap();
+    let visible="el('#artifact-quote')?.innerText==='Passage' && document.activeElement===el('#artifact-comment') && (()=>{const r=document.activeElement.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight && document.documentElement.scrollWidth<=innerWidth+1})()";
+    let select = |p: &mut Page, touch: bool| {
+        p.wait("!!passage()");
+        let point=p.eval("(()=>{passage().scrollIntoView({block:'center'});const r=passage().getBoundingClientRect();return [r.x+32,r.y+r.height/2]})()").unwrap();
+        if touch {
+            p.eval("const range=document.createRange();range.setStart(passage().firstChild,0);range.setEnd(passage().firstChild,7);getSelection().removeAllRanges();getSelection().addRange(range)").unwrap();
+        } else {
+            for clicks in [1, 2] {
+                for event in ["mousePressed", "mouseReleased"] {
+                    p.command("Input.dispatchMouseEvent",json!({"type":event,"x":point[0],"y":point[1],"button":"left","clickCount":clicks})).unwrap();
+                }
+            }
+        }
+        p.wait("el('#artifact-selection-comment')?.checkVisibility()");
+    };
+    let tap = |p: &mut Page, selector: &str| {
+        let xy=p.eval(&format!("(()=>{{const r=el({}).getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]}})()",json!(selector))).unwrap();
+        p.command(
+            "Input.dispatchTouchEvent",
+            json!({"type":"touchStart","touchPoints":[{"x":xy[0],"y":xy[1]}]}),
+        )
+        .unwrap();
+        p.command(
+            "Input.dispatchTouchEvent",
+            json!({"type":"touchEnd","touchPoints":[]}),
+        )
+        .unwrap();
+    };
+    for theme in ["light", "dark"] {
+        p.command("Emulation.setEmulatedMedia",json!({"features":[{"name":"prefers-color-scheme","value":theme},{"name":"prefers-reduced-motion","value":"reduce"}]})).unwrap();
+        for (width, height, touch) in [
+            (1440, 1000, false),
+            (820, 1180, false),
+            (390, 844, false),
+            (320, 568, false),
+            (390, 844, true),
+        ] {
+            p.command(
+                "Emulation.setDeviceMetricsOverride",
+                json!({"width":width,"height":height,"deviceScaleFactor":1,"mobile":touch}),
+            )
+            .unwrap();
+            p.command(
+                "Emulation.setTouchEmulationEnabled",
+                json!({"enabled":touch}),
+            )
+            .unwrap();
+            p.command("Page.navigate", json!({"url":route})).unwrap();
+            p.wait("!!passage()");
+            p.eval("if(!el('#artifact-comments').hidden)el('#artifact-comments-close').click()")
+                .unwrap();
+            let before = p.eval("readerBox()").unwrap();
+            select(&mut p, touch);
+            assert_eq!(p.eval("el('#artifact-comments').hidden").unwrap(), true);
+            assert_eq!(p.eval("readerBox()").unwrap(), before);
+            if touch {
+                tap(&mut p, "#artifact-selection-comment");
+            } else if width == 1440 {
+                p.eval("el('#artifact-selection-comment').focus()").unwrap();
+                key(&mut p, "Enter", "Enter", 13, "\r");
+                p.wait(visible);
+                p.eval("el('#artifact-clear-quote').click()").unwrap();
+                assert_eq!(p.eval("el('#artifact-quote').hidden").unwrap(), true);
+                select(&mut p, false);
+                p.eval("el('#artifact-selection-comment').focus()").unwrap();
+                key(&mut p, " ", "Space", 32, " ");
+            } else {
+                p.eval("el('#artifact-selection-comment').click()").unwrap();
+            }
+            p.wait(visible);
+            let label = format!("{theme}-{width}-{}", if touch { "touch" } else { "mouse" });
+            screenshot(&mut p, "out/artifact-reader", &format!("composer-{label}"));
+            p.eval(&format!("el('#artifact-comment').value={};el('#artifact-comment').dispatchEvent(new Event('input',{{bubbles:true}}));window.beforeReload=true",json!(label))).unwrap();
+            p.command("Page.reload", json!({})).unwrap();
+            p.wait(&format!("!window.beforeReload && el('#artifact-quote')?.innerText==='Passage' && el('#artifact-comment')?.value==={}",json!(label)));
+            if touch {
+                p.eval("el('#artifact-comment-form button[type=submit]').scrollIntoView({block:'center'})")
+                    .unwrap();
+                tap(&mut p, "#artifact-comment-form button[type=submit]");
+            } else {
+                p.eval("el('#artifact-comment-form button[type=submit]').click()")
+                    .unwrap();
+            }
+            p.wait(&format!(
+                "el('#artifact-threads')?.textContent.includes({})",
+                json!(label)
+            ));
+            let saved = run(f.command(&["artifact", "view", id, "--project", "Reading", "--json"]))
+                .unwrap();
+            let c = saved["comments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["body"] == label)
+                .unwrap();
+            assert_eq!(c["quote"], "Passage");
+            assert_eq!(c["outdated"], false);
+            assert_eq!(p.eval("window.name").unwrap(), "");
+        }
+    }
+}
