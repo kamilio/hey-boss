@@ -167,3 +167,67 @@ fn skills_library_reports_diffs_coverage_and_conflicts() {
 
 #[path = "skills_wire.rs"]
 mod wire;
+
+pub(super) fn click(p: &mut Page, selector: &str) {
+    let el = format!("document.querySelector({})", json!(selector));
+    p.wait(&format!("{el}?.disabled === false"));
+    p.eval(&format!("{el}.click()")).unwrap();
+}
+pub(super) fn viewport(p: &mut Page, width: i32, theme: &str) {
+    p.command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":width,"height":1000,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .unwrap();
+    p.command(
+        "Emulation.setEmulatedMedia",
+        json!({"features":[{"name":"prefers-color-scheme","value":theme}]}),
+    )
+    .unwrap();
+    p.wait("document.documentElement.scrollWidth <= innerWidth");
+}
+pub(super) fn shot(p: &mut Page, name: &str, selector: Option<&str>) {
+    if let Ok(dir) = std::env::var("SKILLS_SCREENSHOTS") {
+        if let Some(selector) = selector {
+            let clip=p.eval(&format!("(()=>{{const r=document.querySelector({}).getBoundingClientRect();return {{x:r.x+scrollX,y:r.y+scrollY,width:r.width,height:r.height,scale:1}}}})()",json!(selector))).unwrap();
+            capture(
+                p,
+                &dir,
+                name,
+                json!({"format":"png","clip":clip,"captureBeyondViewport":true}),
+            );
+        } else {
+            screenshot(p, &dir, name);
+        }
+    }
+}
+pub(super) const EDITOR: &str =
+    "document.querySelector('#skill-codemirror-host')?.shadowRoot?.querySelector('.cm-content')";
+pub(super) fn replace_editor(p: &mut Page, text: &str) {
+    p.wait(&format!("!!{EDITOR}"));
+    p.eval(&format!("{EDITOR}.focus()")).unwrap();
+    p.command(
+        "Input.dispatchKeyEvent",
+        json!({"type":"keyDown","key":"a","code":"KeyA","commands":["selectAll"]}),
+    )
+    .unwrap();
+    p.command(
+        "Input.dispatchKeyEvent",
+        json!({"type":"keyUp","key":"a","code":"KeyA"}),
+    )
+    .unwrap();
+    p.command("Input.insertText", json!({"text":text})).unwrap();
+    assert_eq!(
+        p.eval(&format!("{EDITOR}.innerText"))
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .trim_end_matches('\n'),
+        text.trim_end_matches('\n')
+    );
+}
+pub(super) fn key(p: &mut Page, key: &str, code: &str, vk: i32, text: &str) {
+    for kind in ["keyDown", "keyUp"] {
+        p.command("Input.dispatchKeyEvent",json!({"type":kind,"key":key,"code":code,"windowsVirtualKeyCode":vk,"text":if kind=="keyDown"{text}else{""}})).unwrap();
+    }
+}

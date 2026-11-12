@@ -35,7 +35,7 @@ fn skills_reconnect_replays_only_a_rejected_write_for_the_same_actor() {
         p.eval("document.querySelector('#skills-search').value='AGENTS';document.querySelector('#skills-search').dispatchEvent(new Event('input'))").unwrap();
         f.lock().unwrap().token = "after-restart";
         scan(p);
-        shot(p, "restarted");
+        shot(p, "restarted", Some("html"));
         assert_eq!(
             p.eval("document.querySelector('#skills-error').hidden")
                 .unwrap(),
@@ -95,7 +95,7 @@ fn skills_reconnect_replays_only_a_rejected_write_for_the_same_actor() {
                 "AGENTS.md"
             );
             if failure == "forbidden" {
-                shot(p, "unrecoverable");
+                shot(p, "unrecoverable", Some("html"));
             }
             {
                 let mut s = f.lock().unwrap();
@@ -166,7 +166,7 @@ fn skills_reconnect_replays_only_a_rejected_write_for_the_same_actor() {
             for theme in ["light", "dark"] {
                 viewport(p, width, theme);
                 p.wait("document.querySelector('.version-preview').getBoundingClientRect().width >= 180");
-                shot(p, &format!("{width}-{theme}"));
+                shot(p, &format!("{width}-{theme}"), Some("html"));
             }
         }
     });

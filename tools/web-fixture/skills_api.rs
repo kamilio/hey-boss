@@ -300,3 +300,6 @@ mod native;
 
 #[path = "skills_disable.rs"]
 mod disable;
+
+#[path = "skills_rename.rs"]
+mod rename;

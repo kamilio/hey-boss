@@ -157,6 +157,7 @@ fn with_page(data: Value, test: impl FnOnce(&mut Page, &Mutex<Fleet>, &str)) {
         });
         let _stop = stop;
         let mut p = Page::open("about:blank");
+        p.command("Page.enable", json!({})).unwrap();
         p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"addEventListener('error',e=>sessionStorage.setItem('pageError',e.message));addEventListener('unhandledrejection',e=>sessionStorage.setItem('pageError',String(e.reason)))"})).unwrap();
         test(&mut p, fleet, &url);
         assert_eq!(
@@ -165,61 +166,10 @@ fn with_page(data: Value, test: impl FnOnce(&mut Page, &Mutex<Fleet>, &str)) {
         );
     });
 }
-fn click(p: &mut Page, selector: &str) {
-    let el = format!("document.querySelector({})", json!(selector));
-    p.wait(&format!("{el}?.disabled === false"));
-    p.eval(&format!("{el}.click()")).unwrap();
-}
-fn viewport(p: &mut Page, width: i32, theme: &str) {
-    p.command(
-        "Emulation.setDeviceMetricsOverride",
-        json!({"width":width,"height":1000,"deviceScaleFactor":1,"mobile":false}),
-    )
-    .unwrap();
-    p.command(
-        "Emulation.setEmulatedMedia",
-        json!({"features":[{"name":"prefers-color-scheme","value":theme}]}),
-    )
-    .unwrap();
-    p.wait("document.documentElement.scrollWidth <= innerWidth");
-}
-fn shot(p: &mut Page, name: &str) {
-    if let Ok(dir) = std::env::var("SKILLS_SCREENSHOTS") {
-        screenshot(p, &dir, name);
-    }
-}
-const EDITOR: &str =
-    "document.querySelector('#skill-codemirror-host')?.shadowRoot?.querySelector('.cm-content')";
 fn edit(p: &mut Page, text: &str) {
     click(p, "[data-toggle-editor]");
-    p.wait(&format!("!!{EDITOR}"));
-    p.eval(&format!("{EDITOR}.focus()")).unwrap();
-    p.command(
-        "Input.dispatchKeyEvent",
-        json!({"type":"keyDown","key":"a","code":"KeyA","commands":["selectAll"]}),
-    )
-    .unwrap();
-    p.command(
-        "Input.dispatchKeyEvent",
-        json!({"type":"keyUp","key":"a","code":"KeyA"}),
-    )
-    .unwrap();
-    p.command("Input.insertText", json!({"text":text})).unwrap();
-    assert_eq!(
-        p.eval(&format!("{EDITOR}.innerText"))
-            .unwrap()
-            .as_str()
-            .unwrap()
-            .trim_end_matches('\n'),
-        text.trim_end_matches('\n')
-    );
+    replace_editor(p, text);
 }
-fn key(p: &mut Page, key: &str, code: &str, vk: i32, text: &str) {
-    for kind in ["keyDown", "keyUp"] {
-        p.command("Input.dispatchKeyEvent",json!({"type":kind,"key":key,"code":code,"windowsVirtualKeyCode":vk,"text":if kind=="keyDown"{text}else{""}})).unwrap();
-    }
-}
-
 fn navigate(p: &mut Page, url: &str) {
     p.command("Page.navigate", json!({"url":url})).unwrap();
     p.wait(&format!("location.href.startsWith({}) && document.querySelector('#skills-scan')?.disabled === false",json!(url)));

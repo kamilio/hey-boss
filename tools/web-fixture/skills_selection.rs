@@ -35,7 +35,7 @@ fn skill_choice_survives_inflight_writes_and_inventory_polls() {
             for theme in ["light", "dark"] {
                 viewport(p, width, theme);
                 p.wait("document.querySelector('[data-choose=local]').disabled === false && document.querySelector('.gh-diff-file-meta').getBoundingClientRect().right <= document.querySelector('.gh-diff-file').getBoundingClientRect().right+1");
-                shot(p, &format!("busy-{width}-{theme}"));
+                shot(p, &format!("busy-{width}-{theme}"), Some("#skills-detail"));
             }
         }
         {
@@ -46,7 +46,7 @@ fn skill_choice_survives_inflight_writes_and_inventory_polls() {
         }
         p.wait("!document.querySelector('[data-unify]').disabled");
         chosen(p, "remote");
-        shot(p, "retry-ready");
+        shot(p, "retry-ready", Some("#skills-detail"));
         click(p, "[data-unify]");
         until(f, |s| s.pending.is_some());
         {
@@ -88,7 +88,7 @@ fn skill_choice_survives_inflight_writes_and_inventory_polls() {
         p.wait("document.querySelectorAll('.skill-version').length===1 && document.querySelector('[data-unify]').disabled");
         click(p, "[data-choose=remote]");
         p.wait("!document.querySelector('[data-unify]').disabled");
-        shot(p, "reviewed");
+        shot(p, "reviewed", Some("#skills-detail"));
         f.lock().unwrap().inventory = initial;
         click(p, "#skills-reset");
         p.wait("document.querySelectorAll('.skill-version').length===2");
