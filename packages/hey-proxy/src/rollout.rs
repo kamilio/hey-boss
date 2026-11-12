@@ -324,7 +324,9 @@ fn pi_registry(
         let budget = registry.resolve(config, &id);
         // Model definitions are the generated copy. Remove competing limit
         // overrides, but keep costs, compatibility and other user metadata.
-        if let Some(overrides) = provider["modelOverrides"].as_object_mut()
+        if let Some(overrides) = provider
+            .get_mut("modelOverrides")
+            .and_then(Value::as_object_mut)
             && let Some(entry) = overrides.get_mut(&id)
         {
             let entry = entry
