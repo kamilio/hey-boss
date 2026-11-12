@@ -12,7 +12,7 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Initialize local storage and install the Python/JavaScript SDK sources.
+    /// Initialize local secret storage and this machine’s identity.
     Install,
     /// Create this machine's local identity. Linux creates a GPG key if needed.
     Init {
