@@ -424,3 +424,6 @@ fn retained_attempt_viewer_opens_the_live_issue() {
 
 #[path = "artifact_visual.rs"]
 mod artifact_visual;
+
+#[path = "quiet_hours.rs"]
+mod quiet_hours;
