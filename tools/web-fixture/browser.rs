@@ -315,3 +315,6 @@ mod quick_issue;
 
 #[path = "subtasks.rs"]
 mod subtasks;
+
+#[path = "issue_transfer.rs"]
+mod issue_transfer;

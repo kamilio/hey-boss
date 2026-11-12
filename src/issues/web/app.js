@@ -2212,7 +2212,11 @@ async function openTransfer() {
 }
 $("#transfer-project").onchange = () => { $("#transfer-submit").disabled = !$("#transfer-project").value; };
 $$('[data-transfer-cancel]').forEach(button => button.onclick = () => $("#transfer-dialog").close());
-$("#transfer-dialog").addEventListener("close", () => { transferContext = null; $(".issue-overflow summary")?.focus(); });
+$("#transfer-dialog").addEventListener("close", event => {
+  if (event.currentTarget.open) return;
+  transferContext = null;
+  $(".issue-overflow summary")?.focus();
+});
 $("#transfer-dialog").addEventListener("cancel", event => {
   if ($("#transfer-submit").dataset.saving) event.preventDefault();
 });

@@ -14,7 +14,6 @@ jobs:
       - run: python3 tools/test_skill_transport.py
       - run: node --check src/issues/web/skills.js
       - run: node --test tools/test_issue_assignments.cjs tools/test_assignment_badges.cjs tools/test_assignment_runtime.cjs
-      - run: node tools/test_issue_transfer_controls.cjs
       - run: cargo test --locked -p hey-boss --test web_client -- --ignored
       - run: cargo build --locked -p hey-boss --bin hey-boss && cargo test --locked -p hey-boss --example web-fixture -- --ignored
       - run: node tools/test_metadata_mutation.cjs
