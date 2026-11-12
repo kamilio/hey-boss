@@ -12,6 +12,9 @@ import {renderTerminalPng} from 'terminal-png';
 
 const repo = fileURLToPath(new URL('../../', import.meta.url));
 const binary = process.env.HEY_BOSS_TEST_BINARY || path.join(repo, 'target/debug/hey-boss');
+const execute = promisify(execFile);
+const build = await execute('cargo', ['build', '--locked', '-p', 'hey-boss', '--example', 'codex-drain', '--message-format=json-render-diagnostics'], {cwd:repo, maxBuffer:8*1024*1024});
+const drain = build.stdout.trimEnd().split('\n').map(line => JSON.parse(line)).find(event => event.target?.name === 'codex-drain' && event.executable).executable;
 const temporary = await realpath(await mkdtemp(path.join(os.tmpdir(), 'hb-resume-')));
 const checkout = path.join(temporary, 'checkout');
 const output = path.join(repo, 'worker-tui/target/resume-qa');
@@ -25,14 +28,13 @@ const env = {...process.env, TERM: 'xterm-256color',
   HEY_BOSS_FLEET_DESIRED: path.join(temporary, 'fleet.yaml'),
   HEY_BOSS_FLEET_CONFIG: path.join(temporary, 'inventory.json'),
   HEY_BOSS_FLEET_BINARY: binary, HEY_BOSS_TEST_CLI: binary,
-  HEY_BOSS_CODEX: path.join(repo, 'tests/fixtures/codex-drain.mjs'),
+  HEY_BOSS_CODEX: drain,
   HEY_BOSS_INBOX_SOCKET: path.join(temporary, 'absent.sock')};
 delete env.HEY_BOSS_ISSUE_HOST;
 delete env.HEY_BOSS_ISSUE_PROJECT;
 delete env.HEY_BOSS_FLEET_MANAGED;
 await writeFile(env.HEY_BOSS_FLEET_DESIRED, JSON.stringify({machines: {local: {workers: []}}}));
 await writeFile(env.HEY_BOSS_FLEET_CONFIG, JSON.stringify({ssh_hosts: []}));
-const execute = promisify(execFile);
 const cli = async args => JSON.parse((await execute(binary, args, {env, cwd: checkout, timeout: 60000})).stdout);
 const status = () => cli(['workers', '--json', 'status']);
 const until = async (predicate, label) => {

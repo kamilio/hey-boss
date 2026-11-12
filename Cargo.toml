@@ -58,3 +58,18 @@ tar = "0.4"
 lto = true
 codegen-units = 1
 strip = true
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }
+
+[[example]]
+name = "codex-drain"
+path = "tests/fixtures/workers/codex-drain.rs"
+
+[[example]]
+name = "codex-approvals"
+path = "tests/fixtures/workers/codex-approvals.rs"
+
+[[example]]
+name = "codex-github-watch"
+path = "tests/fixtures/workers/codex-github-watch.rs"

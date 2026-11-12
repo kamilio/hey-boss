@@ -1,5 +1,11 @@
 //! Opt-in real-process coverage; build the CLI before running this test.
 use super::*;
+mod worker_fixtures {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/worker_fixtures.rs"
+    ));
+}
 use std::{
     fs,
     process::{Child, Command, Stdio},
@@ -156,8 +162,7 @@ fn lifecycle(followups: Followups) {
         .env("HEY_BOSS_TEST_CLI", &binary)
         .env(
             "HEY_BOSS_CODEX",
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures/codex-github-watch.mjs"),
+            worker_fixtures::binary("codex-github-watch"),
         )
         .env_remove("HEY_BOSS_ISSUE_HOST")
         .env_remove("HEY_BOSS_ISSUE_PROJECT")

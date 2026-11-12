@@ -2,12 +2,14 @@
 mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
     io::{Read, Write},
-    os::unix::{fs::PermissionsExt, net::UnixListener},
+    os::unix::net::UnixListener,
     path::PathBuf,
     process::{Child, Command, Stdio},
     sync::{
@@ -33,7 +35,9 @@ struct Fixture {
 impl Fixture {
     fn new(mode: &str) -> Self {
         let serial = FIXTURE_SERIAL.fetch_add(1, Ordering::Relaxed);
-        let root = PathBuf::from(format!("/tmp/hb61-{}-{mode}-{serial}", std::process::id()));
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("out")
+            .join(format!("hb61-{}-{serial}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         projects::seed(&root.join("issues.db"), &["named:Approval QA"]);
         // Pin the built inode across Cargo's atomic binary replacement. Unlike
@@ -104,12 +108,8 @@ impl Fixture {
             worker: None,
         };
         f.cli(&["issue", "create", "--title", "Approval fixture"]);
-        let source =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-approvals.mjs");
-        let fixture = f.root.join("codex");
+        let fixture = worker_fixtures::binary("codex-approvals");
         let _guard = EXECUTABLE_SETUP.lock().unwrap();
-        fs::copy(source, &fixture).unwrap();
-        fs::set_permissions(&fixture, fs::Permissions::from_mode(0o755)).unwrap();
         f.worker = Some(
             f.command(&[
                 "worker",
