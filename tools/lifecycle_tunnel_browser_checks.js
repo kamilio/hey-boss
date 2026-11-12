@@ -1,4 +1,4 @@
-// Run against chief_metadata_checks.mjs --lifecycle --serve using playwright-cli.
+// Run against cargo run --example chief-metadata -- --lifecycle --serve using playwright-cli.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };

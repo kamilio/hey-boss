@@ -1,4 +1,4 @@
-// Run after chief_metadata_checks.mjs --dependencies --serve.
+// Run after cargo run --example chief-metadata -- --dependencies --serve.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };

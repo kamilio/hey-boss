@@ -1,193 +1,21 @@
 //! Ordinary draft edits must reach the authority without reverse SSH or a claim.
-#[path = "support/projects.rs"]
-mod projects;
+#[path = "support/fleet_tunnel.rs"]
+mod fixture;
+use fixture::Fleet;
 use serde_json::{Value, json};
 use std::{
-    fs,
-    io::Write,
-    os::unix::fs::PermissionsExt,
-    path::PathBuf,
-    process::{Child, Command, Stdio},
+    path::Path,
+    process::Stdio,
     thread,
     time::{Duration, Instant},
 };
-
-struct Fleet {
-    root: PathBuf,
-    services: Vec<Child>,
-}
 impl Fleet {
     fn new() -> Self {
-        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let root = std::env::current_dir().unwrap().join(format!(
-            ".t-{}-{}",
-            std::process::id(),
-            SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        fs::create_dir(&root).unwrap();
-        for side in ["main", "peer", "bin"] {
-            fs::create_dir(root.join(side)).unwrap();
-        }
-        for side in ["main", "peer"] {
-            fs::write(
-                root.join(side).join("inventory.json"),
-                if side == "main" {
-                    r#"{"ssh_hosts":["fixture.invalid"]}"#
-                } else {
-                    r#"{"ssh_hosts":[]}"#
-                },
-            )
-            .unwrap();
-            fs::write(root.join(side).join("desired.json"), r#"{"machines":{}}"#).unwrap();
-        }
-        projects::seed(&root.join("main/issues.db"), &["named:Tunnel QA"]);
-        let mut fleet = Self {
-            root,
-            services: vec![],
-        };
-        // Own the database services too, so no fixture daemon survives the test.
-        for side in ["main", "peer"] {
-            let service = fleet
-                .command(side, &["fleet", "companion"])
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap();
-            fleet.services.push(service);
-            let socket = fleet.database_socket(side);
-            let deadline = Instant::now() + Duration::from_secs(30);
-            while !socket.exists() {
-                assert!(Instant::now() < deadline, "Database owner did not start");
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-        fleet
-    }
-    fn database_socket(&self, side: &str) -> PathBuf {
-        use sha2::{Digest, Sha256};
-        let path = self
-            .root
-            .canonicalize()
-            .unwrap()
-            .join(side)
-            .join("issues.db");
-        let key = format!("{:x}", Sha256::digest(path.to_string_lossy().as_bytes()));
-        PathBuf::from(format!(
-            "/tmp/hey-boss-db-{}/{}.sock",
-            unsafe { libc::getuid() },
-            &key[..24]
-        ))
-    }
-    fn command(&self, side: &str, args: &[&str]) -> Command {
-        let path = self.root.join(side);
-        let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
-        c.args(args)
-            .current_dir(&path)
-            .env("HEY_BOSS_ISSUE_DB", path.join("issues.db"))
-            .env("HEY_BOSS_FLEET_STATE", &path)
-            .env("HEY_BOSS_FLEET_CONFIG", path.join("inventory.json"))
-            .env("HEY_BOSS_FLEET_DESIRED", path.join("desired.json"))
-            .env_remove("HEY_BOSS_ISSUE_HOST")
-            .env_remove("HEY_BOSS_ISSUE_PROJECT");
-        c
-    }
-    fn cli(&self, side: &str, args: &[&str], expected: i32) -> Value {
-        let out = self.command(side, args).output().unwrap();
-        assert_eq!(
-            out.status.code(),
-            Some(expected),
-            "{args:?}: {} {}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        serde_json::from_slice(&out.stdout).unwrap()
-    }
-    fn issue(&self, side: &str, args: &[&str], expected: i32) -> Value {
-        let mut all = vec![
-            "issue",
-            "--project",
+        Self::with_binary(
+            Path::new(env!("CARGO_BIN_EXE_hey-boss")),
             "Tunnel QA",
-            "--agent",
             "codex:tunnel-test",
-            "--json",
-        ];
-        all.extend_from_slice(args);
-        self.cli(side, &all, expected)
-    }
-    fn sql(&self, side: &str, sql: &str) -> Value {
-        let path = self.root.join(side).join("issues.db");
-        let mut c = self
-            .command(
-                side,
-                &["fleet", "database", "--path", path.to_str().unwrap()],
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        writeln!(c.stdin.take().unwrap(), "{}", json!({"sql":sql,"args":[]})).unwrap();
-        let out = c.wait_with_output().unwrap();
-        assert!(out.status.success());
-        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
-        assert_eq!(value["ok"], true, "{value}");
-        value["rows"].clone()
-    }
-    fn start(&mut self) {
-        let ssh = self.root.join("bin/ssh");
-        fs::write(&ssh, "#!/bin/sh\nexport HEY_BOSS_ISSUE_DB=\"$TUNNEL_PEER/issues.db\" HEY_BOSS_FLEET_STATE=\"$TUNNEL_PEER\" HEY_BOSS_FLEET_CONFIG=\"$TUNNEL_PEER/inventory.json\" HEY_BOSS_FLEET_DESIRED=\"$TUNNEL_PEER/desired.json\"\nexec \"$TUNNEL_BINARY\" fleet companion --stdio\n").unwrap();
-        fs::set_permissions(&ssh, fs::Permissions::from_mode(0o700)).unwrap();
-        let service = self
-            .command("main", &["fleet", "supervisor"])
-            .env(
-                "PATH",
-                format!(
-                    "{}:{}",
-                    self.root.join("bin").display(),
-                    std::env::var("PATH").unwrap()
-                ),
-            )
-            .env("TUNNEL_PEER", self.root.join("peer"))
-            .env("TUNNEL_BINARY", env!("CARGO_BIN_EXE_hey-boss"))
-            .stdout(Stdio::null())
-            .spawn()
-            .unwrap();
-        self.services.push(service);
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            let out = self
-                .command("peer", &["fleet", "capabilities"])
-                .output()
-                .unwrap();
-            let ready = serde_json::from_slice::<Value>(&out.stdout).unwrap_or(Value::Null);
-            if out.status.success()
-                && ready["route"] == "supervisor_tunnel"
-                && ready["capabilities"]["issue_draft"] == true
-            {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "Tunnel not connected: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
-            thread::sleep(Duration::from_millis(100));
-        }
-    }
-}
-impl Drop for Fleet {
-    fn drop(&mut self) {
-        for service in self.services.iter_mut().rev() {
-            unsafe {
-                libc::kill(service.id() as i32, libc::SIGTERM);
-            }
-            let _ = service.wait();
-        }
-        for side in ["main", "peer"] {
-            let socket = self.database_socket(side);
-            for extension in ["sock", "lock", "startup", "log"] {
-                let _ = fs::remove_file(socket.with_extension(extension));
-            }
-        }
-        let _ = fs::remove_dir_all(&self.root);
+        )
     }
 }
 

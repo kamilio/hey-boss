@@ -100,7 +100,7 @@ the fleet, then reconnect and inspect again. A missing connection produces
 
 Verification: `cargo test --locked -p hey-boss --test fleet_tunnel`, the authority
 unit tests and existing fleet integration tests. Installed binaries can run the
-18-stage `tools/chief_metadata_checks.mjs` private-fleet qualification; `--serve`
+private-fleet qualification with `HEY_BOSS_TEST_BINARY=/path/to/hey-boss cargo run --example chief-metadata --`; `--serve`
 supports the desktop/phone visual checks in `tools/fleet_tunnel_browser_checks.js`.
 Use `--dependencies --serve` for dependency routing and replication qualification,
 then run `tools/dependency_tunnel_browser_checks.js` for desktop/phone checks.
