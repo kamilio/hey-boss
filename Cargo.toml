@@ -120,3 +120,7 @@ path = "tests/fixtures/notification-latency.rs"
 [[example]]
 name = "investigate-turbo-interrupt"
 path = "tests/fixtures/turbo-interrupt.rs"
+
+[[example]]
+name = "inspect-hey-talk-window"
+path = "tests/fixtures/inspect-hey-talk-window.rs"
