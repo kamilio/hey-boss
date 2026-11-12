@@ -48,9 +48,16 @@ and early URL sanitization. No input is skipped; stale or unused overrides fail.
 A dialect override must never be generated automatically to accept a regression.
 
 To refresh the complete upstream copy, run `node import.mjs /path/to/poe-code`,
-then run the full suite and review the corpus/dialect changes. `compare.mjs` is a
-read-only diagnostic comparison against `HEY_BOSS_CLI_PATH`; it writes mismatches
-to `out/poe-mismatches.json`, never updates accepted expectations.
+then run the full suite and review the corpus/dialect changes. To compare an installed CLI with the
+raw upstream expectations, run this from the repository root:
+
+```sh
+cargo test --locked --test markdown_poe_suite compare_installed_markdown -- --ignored --nocapture
+```
+
+The comparison uses `hey-boss` from PATH (or `HEY_BOSS_CLI_PATH`) and writes
+`out/poe-mismatches.json`. It includes the intentional dialect differences and
+never updates accepted expectations.
 
 The dedicated Markdown CI workflow runs both suites and rejects stale generated
 fixtures. Cargo tests also verify every imported file hash and test inventory.

@@ -139,6 +139,12 @@ fn normalize(n: &mut Value) {
         }
     }
 }
+fn canonical(ast: &Value) -> Value {
+    let mut actual = semantic(ast).remove(0);
+    normalize(&mut actual);
+    actual
+}
+
 fn validate(n: &Value, lines: usize) {
     let start = n["lineStart"].as_u64().unwrap() as usize;
     let end = n["lineEnd"].as_u64().unwrap() as usize;
@@ -207,8 +213,7 @@ fn every_upstream_markdown_input_matches_native_document_semantics() {
                 .split('\n')
                 .count(),
         );
-        let mut actual = semantic(&ast).remove(0);
-        normalize(&mut actual);
+        let actual = canonical(&ast);
         let difference = &dialects[string(fixture, "id")];
         let expected = if difference.is_null() {
             &fixture["expected"]
@@ -248,6 +253,52 @@ fn every_upstream_markdown_input_matches_native_document_semantics() {
         )
         .unwrap();
     }
+}
+
+/// Diagnostic report for a specific installed CLI. Include known dialect differences.
+#[test]
+#[ignore = "runs the installed CLI against the full upstream corpus"]
+fn compare_installed_markdown() {
+    let out = Path::new(env!("CARGO_MANIFEST_DIR")).join("out");
+    std::fs::create_dir_all(&out).unwrap();
+    let dir = tempfile::tempdir_in(&out).unwrap();
+    let input = dir.path().join("in.md");
+    let output = dir.path().join("out.json");
+    let cli = std::env::var_os("HEY_BOSS_CLI_PATH").unwrap_or_else(|| "hey-boss".into());
+    let corpus = corpus();
+    let documents = corpus["documents"].as_array().unwrap();
+    let mut mismatches = vec![];
+    for item in documents {
+        std::fs::write(&input, string(item, "source")).unwrap();
+        let run = std::process::Command::new(&cli)
+            .arg("render-markdown")
+            .arg(&input)
+            .arg(&output)
+            .arg("--native")
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "fixture {}: {}",
+            item["id"],
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let ast = serde_json::from_slice(&std::fs::read(&output).unwrap()).unwrap();
+        let actual = canonical(&ast);
+        if actual != item["expected"] {
+            mismatches.push(json!({"id":item["id"],"tests":item["tests"],"source":item["source"],"expected":item["expected"],"actual":actual}));
+        }
+    }
+    std::fs::write(
+        out.join("poe-mismatches.json"),
+        serde_json::to_vec_pretty(&mismatches).unwrap(),
+    )
+    .unwrap();
+    println!(
+        "{}/{} match; mismatches in out/poe-mismatches.json",
+        documents.len() - mismatches.len(),
+        documents.len()
+    );
 }
 
 #[test]
