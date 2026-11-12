@@ -7450,6 +7450,11 @@ func recognizeTurn(_ buffer: AVAudioPCMBuffer, recognizer: SFSpeechRecognizer,
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
     request.append(buffer); request.endAudio()
+    return recognizeRequest(request, recognizer: recognizer, completion: completion)
+}
+
+private func recognizeRequest(_ request: SFSpeechAudioBufferRecognitionRequest, recognizer: SFSpeechRecognizer,
+                              completion: @escaping (Result<String, Error>) -> Void) -> SFSpeechRecognitionTask {
     var transcript = ReviewTranscript(), completed = false
     return recognizer.recognitionTask(with: request) { result, error in onMain {
         guard !completed else { return }
@@ -7989,7 +7994,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var recording: Data?
     private var heldReply = false
     private var transcriptionTask: Task<Void, Never>?
-    private var recordedClips: [Data] = []
+    private var liveTranscript: LiveTranscript?
+    private var finishingTranscript: LiveTranscript?
+    private var recordedClips: [(Data, LiveTranscript?)] = []
     private var transcripts: [String] = []
     private var transcriptionID: UUID?
     private var playedPassages = [String]()
@@ -8516,9 +8523,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if !turnDone { cancelTurn() }
             }
             // The detector sends the buffered opening frames immediately after began.
+            liveTranscript = recognizer.map { LiveTranscript(recognizer: $0) }
             recording = Data(); state(.recording, "Pause or click the voice bubble to send · Esc to cancel")
         case .pcm(let pcm) where phase == .recording:
             recording!.append(pcm); meter.capture(pcm)
+            if let liveTranscript, let format = audio?.format, let buffer = try? recordedBuffer(pcm, format: format) {
+                liveTranscript.input.yield(AnalyzerInput(buffer: buffer))
+            }
             if recording!.count >= 32000 * 120 { endRecording("duration limit") }
         case .ended where phase == .recording: endRecording("pause")
         default: break
@@ -8528,7 +8539,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard let samples = recording else { return }
         ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
         recording = nil; state(.decoding, reason == "duration limit" ? "Two-minute limit reached · Transcribing…" : "Transcribing…")
-        recordedClips.append(samples)
+        liveTranscript?.input.finish()
+        recordedClips.append((samples, liveTranscript)); liveTranscript = nil
         transcribeNext()
     }
     private func transcribeNext() {
@@ -8538,9 +8550,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let text = transcripts.joined(separator: "\n")
             transcripts.removeAll()
             if heldReply {
-                if text.isEmpty && !audio.stopped {
+                if !audio.stopped && (text.isEmpty || (reading && playingThrough > 0 && Self.acknowledgment(text, during: playingPassage))) {
                     heldReply = false
-                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): no words in interruption; resuming reply")
+                    ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): interruption did not take the floor; resuming reply")
                     if playbackPaused { state(.speaking, "Paused") }
                     else {
                         state(reading ? .speaking : .thinking, reading ? "Speaking" : "Thinking…")
@@ -8558,11 +8570,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return
         }
         guard let recognizer else { stop("Dictation unavailable."); return }
-        let samples = recordedClips.removeFirst(), id = UUID()
+        let (samples, live) = recordedClips.removeFirst(), id = UUID()
+        finishingTranscript = live
         transcriptionID = id
         let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
             guard let self, let audio, self.audio === audio, self.transcriptionID == id else { return }
-            self.transcriptionID = nil
+            self.transcriptionID = nil; self.finishingTranscript = nil
             self.timeout?.invalidate(); self.timeout = nil; self.decoding = nil
             switch result {
             case .failure(let error):
@@ -8576,38 +8589,75 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             }
             self.transcribeNext()
         }
-        do {
-            let buffer = try recordedBuffer(samples, format: audio.format)
-            timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
-                guard let self, self.transcriptionID == id else { return }
-                self.transcriptionTask?.cancel(); self.transcriptionTask = nil; self.decoding?.cancel()
-                finish(.failure(StorageError(description: "Dictation timed out.")))
-            }
-            transcriptionTask = Task { @MainActor [weak self] in
-                if SpeechTranscriber.isAvailable, let locale = await SpeechTranscriber.supportedLocale(equivalentTo: recognizer.locale),
-                   await SpeechTranscriber.installedLocales.contains(locale), !Task.isCancelled,
-                   let text = try? await Self.transcribe(buffer, locale: locale) {
-                    guard !Task.isCancelled else { return }
-                    self?.transcriptionTask = nil; finish(.success(text)); return
-                }
+        timeout = Timer.scheduledTimer(withTimeInterval: 25, repeats: false) { [weak self] _ in
+            guard let self, self.transcriptionID == id else { return }
+            self.finishingTranscript?.cancel()
+            self.transcriptionTask?.cancel(); self.transcriptionTask = nil; self.decoding?.cancel()
+            finish(.failure(StorageError(description: "Dictation timed out.")))
+        }
+        transcriptionTask = Task { @MainActor [weak self] in
+            if let live, let text = try? await live.result.value {
                 guard !Task.isCancelled else { return }
-                self?.transcriptionTask = nil
-                self?.decoding = recognizeTurn(buffer, recognizer: recognizer, completion: finish)
+                self?.transcriptionTask = nil; finish(.success(text)); return
             }
-        } catch { finish(.failure(error)) }
+            guard !Task.isCancelled else { return }
+            // Retry from the retained clip only when the streaming recognizer failed.
+            self?.transcriptionTask = nil
+            do {
+                self?.decoding = recognizeTurn(try recordedBuffer(samples, format: audio.format), recognizer: recognizer, completion: finish)
+            } catch { finish(.failure(error)) }
+        }
     }
-    private static func transcribe(_ buffer: AVAudioPCMBuffer, locale: Locale) async throws -> String {
-        let transcriber = SpeechTranscriber(locale: locale, preset: .transcription)
-        let analyzer = SpeechAnalyzer(modules: [transcriber])
-        let (input, producer) = AsyncStream<AnalyzerInput>.makeStream()
-        producer.yield(AnalyzerInput(buffer: buffer)); producer.finish()
-        return try await withTaskCancellationHandler {
-            try await analyzer.start(inputSequence: input)
-            try await analyzer.finalizeAndFinishThroughEndOfInput()
-            var text = ""
-            for try await result in transcriber.results { text += String(result.text.characters) }
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        } onCancel: { Task { await analyzer.cancelAndFinishNow() } }
+    // A short assent is a real answer to a question. Only resume when it overlaps
+    // an explanation; any additional words (including a correction) take the floor.
+    static func acknowledgment(_ text: String, during passage: String) -> Bool {
+        let words = text.lowercased().split(whereSeparator: { !$0.isLetter }).joined(separator: " ")
+        guard ["mm hmm", "mhm", "mmhmm", "uh huh", "yeah", "yep", "right", "okay", "ok"].contains(words),
+              !passage.isEmpty, !passage.contains("?") else { return false }
+        let opening = passage.lowercased().split(whereSeparator: { !$0.isLetter }).prefix(3).joined(separator: " ") + " "
+        return !["do you", "did you", "are you", "would you", "can you", "should i", "shall i", "want me",
+                 "is that", "does that", "let me know", "tell me", "please confirm"].contains { opening.hasPrefix($0 + " ") }
+    }
+    private final class LiveTranscript {
+        let input: AsyncStream<AnalyzerInput>.Continuation
+        let result: Task<String, Error>
+        init(recognizer: SFSpeechRecognizer) {
+            let (stream, producer) = AsyncStream<AnalyzerInput>.makeStream()
+            input = producer
+            result = Task {
+                defer { producer.finish() }
+                if SpeechTranscriber.isAvailable, let locale = await SpeechTranscriber.supportedLocale(equivalentTo: recognizer.locale),
+                   await SpeechTranscriber.installedLocales.contains(locale) {
+                    let module = SpeechTranscriber(locale: locale, preset: .transcription)
+                    let analyzer = SpeechAnalyzer(modules: [module])
+                    return try await withTaskCancellationHandler {
+                        async let text: String = {
+                            var text = ""
+                            for try await result in module.results { text += String(result.text.characters) }
+                            return text
+                        }()
+                        _ = try await analyzer.analyzeSequence(stream)
+                        try await analyzer.finalizeAndFinishThroughEndOfInput()
+                        return try await text
+                    } onCancel: { Task { await analyzer.cancelAndFinishNow() } }
+                }
+                let request = SFSpeechAudioBufferRecognitionRequest()
+                request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
+                let (results, output) = AsyncThrowingStream<String, Error>.makeStream()
+                let task = recognizeRequest(request, recognizer: recognizer) { result in
+                    switch result {
+                    case .success(let text): output.yield(text); output.finish()
+                    case .failure(let error): output.finish(throwing: error)
+                    }
+                }
+                defer { task.cancel() }
+                for await frame in stream { try Task.checkCancellation(); request.append(frame.buffer) }
+                request.endAudio()
+                for try await text in results { return text }
+                throw CancellationError()
+            }
+        }
+        func cancel() { input.finish(); result.cancel() }
     }
     func append(_ text: String, from speaker: String, capture: Capture? = nil) {
         let mine = speaker == "You"
@@ -9234,6 +9284,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func discardPendingSpeech() {
         transcriptionID = nil; transcriptionTask?.cancel(); transcriptionTask = nil
         decoding?.cancel(); decoding = nil
+        liveTranscript?.cancel(); liveTranscript = nil
+        finishingTranscript?.cancel(); finishingTranscript = nil
+        recordedClips.forEach { $0.1?.cancel() }
         recording = nil; recordedClips.removeAll(); transcripts.removeAll()
     }
     func resumeSession(_ id: UUID) -> Bool {
