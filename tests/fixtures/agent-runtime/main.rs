@@ -280,10 +280,6 @@ impl Agent {
 }
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
-    if args == ["--print-path"] {
-        println!("{}", env::current_exe().unwrap().display());
-        return;
-    }
     let flag = |k| args.windows(2).find(|a| a[0] == k).map(|a| a[1].clone());
     let mut agent = Agent {
         provider: setting("PROVIDER").unwrap(),

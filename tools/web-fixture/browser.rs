@@ -4,6 +4,10 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use std::io::Write;
 #[path = "../../tests/support/chrome.rs"]
 mod chrome;
+#[path = "../../tests/support/managed_worker.rs"]
+mod managed_worker;
+#[path = "assignment_deadline.rs"]
+mod assignment_deadline;
 #[path = "pr_handoff.rs"]
 mod pr_handoff;
 #[path = "../../tests/support/worker_fixtures.rs"]

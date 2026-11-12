@@ -1,7 +1,5 @@
 use super::*;
 use std::time::Instant;
-#[path = "../../tests/support/managed_worker.rs"]
-mod managed_worker;
 
 #[test]
 fn installed_pr_handoff() {
