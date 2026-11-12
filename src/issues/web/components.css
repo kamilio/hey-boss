@@ -816,6 +816,7 @@ h1 {
 .navigation-more-links a[aria-current="page"] { color: var(--accent); background: var(--accent-soft); }
 
 @media (max-width: 380px) {
+  .global-navigation > a > [data-icon] { display: none; }
   .header-inner { gap: 8px; padding: 0 12px; }
   .header-divider { display: none; }
   .navigation-inner { gap: 8px; }
