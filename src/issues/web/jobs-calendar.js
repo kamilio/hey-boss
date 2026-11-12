@@ -115,4 +115,3 @@ const HeyBossCalendar=(()=>{
   }
   return {range,shift,dayKey,groupSummary,mount};
 })();
-if(typeof module!=='undefined')module.exports=HeyBossCalendar;
