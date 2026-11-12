@@ -614,6 +614,23 @@ fn configure_pi_registry_updates_aliases_routes_fallbacks_and_removes_competing_
         }
         assert_eq!(std::fs::read_dir(&agent).unwrap().count(), files);
     }
+    // Pi rejects null here, even though the field is optional. Repair files
+    // produced by an earlier configure-pi as well as a fresh provider.
+    for provider in [json!({}), json!({"modelOverrides":null})] {
+        let path = agent.join("models.json");
+        std::fs::write(
+            &path,
+            json!({"providers":{"hey-proxy":provider}}).to_string(),
+        )
+        .unwrap();
+        run();
+        let catalog: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(
+            catalog["providers"]["hey-proxy"]
+                .get("modelOverrides")
+                .is_none()
+        );
+    }
 }
 
 #[test]

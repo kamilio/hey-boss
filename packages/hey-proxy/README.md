@@ -353,7 +353,7 @@ Without a registry, setup preserves existing model limits and safe compaction se
 
 These settings require Pi's per-model compaction support (verified with Pi 0.87.1). Pi also merges project settings from `.pi/settings.json`, which can override generated user settings. Restart Pi after setup to reload model limits and compaction; `/model` alone reloads only the model catalog.
 
-The offline regression check uses an installed Pi without making model requests: after `cargo build`, run `node tests/pi_compaction.mjs /path/to/pi-coding-agent`. An optional second argument replays a saved session JSONL read-only; summaries are simulated to verify the restored output budget.
+With Pi installed, run `cargo test -p hey-proxy --test pi_compaction -- --ignored`. The Rust test runs Pi against a loopback server and measures its output budget before and after compaction. Set `PI_COMPACTION_SESSION` to replay length errors from a saved JSONL session. The test copies each branch into a temporary session; it does not modify the original or contact a model provider.
 
 Normal startup, `--init`, credential checks, and remote rollout do not create or modify Pi files.
 
