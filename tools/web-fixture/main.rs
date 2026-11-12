@@ -20,11 +20,15 @@ mod browser;
 mod controls;
 mod desktop;
 mod fleet;
+mod issue_design;
 mod origin;
 mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Scenario {
+    AssignmentWatch,
+    IssueArchitecture,
+    IssueTimeline,
     IssueStatus,
     IssueListActions,
     ScheduledJobs,
@@ -57,6 +61,9 @@ enum Scenario {
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
+            Self::AssignmentWatch => ("Assignment QA", 48698),
+            Self::IssueArchitecture => ("Issue Design QA", 48122),
+            Self::IssueTimeline => ("Timeline QA", 48948),
             Self::IssueStatus => ("Progress Studio", 4796),
             Self::IssueListActions | Self::ScheduledJobs => ("Quick action QA", 59639),
             Self::LocalHttp => ("Local HTTP QA", 0),
