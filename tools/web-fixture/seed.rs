@@ -1,8 +1,15 @@
 use super::*;
-pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<()> {
+pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
     use Scenario::*;
     let issue = |args: &[&str]| run(f.issue(p, args));
     match s {
+        Origin => return origin::seed(f, p),
+        AgentsNavigation => {
+            f.init("Atlas")?;
+            f.init("Beacon")?;
+            fleet::serve(f, json!([]))?;
+        }
+        AssignedAgent => fleet::assigned_agent(f, p)?,
         ArtifactDiagrams => {
             run(f.command(&[
                 "artifact",
@@ -33,7 +40,7 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<()> {
                 "Save instructions without restarting active work.",
             ])?;
         }
-        LongTitle | IssueReopen | ImagePreview | ListPagination => {}
+        ProjectSettings | QuietHours | LongTitle | IssueReopen | ImagePreview | ListPagination => {}
         Archive => archive::seed(f, p)?,
         QueuePlacement => {
             for (actor, title, options) in [
@@ -232,5 +239,5 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    Ok(json!({}))
 }

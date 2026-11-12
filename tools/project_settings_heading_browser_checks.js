@@ -1,4 +1,4 @@
-// Run against serve_project_settings_fixture.mjs with playwright-cli run-code --filename.
+// Run against the project-settings web-fixture scenario with playwright-cli run-code --filename.
 async (page) => {
   let checks = 0;
   const check = (ok, message) => { if (!ok) throw Error(message); checks++; };
@@ -7,6 +7,8 @@ async (page) => {
     await page.emulateMedia({colorScheme: theme});
     await page.setViewportSize({width, height: 800});
     for (const name of names) {
+      await page.waitForFunction(() => model.project && model.signature);
+      await page.locator('#project-more').click();
       await page.evaluate(name => { model.project.name = name; }, name);
       await page.locator('#project-settings-trigger').click();
       await page.locator('#project-prs').waitFor({state: 'visible'});
@@ -28,7 +30,7 @@ async (page) => {
       await page.getByRole('tab', {name: 'Activity', exact: true}).click();
       check(await heading.isVisible(), 'Headline remains visible across tabs');
       await page.locator('#project-settings-close').click();
-      check(await page.locator('#project-settings-trigger').evaluate(el => el === document.activeElement), 'Closing restores focus');
+      check(await page.locator('#project-more').evaluate(el => el === document.activeElement), 'Closing restores focus');
     }
   }
   console.log(`COMPLETE: ${checks}/${checks} heading checks`);

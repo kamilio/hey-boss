@@ -13,10 +13,17 @@ use std::{
     time::Duration,
 };
 mod archive;
+mod fleet;
+mod origin;
 mod seed;
 
 #[derive(Clone, Copy, ValueEnum)]
 enum Scenario {
+    AgentsNavigation,
+    AssignedAgent,
+    Origin,
+    ProjectSettings,
+    QuietHours,
     ArtifactDiagrams,
     PlanPrompt,
     LivePrompt,
@@ -36,6 +43,11 @@ enum Scenario {
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
+            Self::Origin => ("Origin QA", 59675),
+            Self::AssignedAgent => ("Assignment QA", 59668),
+            Self::AgentsNavigation => ("Home", 59643),
+            Self::ProjectSettings => ("Settings fixture", 59642),
+            Self::QuietHours => ("Quiet hours QA", 59651),
             Self::ArtifactDiagrams => ("Flowchart QA", 59549),
             Self::PlanPrompt => ("Plan QA", 59693),
             Self::LivePrompt => ("Prompt Studio", 4883),
@@ -154,6 +166,13 @@ fn run(mut c: Command) -> Result<Value> {
 fn main() -> Result<()> {
     let args = Args::parse();
     let (project, port) = args.scenario.destination();
+    let port = match (
+        args.scenario,
+        std::env::var("HEY_BOSS_SETTINGS_FIXTURE_PORT"),
+    ) {
+        (Scenario::ProjectSettings, Ok(value)) => value.parse::<u16>()?,
+        _ => port,
+    };
     let (stop, signal) = mpsc::channel();
     ctrlc::set_handler(move || {
         let _ = stop.send(());
@@ -169,7 +188,7 @@ fn main() -> Result<()> {
     };
     let f = Fixture::new(&binary)?;
     f.init(project)?;
-    seed::seed(&f, args.scenario, project)?;
+    let mut info = seed::seed(&f, args.scenario, project)?;
     if matches!(args.scenario, Scenario::Archive) && !archive::wait(&f, &signal)? {
         return Ok(());
     }
@@ -215,10 +234,12 @@ fn main() -> Result<()> {
             .send()?
             .error_for_status()?
             .json()?;
-        println!(
-            "{}",
-            json!({"fixture_pid":std::process::id(),"owner_pid":std::process::id(),"url":url,"native":url.trim_end_matches('/'),"project":boot["project"]["id"]})
-        );
+        info["fixture_pid"] = json!(std::process::id());
+        info["owner_pid"] = info["fixture_pid"].clone();
+        info["url"] = json!(url);
+        info["native"] = json!(url.trim_end_matches('/'));
+        info["project"] = boot["project"]["id"].clone();
+        println!("{info}");
         loop {
             if let Some(status) = web.try_wait()? {
                 return Err(format!("fixture server exited: {status}").into());
