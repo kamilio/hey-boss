@@ -238,12 +238,18 @@ fn job_thread_mode_starts_fresh_by_default_and_resumes_only_when_selected() {
     );
 }
 
+mod worker_fixtures {
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/support/worker_fixtures.rs"
+    ));
+}
+
 fn isolated(name: &str, extra: &[(&str, &str)]) -> bool {
     if std::env::var("HEY_BOSS_JOB_TEST").as_deref() == Ok(name) {
         return false;
     }
-    let fixture =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs");
+    let fixture = worker_fixtures::binary("agent-runtime");
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",

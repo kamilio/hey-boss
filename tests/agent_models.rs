@@ -1,3 +1,5 @@
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use hey_boss::agent_runtime::{
     AgentSession, Event, Launch, ModelSelection, Provider, SessionRef, TurnStatus,
 };
@@ -19,7 +21,7 @@ fn launch(
         codex_execution: Default::default(),
         provider,
         model: selection,
-        binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+        binary: Some(worker_fixtures::binary("agent-runtime")),
         cwd: root,
         resume,
         env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into())]),

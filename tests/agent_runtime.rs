@@ -1,3 +1,5 @@
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use hey_boss::agent_runtime::{AgentSession, Event, Launch, Provider, SessionRef, TurnStatus};
 use std::{
     collections::BTreeMap,
@@ -11,7 +13,7 @@ fn launch(provider: Provider, resume: Option<SessionRef>) -> AgentSession {
         codex_execution: Default::default(),
         model: None,
         provider,
-        binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+        binary: Some(worker_fixtures::binary("agent-runtime")),
         cwd: root,
         resume,
         env: BTreeMap::from([("HEY_BOSS_FIXTURE_PROVIDER".into(), provider.name().into())]),
@@ -451,9 +453,7 @@ fn codex_interruption_terminates_native_tools_before_reporting_success() {
         codex_execution: Default::default(),
         model: None,
         provider: Provider::Codex,
-        binary: Some(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
-        ),
+        binary: Some(worker_fixtures::binary("agent-runtime")),
         cwd: root.clone(),
         resume: None,
         env: BTreeMap::from([
@@ -493,7 +493,7 @@ fn cross_provider_resume_is_rejected_before_spawning() {
         codex_execution: Default::default(),
         model: None,
         provider: Provider::Claude,
-        binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+        binary: Some(worker_fixtures::binary("agent-runtime")),
         cwd: root,
         resume: Some(SessionRef {
             model: None,
@@ -524,7 +524,7 @@ fn executable_lookup_resolves_relative_path_entries_before_changing_cwd() {
     ));
     std::fs::create_dir_all(root.join("bin")).unwrap();
     std::os::unix::fs::symlink(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
+        worker_fixtures::binary("agent-runtime"),
         root.join("bin/pi"),
     )
     .unwrap();
@@ -747,7 +747,7 @@ fn embedding_can_supply_the_owned_agents_explicit_identity() {
             codex_execution: Default::default(),
             model: None,
             provider,
-            binary: Some(root.join("tests/fixtures/agent-runtime.mjs")),
+            binary: Some(worker_fixtures::binary("agent-runtime")),
             cwd: root,
             resume: None,
             env: BTreeMap::from([

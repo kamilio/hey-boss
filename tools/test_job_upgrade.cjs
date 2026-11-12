@@ -24,7 +24,7 @@ const env = {...process.env, GIT_CEILING_DIRECTORIES:root, HOME:path.join(root,'
   HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:state,
   HEY_BOSS_FLEET_CONFIG:path.join(root,'inventory.json'), HEY_BOSS_FLEET_DESIRED:path.join(root,'desired.json'),
   HEY_BOSS_INBOX_SOCKET:path.join(root,'inbox.sock'), HEY_BOSS_AGENT_ID:'human:fixture',
-  HEY_BOSS_CODEX:path.resolve('tests/fixtures/agent-runtime.mjs'), HEY_BOSS_FIXTURE_PROVIDER:'codex',
+  HEY_BOSS_CODEX:execFileSync('cargo',['run','--quiet','--locked','-p','hey-boss','--example','agent-runtime','--','--print-path'],{encoding:'utf8'}).trim(), HEY_BOSS_FIXTURE_PROVIDER:'codex',
   HEY_BOSS_FIXTURE_EXPECT_MODEL:'exact-model', HEY_BOSS_FIXTURE_JOB_HOLD:'1',
   HEY_BOSS_FIXTURE_JOB_AUDIT:path.join(root,'launches.jsonl'),
   HEY_BOSS_FIXTURE_JOB_RELEASE:path.join(root,'release'),

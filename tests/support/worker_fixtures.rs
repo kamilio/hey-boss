@@ -32,6 +32,8 @@ pub fn binary(name: &str) -> PathBuf {
                 "codex-github-watch",
                 "--example",
                 "provider-worker",
+                "--example",
+                "agent-runtime",
                 "--message-format=json-render-diagnostics",
             ])
             .output()

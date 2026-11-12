@@ -1825,7 +1825,7 @@ fn completed_installation_reloads_companion_without_dropping_pending_changes() {
 }
 
 #[test]
-fn scheduled_service_timer_executes_due_job_without_workers() {
+fn scheduled_service_timer_queues_once_and_worker_executes_without_creating_a_task() {
     use serde_json::json;
     const PROJECT: &str = "github.com/fixture/scheduled";
     let f = Fixture::new();
@@ -1899,10 +1899,7 @@ fn scheduled_service_timer_executes_due_job_without_workers() {
     let mut supervisor = Service(
         f.command(&["fleet", "supervisor"])
             .env("HEY_BOSS_FLEET_DESIRED", &desired)
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/agent-runtime.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("agent-runtime"))
             .env("HEY_BOSS_FIXTURE_PROVIDER", "codex")
             .env("HEY_BOSS_FIXTURE_EXPECT_MODEL", "exact-model")
             .env("HEY_BOSS_FIXTURE_JOB_AUDIT", &audit)
@@ -1912,12 +1909,18 @@ fn scheduled_service_timer_executes_due_job_without_workers() {
             .unwrap(),
     );
     let deadline = Instant::now() + Duration::from_secs(20);
-    let mut paused = false;
-    let number = loop {
-        let rows=db.query_collect("SELECT state,task_number,session_id,reason FROM scheduled_job_runs WHERE job_id='timer' AND state!='skipped'",[],|r|Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?))).unwrap();
+    let mut worker = None;
+    loop {
+        let rows = db.query_collect(
+            "SELECT state,task_number,session_id,reason FROM scheduled_job_runs WHERE job_id='timer' AND state!='skipped'",
+            [], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?, r.get::<_,Option<i64>>(1)?,r.get::<_,Option<String>>(2)?,r.get::<_,Option<String>>(3)?))
+        ).unwrap();
         if let Some((state, number, session, _)) = rows.first() {
-            // Pause only future occurrences; the already queued execution proceeds.
-            if !paused {
+            assert_eq!(rows.len(), 1);
+            assert!(number.is_none(), "A scheduled job created an issue");
+            if worker.is_none() {
+                assert!(session.is_none() && !audit.exists());
+                // Pause future occurrences before supplying a worker for this one.
                 f.cli(&[
                     "job",
                     "--project",
@@ -1930,11 +1933,31 @@ fn scheduled_service_timer_executes_due_job_without_workers() {
                     "--if-revision",
                     "1",
                 ]);
-                paused = true;
+                worker = Some(Service(
+                    f.command(&[
+                        "worker",
+                        "--id",
+                        &managed_worker::register(&f.root.join("issues.db")),
+                        "--project",
+                        PROJECT,
+                        "--directory",
+                        checkout.to_str().unwrap(),
+                        "--json",
+                    ])
+                    .env("HEY_BOSS_FLEET_MANAGED", "1")
+                    .env("HEY_BOSS_CODEX", worker_fixtures::binary("agent-runtime"))
+                    .env("HEY_BOSS_FIXTURE_PROVIDER", "codex")
+                    .env("HEY_BOSS_FIXTURE_EXPECT_MODEL", "exact-model")
+                    .env("HEY_BOSS_FIXTURE_JOB_AUDIT", &audit)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+                ));
             }
             if state == "succeeded" {
                 assert!(session.is_some());
-                break *number;
+                break;
             }
             assert_ne!(state, "failed", "{rows:?}");
         }
@@ -1943,7 +1966,7 @@ fn scheduled_service_timer_executes_due_job_without_workers() {
             "Job service did not complete: {rows:?}"
         );
         thread::sleep(Duration::from_millis(100));
-    };
+    }
     assert_eq!(fs::read_to_string(&audit).unwrap().lines().count(), 1);
     assert_eq!(
         db.query_row("SELECT count(*) FROM worker_runs", [], |r| r
@@ -1953,13 +1976,13 @@ fn scheduled_service_timer_executes_due_job_without_workers() {
     );
     assert_eq!(
         db.query_row(
-            "SELECT count(*) FROM issue_pickup_ready WHERE project_id=?1 AND number=?2",
-            rusqlite::params![PROJECT, number],
+            "SELECT count(*) FROM issues WHERE project_id=?1",
+            [PROJECT],
             |r| r.get::<_, i64>(0)
         )
         .unwrap(),
         0
     );
-    assert!(db.query_row("SELECT state='closed' AND job_run_id IS NOT NULL FROM issues WHERE project_id=?1 AND number=?2",rusqlite::params![PROJECT,number],|r|r.get::<_,bool>(0)).unwrap());
+    worker.unwrap().terminate();
     supervisor.terminate();
 }
