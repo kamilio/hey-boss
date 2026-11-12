@@ -1990,9 +1990,7 @@ pub(crate) fn print_text(value: &Value) {
         return;
     }
     let project = &value["project"];
-    let claim = value["instructions"].as_str();
-    if let Some(instructions) = claim {
-        println!("{}\n\n---\n", instructions.trim_end());
+    if value["instructions"].is_string() {
         let issue = &value["issue"];
         println!(
             "#{} [{}] {}",
@@ -2009,7 +2007,10 @@ pub(crate) fn print_text(value: &Value) {
                 labels.iter().map(line).collect::<Vec<_>>().join(", ")
             );
         }
-    } else if value["scope"] != "global" {
+        print_issue_links(issue, "");
+        return;
+    }
+    if value["scope"] != "global" {
         println!("{} ({})", line(&project["name"]), line(&project["id"]));
     }
     if let Some(receipt) = value.get("request") {
@@ -2135,7 +2136,7 @@ pub(crate) fn print_text(value: &Value) {
         ("worktree_enabled", "Worktrees allowed"),
         ("prs_enabled", "PRs enabled"),
     ] {
-        if claim.is_none() && value[key] == true {
+        if value[key] == true {
             println!("{label}: true");
         }
     }
@@ -2275,11 +2276,7 @@ pub(crate) fn print_text(value: &Value) {
         }
     }
     if let Some(issue) = value.get("issue") {
-        if claim.is_some() {
-            print_issue_context(issue);
-        } else {
-            print_issue_line(issue);
-        }
+        print_issue_line(issue);
         if let Some(hold) = issue.get("attempt_hold").filter(|v| v.is_object()) {
             println!(
                 "Task attempt protected · pickup paused\nOwner: {} · Attempt: {}\nProcess: {} · {} · {}\nSource: {} · {}\nLog: {}",
@@ -2365,7 +2362,7 @@ pub(crate) fn print_text(value: &Value) {
             if !text(&issue["body"]).is_empty() {
                 println!("\n{}", markdown(&issue["body"]));
             }
-        } else if claim.is_none() && value["changed"] == false {
+        } else if value["changed"] == false {
             println!("Already in the requested state.");
         }
     }
@@ -2498,12 +2495,6 @@ pub(crate) fn print_text(value: &Value) {
     if let Some(id) = value.get("comment_id").filter(|n| !n.is_null()) {
         println!("Saved comment {id}.");
     }
-    if claim.is_some() {
-        println!(
-            "\nIterations started: {} (agent launches)",
-            value["issue"]["agent_launch_count"].as_u64().unwrap_or(0)
-        );
-    }
 }
 fn status_datetime(value: &Value) -> String {
     let seconds = value.as_i64().unwrap_or(0) / 1000;
@@ -2600,10 +2591,6 @@ fn print_issue_line(issue: &Value) {
             .map(|_| format!(" · created by Codex · {}", line(&issue["origin"]["model"])))
             .unwrap_or_default()
     );
-    print_issue_context(issue);
-}
-
-fn print_issue_context(issue: &Value) {
     if issue["origin_error"]["message"].is_string() {
         println!(
             "  Origin unavailable: {}",
@@ -2725,13 +2712,24 @@ fn print_issue_context(issue: &Value) {
             issue["subtasks"]["closed"], total, issue["subtasks"]["open_descendants"]
         );
     }
-    if let Some(prs) = issue["pull_requests"].as_array() {
-        for pr in prs {
-            println!(
-                "  PR [{}]: {}",
-                pr["purpose"].as_str().unwrap_or("unspecified"),
-                line(&pr["url"])
-            );
+    print_issue_links(issue, "  ");
+}
+
+fn print_issue_links(issue: &Value, indent: &str) {
+    if let Some(links) = issue["pull_requests"].as_array() {
+        for link in links {
+            let url = line(&link["url"]);
+            let base = url.split(['?', '#']).next().unwrap_or(&url);
+            if hey_gh::watcher::pull_request_selector(base).is_some() {
+                match text(&link["purpose"]) {
+                    "" | "unspecified" => println!("{indent}PR: {url}"),
+                    purpose => println!("{indent}PR [{purpose}]: {url}"),
+                }
+            } else if url.starts_with("https://app.asana.com/") {
+                println!("{indent}Asana task: {url}");
+            } else {
+                println!("{indent}Reference: {url}");
+            }
         }
     }
     if let Some(commits) = issue["commits"].as_array() {
@@ -2741,10 +2739,10 @@ fn print_issue_context(issue: &Value) {
                 .unwrap_or_else(|| c["sha"].as_str().unwrap_or(""));
             let title = c["title"].as_str().unwrap_or("");
             if title.is_empty() {
-                println!("  Commit [{short}]: {}", line(&c["url"]));
+                println!("{indent}Commit [{short}]: {}", line(&c["url"]));
             } else {
                 println!(
-                    "  Commit [{short}]: {} · {}",
+                    "{indent}Commit [{short}]: {} · {}",
                     line(&c["url"]),
                     line(&c["title"])
                 );
