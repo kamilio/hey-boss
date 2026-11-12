@@ -3228,7 +3228,6 @@ fn mutate(
             | Operation::Close { .. }
             | Operation::Reopen { .. }
             | Operation::Delete { .. }
-            | Operation::Assign { .. }
     ) {
         attempts::guard(db, &project.id, number)?;
     }
@@ -3244,6 +3243,17 @@ fn mutate(
             reviewed_evidence,
             ..
         } => {
+            // A retained process protects pickup independently of its agent’s claim.
+            let releases_own_claim = target == "unassigned"
+                && actor.id != "human:boss"
+                && issue.assignee.as_deref() == Some(actor.id.as_str())
+                && issue
+                    .attempt_hold
+                    .as_ref()
+                    .is_some_and(|hold| hold["owner"] == actor.id);
+            if !releases_own_claim {
+                attempts::guard(db, &project.id, number)?;
+            }
             data = assignments::assign(
                 db,
                 project,

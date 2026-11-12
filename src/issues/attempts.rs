@@ -1062,11 +1062,23 @@ mod tests {
                 })
                 .is_err()
             );
-            f.apply(Operation::Unassign {
-                number: 1,
-                force: false,
-            })
-            .unwrap();
+            // The CLI uses guarded assignment; older RPC clients release the claim directly.
+            let release = if code == 0 {
+                Operation::Assign {
+                    number: 1,
+                    target: "unassigned".into(),
+                    if_version: f.version(),
+                    reviewed_evidence: None,
+                }
+            } else {
+                Operation::Unassign {
+                    number: 1,
+                    force: false,
+                }
+            };
+            let released = f.apply(release).unwrap();
+            assert!(released["issue"]["assignee"].is_null());
+            assert_eq!(released["issue"]["attempt_hold"]["pid"], f.child.id());
             for _ in 0..8 {
                 assert!(
                     !f.store
