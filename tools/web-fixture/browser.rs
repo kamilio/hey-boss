@@ -316,5 +316,8 @@ mod quick_issue;
 #[path = "subtasks.rs"]
 mod subtasks;
 
+#[path = "dependency_scheduling.rs"]
+mod dependency_scheduling;
+
 #[path = "issue_transfer.rs"]
 mod issue_transfer;
