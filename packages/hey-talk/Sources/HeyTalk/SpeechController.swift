@@ -157,7 +157,7 @@ final class SpeechController {
     private func refresh() {
         let allowed = !sleeping && settings.bundleIDs.contains(NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "")
         onAllowedChanged?(allowed)
-        if recapSource != nil { return } // A requested recap stays with you when you switch apps.
+        if recapSource != nil { overlay.updateCountdown(playback.timeline); return }
         guard !sleeping, let app = NSWorkspace.shared.frontmostApplication, settings.allows(app.bundleIdentifier ?? "") else {
             warmedApp = nil
             if active { stop() } else { candidate = nil; overlay.hide(); sourceHighlight.hide() }
@@ -231,6 +231,7 @@ final class SpeechController {
         if recapSource != nil {
             if active {
                 overlay.showCaption(text: playback.active ? playback.text : "", state: playback.active ? playback.state : .loading)
+                overlay.updateCountdown(playback.timeline)
                 overlay.highlight(playback.highlight)
             } else { recapSource = nil; overlay.hide() }
         } else if let target = reading ?? candidate {

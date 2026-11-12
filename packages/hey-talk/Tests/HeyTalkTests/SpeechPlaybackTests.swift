@@ -29,6 +29,28 @@ final class SpeechPlaybackTests: XCTestCase {
         playback.stop()
         XCTAssertEqual(playback.rate, 1.5)
     }
+    @MainActor func testCountdownWaitsForFullTextThenUsesAudioClockAndListeningRate() throws {
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let player = SpeechPlayback(engine: engine, output: output)
+        try player.start("One sentence.", streaming: true)
+        engine.replies[0](.success(SpeechAudio(samples: Array(repeating: 0, count: 500), sampleRate: 100, final: false)))
+        drain()
+        XCTAssertNil(player.timeline)
+        player.finishStream()
+        XCTAssertEqual(player.timeline?.estimated, true)
+        engine.replies[0](.success(SpeechAudio(samples: Array(repeating: 0, count: 1000), sampleRate: 100)))
+        drain()
+        output.time = 2.5
+        let clock = try XCTUnwrap(player.timeline)
+        XCTAssertFalse(clock.estimated)
+        XCTAssertEqual(clock.fraction, 0.25, accuracy: 0.001)
+        XCTAssertEqual(clock.remaining, 6, accuracy: 0.001)
+        player.togglePause()
+        player.rate = 0.75
+        XCTAssertEqual(player.timeline?.remaining, 10)
+        player.stop()
+        XCTAssertNil(player.timeline)
+    }
     @MainActor func testAudioClockIsSafeBeforeFirstBuffer() {
         let output = NativeSpeechOutput()
         XCTAssertEqual(output.time, 0)

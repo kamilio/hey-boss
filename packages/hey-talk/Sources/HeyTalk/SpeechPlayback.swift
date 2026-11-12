@@ -81,6 +81,9 @@ final class SpeechPlayback {
     private var next = 0
     private var queued = 0
     private var streaming = false
+    private var audioEnd = 0.0
+    private var predictedEnd = 0.0
+    private var pendingEstimate = 0.0
     private var generating = false
     private var generation: UInt64 = 0
     private var started: TimeInterval = 0
@@ -92,6 +95,13 @@ final class SpeechPlayback {
     var active: Bool { [.loading, .playing, .paused].contains(state) }
     var rate: Float { get { output.rate } set { output.rate = min(2, max(0.75, newValue)); onChange?() } }
     var progress: Double { chunks.isEmpty ? 0 : Double(completed) / Double(chunks.count) }
+    var timeline: (fraction: Double, remaining: Double, estimated: Bool)? {
+        guard active, !streaming else { return nil }
+        let total = predictedEnd + max(0, pendingEstimate)
+        guard total > 0 else { return nil }
+        let played = min(output.time, audioEnd)
+        return (min(1, played / total), max(0, total - played) / Double(rate), generating || next < chunks.count)
+    }
     var highlight: SpeechHighlight? {
         guard active else { return nil }
         let time = output.time
@@ -120,6 +130,7 @@ final class SpeechPlayback {
         if active { stop() }
         generation &+= 1
         output.stop()
+        audioEnd = 0; predictedEnd = 0; pendingEstimate = parts.reduce(0) { $0 + $1.estimatedSeconds }
         self.streaming = streaming
         self.text = text; chunks = parts; timings = [:]; next = 0; queued = 0; completed = 0; generating = false
         error = nil; firstAudioMS = nil; started = ProcessInfo.processInfo.systemUptime
@@ -129,6 +140,7 @@ final class SpeechPlayback {
         guard streaming, active else { return }
         let offset = text.utf16.count
         let parts = try SpeechText.segments(sentence)
+        pendingEstimate += parts.reduce(0) { $0 + $1.estimatedSeconds }
         text += sentence
         chunks += parts.map { SpeechSegment(text: $0.text, range: NSRange(location: offset + $0.range.location, length: $0.range.length)) }
         onChange?(); pump()
@@ -136,7 +148,8 @@ final class SpeechPlayback {
     func finishStream() {
         guard streaming else { return }
         streaming = false
-        if completed == chunks.count { output.stop(); state = .idle; onChange?() }
+        if completed == chunks.count { output.stop(); state = .idle }
+        onChange?()
     }
     func togglePause() {
         guard active else { return }
@@ -182,8 +195,11 @@ final class SpeechPlayback {
                     }
                     let beginning = self.timings[index]?.start ?? start
                     let duration = start - beginning + Double(audio.samples.count) / audio.sampleRate
-                    let estimate = Double(text.split(whereSeparator: \.isWhitespace).count) / 2.7
-                    self.timings[index] = TimedSegment(start: beginning, duration: audio.final ? duration : max(duration, estimate), words: [])
+                    let estimate = self.chunks[index].estimatedSeconds
+                    if self.timings[index] == nil { self.pendingEstimate -= estimate }
+                    self.audioEnd = beginning + duration
+                    self.predictedEnd = audio.final ? self.audioEnd : max(self.audioEnd, beginning + estimate)
+                    self.timings[index] = TimedSegment(start: beginning, duration: self.predictedEnd - beginning, words: [])
                     self.queued += 1
                     if self.state != .paused {
                         if self.state == .loading { self.output.play(); self.markFirstAudio() }
