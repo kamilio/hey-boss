@@ -37,12 +37,11 @@ final class SpeechPlaybackTests: XCTestCase {
         drain()
         XCTAssertNil(player.timeline)
         player.finishStream()
-        XCTAssertEqual(player.timeline?.estimated, true)
+        XCTAssertNil(player.timeline)
         engine.replies[0](.success(SpeechAudio(samples: Array(repeating: 0, count: 1000), sampleRate: 100)))
         drain()
         output.time = 2.5
         let clock = try XCTUnwrap(player.timeline)
-        XCTAssertFalse(clock.estimated)
         XCTAssertEqual(clock.fraction, 0.25, accuracy: 0.001)
         XCTAssertEqual(clock.remaining, 6, accuracy: 0.001)
         player.togglePause()

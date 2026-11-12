@@ -51,7 +51,6 @@ final class SpeechOverlay: NSObject {
     private let progress = SpeechProgress()
     private let spinner = NSProgressIndicator()
     private let countdown = SpeechLabel(labelWithString: "")
-    private lazy var captionClick = NSClickGestureRecognizer(target: self, action: #selector(disclosureClicked))
     private var captionExpanded = false
     private var captionMark: SpeechHighlight?
     private var caption = false
@@ -133,7 +132,8 @@ final class SpeechOverlay: NSObject {
         countdown.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
         countdown.textColor = .secondaryLabelColor; countdown.alignment = .right
         countdown.isHidden = true; face.addSubview(countdown)
-        scroll.addGestureRecognizer(captionClick); captionClick.isEnabled = false
+        // The compact disclosure covers the caption. Transport controls stay above it.
+        for button in [disclosure, play, stop] { face.addSubview(button, positioned: .above, relativeTo: nil) }
     }
     // The recap is a speech passage with no source rectangle. Use the same
     // player controls, text storage, and timed word lens as paragraph playback.
@@ -152,7 +152,8 @@ final class SpeechOverlay: NSObject {
             textView.subviews.filter { $0 is SpeechWordLens }.forEach { $0.removeFromSuperview() }
             textView.textStorage?.setAttributedString(snapshot!); snapshotText = text; highlighted = nil
         }
-        caption = true; drawerOpen = true; target = nil; lastState = state; captionClick.isEnabled = true
+        if !caption || text.isEmpty { progress.isHidden = true; countdown.isHidden = true }
+        caption = true; drawerOpen = true; target = nil; lastState = state
         if panel.frame != rect { panel.setFrame(rect, display: true) }
         panel.appearance = NSAppearance(named: .darkAqua)
         if #available(macOS 26, *), let glass = glass as? NSGlassEffectView { glass.style = .regular }
@@ -164,19 +165,18 @@ final class SpeechOverlay: NSObject {
         play.image = NSImage(systemSymbolName: state == .paused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
         play.toolTip = state == .paused ? "Resume Catch Up" : "Pause Catch Up"; play.setAccessibilityLabel(play.toolTip)
         play.isHidden = text.isEmpty; stop.isHidden = false
-        disclosure.frame = CGRect(x: 95, y: 12, width: 100, height: 26)
-        disclosure.isHidden = text.isEmpty; disclosure.imagePosition = .imageLeading
-        disclosure.title = captionExpanded ? " Collapse" : " Transcript"
-        disclosure.image = NSImage(systemSymbolName: captionExpanded ? "chevron.down" : "chevron.up", accessibilityDescription: nil)
-        disclosure.setAccessibilityLabel(captionExpanded ? "Collapse transcript" : "Expand transcript")
-        countdown.isHidden = false
+        disclosure.frame = captionExpanded ? stop.frame.offsetBy(dx: -30, dy: 0) : face.bounds
+        disclosure.isHidden = text.isEmpty; disclosure.isTransparent = !captionExpanded
+        disclosure.imagePosition = .imageOnly; disclosure.title = ""
+        disclosure.image = captionExpanded ? NSImage(systemSymbolName: "chevron.down", accessibilityDescription: nil) : nil
+        disclosure.toolTip = captionExpanded ? "Collapse transcript" : "Expand transcript"
+        disclosure.setAccessibilityLabel(disclosure.toolTip)
         countdown.frame = CGRect(x: width - 168, y: 16, width: 150, height: 17)
-        progress.frame = CGRect(x: 16, y: 6, width: width - 32, height: 3); progress.isHidden = false
+        progress.frame = CGRect(x: 16, y: 6, width: width - 32, height: 3)
         spinner.frame = CGRect(x: width / 2 - 8, y: height - 35, width: 16, height: 16)
         if text.isEmpty { spinner.startAnimation(nil) } else { spinner.stopAnimation(nil) }
         scroll.isHidden = text.isEmpty; scroll.hasVerticalScroller = captionExpanded
-        scroll.toolTip = captionExpanded ? "Click to collapse transcript" : "Click to expand transcript"
-        scroll.frame = CGRect(x: 16, y: 45, width: width - 57, height: height - 62)
+        scroll.frame = CGRect(x: 16, y: 45, width: width - (captionExpanded ? 87 : 57), height: height - 62)
         textView.textContainerInset = .zero
         textView.frame.size.width = scroll.contentSize.width
         if let container = textView.textContainer, let layout = textView.layoutManager {
@@ -188,17 +188,18 @@ final class SpeechOverlay: NSObject {
         }
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
-    func updateCountdown(_ timeline: (fraction: Double, remaining: Double, estimated: Bool)?) {
+    func updateCountdown(_ timeline: (fraction: Double, remaining: Double)?) {
         guard caption else { return }
-        let seconds = Int(ceil(timeline?.remaining ?? 0))
-        let value = timeline.map { ($0.estimated ? "≈ " : "") + String(format: "%d:%02d left", seconds / 60, seconds % 60) } ?? "Estimating…"
+        countdown.isHidden = timeline == nil; progress.isHidden = timeline == nil
+        guard let timeline else { return }
+        let seconds = Int(ceil(timeline.remaining))
+        let value = String(format: "%d:%02d left", seconds / 60, seconds % 60)
         if countdown.stringValue != value { countdown.stringValue = value }
-        let fraction = timeline?.fraction ?? 0
-        if progress.fraction != fraction { progress.fraction = fraction }
+        if progress.fraction != timeline.fraction { progress.fraction = timeline.fraction }
     }
     func show(target: SpeechTarget, state: SpeechState, rate: Float, fraction: Double, error: String?) {
         if caption {
-            countdown.isHidden = true; captionClick.isEnabled = false; scroll.toolTip = nil; disclosure.title = ""; disclosure.imagePosition = .imageOnly
+            countdown.isHidden = true; disclosure.isTransparent = false; disclosure.toolTip = nil
             captionExpanded = false; captionMark = nil; caption = false; snapshotText = nil; panel.appearance = nil
             spinner.stopAnimation(nil); play.isHidden = false; label.isHidden = false
             textView.textContainerInset = NSSize(width: 0, height: 4); scroll.hasVerticalScroller = true
@@ -276,7 +277,13 @@ final class SpeechOverlay: NSObject {
         if !panel.isVisible { panel.orderFrontRegardless() }
     }
     func highlight(_ mark: SpeechHighlight?) {
-        if caption { captionMark = mark }
+        if caption {
+            let position = mark?.follow ?? mark?.range.location
+            if captionExpanded, let position, position != (captionMark?.follow ?? captionMark?.range.location) || highlighted == nil {
+                textView.scrollRangeToVisible(NSRange(location: position, length: 1))
+            }
+            captionMark = mark
+        }
         var next = mark
         if caption, !captionExpanded, let follow = mark?.follow, let range = mark?.range,
            let layout = textView.layoutManager {
@@ -342,7 +349,6 @@ final class SpeechOverlay: NSObject {
             captionExpanded.toggle(); snapshotText = nil
             showCaption(text: text, state: lastState)
             highlight(captionMark)
-            if captionExpanded, let mark = captionMark { textView.scrollRangeToVisible(NSRange(location: mark.follow ?? mark.range.location, length: 1)) }
             return
         }
         guard let target else { return }
