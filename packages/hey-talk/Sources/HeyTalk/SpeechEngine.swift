@@ -7,6 +7,7 @@ import AVFoundation
 struct SpeechAudio {
     let samples: [Float]
     let sampleRate: Double
+    var final = true
 }
 
 // Remote implementations can deliver the same bounded audio chunks. The player
@@ -61,27 +62,34 @@ final class LocalSpeechEngine: SpeechEngine {
             var delivered = false
             do {
                 let (input, output) = try self.worker(ticket)
-                try Wire.write(Wire.json(["text": text]), to: input.fileHandleForWriting.fileDescriptor)
-                let header = try Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 60, limit: 4096)
-                let message = try JSONSerialization.jsonObject(with: header) as? [String: Any]
-                guard let rate = message?["rate"] as? Int, (8_000...96_000).contains(rate),
-                      let count = message?["count"] as? Int, count > 0, count <= rate * 120 else {
-                    throw TalkError(message?["error"] as? String ?? "Invalid speech audio")
+                try Wire.write(Wire.json(["text": text, "stream": true]), to: input.fileHandleForWriting.fileDescriptor)
+                var total = 0, sampleRate = 0
+                while true {
+                    let header = try Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 60, limit: 4096)
+                    let message = try JSONSerialization.jsonObject(with: header) as? [String: Any]
+                    guard let rate = message?["rate"] as? Int, (8_000...96_000).contains(rate),
+                          let count = message?["count"] as? Int, count > 0, count <= rate * 120 - total, sampleRate == 0 || sampleRate == rate else {
+                        throw TalkError(message?["error"] as? String ?? "Invalid speech audio")
+                    }
+                    let data = try Wire.readExactly(count * 4, from: output.fileHandleForReading.fileDescriptor, timeout: 30)
+                    let samples: [Float] = data.withUnsafeBytes { bytes in
+                        stride(from: 0, to: data.count, by: 4).map { bytes.loadUnaligned(fromByteOffset: $0, as: Float.self) }
+                    }
+                    guard samples.allSatisfy(\.isFinite) else { throw TalkError("Invalid speech samples") }
+                    self.lock.lock(); let valid = ticket == self.epoch; self.lock.unlock()
+                    guard valid else { throw TalkError("Speech cancelled") }
+                    sampleRate = rate; total += count
+                    let final = message?["more"] as? Bool != true
+                    delivered = final
+                    completion(.success(SpeechAudio(samples: samples, sampleRate: Double(rate), final: final)))
+                    if final { break }
                 }
-                let data = try Wire.readExactly(count * 4, from: output.fileHandleForReading.fileDescriptor, timeout: 30)
-                let samples: [Float] = data.withUnsafeBytes { bytes in
-                    stride(from: 0, to: data.count, by: 4).map { bytes.loadUnaligned(fromByteOffset: $0, as: Float.self) }
-                }
-                guard samples.allSatisfy(\.isFinite) else { throw TalkError("Invalid speech samples") }
-                self.lock.lock(); let valid = ticket == self.epoch; self.lock.unlock()
-                guard valid else { throw TalkError("Speech cancelled") }
-                delivered = true
-                completion(.success(SpeechAudio(samples: samples, sampleRate: Double(rate))))
+
                 // Audio reaches the player before alignment finishes. Timings
                 // follow on the same private pipe while playback is already running.
                 let alignment = try JSONSerialization.jsonObject(with: Wire.line(from: output.fileHandleForReading.fileDescriptor, timeout: 30, limit: 65_536)) as? [String: Any]
                 timing(SpeechTiming.align(text: text, tokens: alignment?["tokens"] as? [String] ?? [],
-                    times: alignment?["timestamps"] as? [Double] ?? [], duration: Double(count) / Double(rate)))
+                    times: alignment?["timestamps"] as? [Double] ?? [], duration: Double(total) / Double(sampleRate)))
             } catch { self.cancel(ticket: ticket); if !delivered { completion(.failure(error)) } }
         }
     }
@@ -161,10 +169,14 @@ func runSpeechWorker(model: String, voice: String, library: String, alignmentMod
         let request = try Wire.line(from: STDIN_FILENO, timeout: 86_400, limit: 16_384)
         guard let object = try JSONSerialization.jsonObject(with: request) as? [String: Any],
               let text = object["text"] as? String, !text.isEmpty, text.count <= 2_000 else { throw TalkError("Invalid speech chunk") }
-        let audio = try speech.generate(text)
+        let stream = object["stream"] as? Bool == true
+        func send(_ audio: SpeechAudio) throws {
+            try Wire.write(Wire.json(["count": audio.samples.count, "rate": Int(audio.sampleRate), "more": !audio.final]), to: STDOUT_FILENO)
+            try audio.samples.withUnsafeBytes { try Wire.write(Data($0), to: STDOUT_FILENO) }
+        }
+        let audio = try speech.generate(text) { if stream { try send($0) } }
+        if !stream { try send(audio) }
         let data = audio.samples.withUnsafeBytes { Data($0) }
-        try Wire.write(Wire.json(["count": audio.samples.count, "rate": Int(audio.sampleRate)]), to: STDOUT_FILENO)
-        try Wire.write(data, to: STDOUT_FILENO)
         let pcm = try speechAlignmentSamples(data, rate: audio.sampleRate)
         guard let json = alignment.json(samples: pcm) else {
             try Wire.write(Wire.json(["tokens": [], "timestamps": []]), to: STDOUT_FILENO); continue

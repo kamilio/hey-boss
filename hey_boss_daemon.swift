@@ -6766,13 +6766,17 @@ final class ReaderVoice {
         queue.async { try? writer.close(); try? reader.close() }
     }
     deinit { stop() }
+    private var pending = Data()
+    private func refill() throws {
+        let data = output.fileHandleForReading.availableData
+        guard !data.isEmpty else { throw CocoaError(.fileReadUnknown) }
+        pending.append(data)
+    }
     private func message() throws -> [String: Any] {
-        var bytes = Data()
-        while bytes.count < 65_536, let byte = try output.fileHandleForReading.read(upToCount: 1)?.first {
-            if byte == 10, let value = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] { return value }
-            bytes.append(byte)
-        }
-        throw CocoaError(.fileReadCorruptFile)
+        while !pending.contains(10), pending.count < 65_536 { try refill() }
+        guard let end = pending.firstIndex(of: 10), end - pending.startIndex < 65_536,
+              let value = try JSONSerialization.jsonObject(with: pending[..<end]) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+        pending.removeSubrange(...end); return value
     }
     private static let measuredFraction = try! NSRegularExpression(pattern: #"""
         (?ix) (?<![\w./⁄"'“])
@@ -6846,12 +6850,12 @@ final class ReaderVoice {
         fill(to: ranges.count, at: text.utf16.count, frame: frames)
         return result
     }
-    func generate(_ text: String, audio: @escaping (AVAudioPCMBuffer?, [(Int, NSRange)]) -> Void,
+    func generate(_ text: String, audio: @escaping (AVAudioPCMBuffer?, [(Int, NSRange)], Bool) -> Void,
                   timing: @escaping ([(Int, NSRange)]) -> Void) {
         queue.async { [self] in
             let timeout = DispatchWorkItem { [weak self] in self?.stop() }
             DispatchQueue.main.asyncAfter(deadline: .now() + 30, execute: timeout)
-            var delivered = false
+            var finishedAudio = false
             defer { timeout.cancel() }
             do {
                 if !ready {
@@ -6861,35 +6865,47 @@ final class ReaderVoice {
                     ready = true
                 }
                 let reading = Self.spokenMeasurements(text)
-                var request = try JSONSerialization.data(withJSONObject: ["text": reading.text]); request.append(10)
+                var request = try JSONSerialization.data(withJSONObject: ["text": reading.text, "stream": true]); request.append(10)
                 try input.fileHandleForWriting.write(contentsOf: request)
-                let header = try message()
-                guard let rate = header["rate"] as? Int, (8_000...96_000).contains(rate),
-                      let count = header["count"] as? Int, (1...rate*120).contains(count),
-                      let format = AVAudioFormat(standardFormatWithSampleRate: Double(rate), channels: 1),
-                      let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)) else { throw CocoaError(.fileReadCorruptFile) }
-                buffer.frameLength = buffer.frameCapacity
-                let pcm = UnsafeMutableRawPointer(buffer.floatChannelData![0])
-                var offset = 0
-                while offset < count * 4 {
-                    guard let part = try output.fileHandleForReading.read(upToCount: count * 4 - offset), !part.isEmpty else { throw CocoaError(.fileReadUnknown) }
-                    part.copyBytes(to: pcm.advanced(by: offset).assumingMemoryBound(to: UInt8.self), count: part.count); offset += part.count
+                var rate = 0, count = 0, first = 0, frames = 0, estimates: [(Int, NSRange)] = []
+                while true {
+                    let header = try message()
+                    guard let hz = header["rate"] as? Int, (8_000...96_000).contains(hz), rate == 0 || rate == hz,
+                          let n = header["count"] as? Int, n > 0, n <= hz * 120 - count,
+                          let format = AVAudioFormat(standardFormatWithSampleRate: Double(hz), channels: 1),
+                          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n)) else { throw CocoaError(.fileReadCorruptFile) }
+                    let opening = count == 0, final = header["more"] as? Bool != true
+                    rate = hz; count += n
+                    let samples = buffer.floatChannelData![0], pcm = UnsafeMutableRawPointer(samples)
+                    var offset = 0
+                    while offset < n * 4 {
+                        if pending.isEmpty { try refill() }
+                        let size = min(pending.count, n * 4 - offset)
+                        pending.copyBytes(to: pcm.advanced(by: offset).assumingMemoryBound(to: UInt8.self), count: size)
+                        pending.removeFirst(size); offset += size
+                    }
+                    // Trim only passage edges: pauses inside a streamed sentence belong to the voice.
+                    var start = 0, end = n
+                    if opening {
+                        while start < n && abs(samples[start]) < 0.002 { start += 1 }
+                        start = start == n ? 0 : max(0, start - hz / 40)
+                        first = start
+                    }
+                    if final {
+                        while end > start && abs(samples[end - 1]) < 0.002 { end -= 1 }
+                        end = min(n, end + hz / 20)
+                    }
+                    if start > 0 { memmove(samples, samples + start, (end - start) * MemoryLayout<Float>.size) }
+                    buffer.frameLength = AVAudioFrameCount(end - start); frames += end - start
+                    var words: [(Int, NSRange)] = []
+                    if opening || final {
+                        let expected = Double(text.split(whereSeparator: \.isWhitespace).count) / 2.7 * Double(hz)
+                        words = Self.wordTimings(text, [], frames: final ? frames : max(frames, Int(expected)), fractions: reading.fractions)
+                        estimates = words
+                    }
+                    onMain { audio(buffer, words, final) }
+                    if final { finishedAudio = true; break }
                 }
-                // Trim silence on both edges of each clip. Keep
-                // a short breath and protect quiet consonants near the boundary.
-                let samples = buffer.floatChannelData![0]
-                var first = 0, end = count
-                while first < count && abs(samples[first]) < 0.002 { first += 1 }
-                if first < count {
-                    while end > first && abs(samples[end - 1]) < 0.002 { end -= 1 }
-                    first = max(0, first - rate / 40)       // 25 ms before the first audible sample
-                    end = min(count, end + rate / 20)       // 50 ms after the last audible sample
-                    if first > 0 { memmove(samples, samples + first, (end - first) * MemoryLayout<Float>.size) }
-                    buffer.frameLength = AVAudioFrameCount(end - first)
-                } else { first = 0 }
-                let estimates = Self.wordTimings(text, [], frames: Int(buffer.frameLength), fractions: reading.fractions)
-                delivered = true
-                onMain { audio(buffer, estimates) }
                 let alignment = try message(), tokens = alignment["tokens"] as? [String] ?? [], times = alignment["timestamps"] as? [Double] ?? []
                 var spoken: [(String, Int)] = []
                 let subwords = tokens.contains { $0.hasPrefix("▁") || $0.hasPrefix(" ") }
@@ -6897,11 +6913,11 @@ final class ReaderVoice {
                     if token.hasPrefix("▁") || token.hasPrefix(" ") || !subwords || spoken.isEmpty { spoken.append(("", Int(seconds * Double(rate)))) }
                     spoken[spoken.count-1].0 += token.trimmingCharacters(in: CharacterSet(charactersIn: "▁ ")).lowercased()
                 }
-                let words = spoken.isEmpty ? estimates : Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: Int(buffer.frameLength), fractions: reading.fractions)
+                let words = spoken.isEmpty ? estimates : Self.wordTimings(text, spoken.map { ($0.0, $0.1 - first) }, frames: frames, fractions: reading.fractions)
                 onMain { timing(words) }
             } catch {
-                if !delivered { onMain { audio(nil, []) } }
-                else { stop() } // Already playing: never repeat this passage in the fallback voice.
+                if !finishedAudio { onMain { audio(nil, [], true) } }
+                stop() // Already playing: never repeat this passage in the fallback voice.
             }
         }
     }
@@ -7248,10 +7264,16 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
         }
         if let readerVoice {
-            readerVoice.generate(passage.utterance.speechString, audio: { [weak self] buffer, words in
+            readerVoice.generate(passage.utterance.speechString, audio: { [weak self] buffer, words, final in
                 guard let self, !self.stopped, self.rendering === passage else { return }
-                guard let buffer else { readerVoice.stop(); self.readerVoice = nil; systemVoice(); return }
-                passage.words = words; passage.append(buffer); complete()
+                guard let buffer else {
+                    readerVoice.stop(); self.readerVoice = nil
+                    if passage.frames == 0 { systemVoice() } else { complete() }
+                    return
+                }
+                if !words.isEmpty { passage.words = words }
+                passage.append(buffer)
+                if final { complete() }
             }, timing: { [weak passage] words in
                 passage?.words = words
             })

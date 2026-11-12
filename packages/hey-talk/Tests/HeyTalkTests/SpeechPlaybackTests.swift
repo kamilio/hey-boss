@@ -136,6 +136,27 @@ final class SpeechPlaybackTests: XCTestCase {
         XCTAssertEqual(engine.requests.count, 3)
         playback.stop()
     }
+    @MainActor func testPartialAudioPlaysAndPrefetchCountsSentences() throws {
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let player = SpeechPlayback(engine: engine, output: output)
+        try player.start("First sentence. Second sentence.")
+        let partial = SpeechAudio(samples: [0.1], sampleRate: 24000, final: false)
+        engine.replies[0](.success(partial))
+        drain()
+        XCTAssertEqual(player.state, .playing)
+        player.togglePause()
+        for _ in 0..<3 { engine.replies[0](.success(partial)) }
+        drain()
+        XCTAssertEqual(engine.requests.count, 1)
+        engine.replies[0](.success(SpeechAudio(samples: [0.1], sampleRate: 24000)))
+        drain()
+        XCTAssertEqual(player.state, .paused)
+        XCTAssertEqual(engine.requests.count, 2)
+        player.stop()
+        engine.replies[1](.success(partial))
+        drain()
+        XCTAssertEqual(output.completions.count, 5)
+    }
     @MainActor func testPauseDuringLoadingAndCancellationDiscardLateAudio() throws {
         let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
         let playback = SpeechPlayback(engine: engine, output: output)

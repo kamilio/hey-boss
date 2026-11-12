@@ -4500,16 +4500,17 @@ func auditSpeechHelper() {
     guard let voice = ReaderVoice() else { preconditionFailure("Install Hey Talk before testing the shared speech helper") }
     defer { voice.stop() }
     for text in ["Hello there. This paragraph can now be read aloud.", "Your appointment is on November 5th at 9:15 p.m. Add one and a half teaspoons of salt."] {
-        var done = false, receivedAudio = false
-        voice.generate(text, audio: { buffer, words in
-            precondition(!receivedAudio && !done, "Deliver audio exactly once, before alignment")
+        var done = false, chunks = 0, finishedAudio = false, audible = false
+        let started = ProcessInfo.processInfo.systemUptime
+        voice.generate(text, audio: { buffer, words, final in
+            precondition(!done && !finishedAudio)
             guard let buffer else { preconditionFailure("Shared speech helper did not produce audio") }
-            precondition(buffer.format.sampleRate == 24_000)
-            precondition(buffer.frameLength > 1_000 && !words.isEmpty)
-            precondition((0..<Int(buffer.frameLength)).contains { abs(buffer.floatChannelData![0][$0]) > 0.01 })
-            receivedAudio = true
+            precondition(buffer.format.sampleRate == 24_000 && buffer.frameLength > 0)
+            if chunks == 0 { precondition(!words.isEmpty); print("First speech block: " + String(Int((ProcessInfo.processInfo.systemUptime - started) * 1000)) + " ms") }
+            audible = audible || (0..<Int(buffer.frameLength)).contains { abs(buffer.floatChannelData![0][$0]) > 0.01 }
+            chunks += 1; finishedAudio = final
         }, timing: { _ in
-            precondition(receivedAudio, "Timing must not gate audio delivery")
+            precondition(chunks > 1 && audible && finishedAudio, "Stream audio before alignment")
             done = true
         })
         let deadline = Date().addingTimeInterval(30)
