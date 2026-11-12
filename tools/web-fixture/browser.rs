@@ -346,6 +346,9 @@ mod assignment_states;
 #[path = "issue_list.rs"]
 mod issue_list;
 
+#[path = "large_markdown.rs"]
+mod large_markdown;
+
 #[path = "artifact_reader.rs"]
 mod artifact_reader;
 
