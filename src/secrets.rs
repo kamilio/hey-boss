@@ -17,10 +17,17 @@ pub fn open() -> Result<Store> {
     )
 }
 
-/// Installer entry point: creates a machine identity, never grants record access.
-pub fn install() -> Result<()> {
+pub fn initialize(store: &mut Store, label: &str) -> Result<hey_boss_secrets::Enrollment> {
     let home = home()?;
     backend::prepare_native(&home)?;
+    let card = store.initialize(label)?;
+    #[cfg(target_os = "macos")]
+    backend::Keychain::migrate_identity(&home, &card)?;
+    Ok(card)
+}
+
+/// Installer entry point: creates a machine identity, never grants record access.
+pub fn install() -> Result<()> {
     let mut label = [0u8; 256];
     let label = if unsafe { libc::gethostname(label.as_mut_ptr().cast(), label.len()) } == 0 {
         String::from_utf8_lossy(&label[..label.iter().position(|b| *b == 0).unwrap_or(label.len())])
@@ -28,7 +35,7 @@ pub fn install() -> Result<()> {
     } else {
         "local".into()
     };
-    let initialized = open()?.initialize(&label);
+    let initialized = initialize(&mut open()?, &label);
     #[cfg(target_os = "macos")]
     let initialized = match initialized {
         Err(Error::StoreUnavailable) => {

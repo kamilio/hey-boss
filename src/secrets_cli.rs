@@ -104,11 +104,10 @@ fn execute(options: &Options) -> Result<()> {
             json(serde_json::json!({"installed":true}))
         }
         Action::Init { label } => {
-            backend::prepare_native(&hey_boss::secrets::home()?)?;
             let label = label
                 .clone()
                 .unwrap_or_else(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into()));
-            json(store.initialize(&label)?)
+            json(hey_boss::secrets::initialize(&mut store, &label)?)
         }
         Action::Identity => json(store.enrollment()?),
         Action::Trust { file } => {
