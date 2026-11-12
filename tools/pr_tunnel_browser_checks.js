@@ -1,4 +1,4 @@
-// Run with playwright-cli after chief_metadata_checks.mjs --pr-attachments --serve.
+// Run with playwright-cli after cargo run --example chief-metadata -- --pr-attachments --serve.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };

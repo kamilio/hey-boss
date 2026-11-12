@@ -1,4 +1,4 @@
-// Run with playwright-cli against chief_metadata_checks.mjs --moves --serve.
+// Run with playwright-cli against cargo run --example chief-metadata -- --moves --serve.
 // Screenshots use /tmp/hb-move-visual; remove it after visual inspection.
 async page => {
   const checks = [], errors = [];

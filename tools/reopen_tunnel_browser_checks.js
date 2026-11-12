@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code --filename after chief_metadata_checks.mjs --reopen --serve.
+// Run with playwright-cli run-code --filename after cargo run --example chief-metadata -- --reopen --serve.
 async page => {
   const checks = [], errors = [];
   const check = (ok, name) => { if (!ok) throw Error(name); checks.push(name); };

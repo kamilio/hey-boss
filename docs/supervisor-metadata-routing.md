@@ -36,7 +36,7 @@ Label edits work for an unassigned closed issue and an issue assigned to a live
 worker. They leave lifecycle, ownership and reservations unchanged. Title/body
 corrections use the same version guard. Batches retain their all-or-nothing
 version/owner checks. This route preserves the original actor and normal
-authorization, including the restriction on the `yolo` label; it does not act as
+authorization; it does not act as
 Boss or acquire/release work.
 
 Ordinary `issue edit NUMBER --draft --request-id ID` routes
@@ -87,15 +87,15 @@ protection and issue 56's general batch semantics.
 Verification uses `cargo test --locked -p hey-boss --lib --test issues --test
 fleet_native --test issue_allocation`, including real supervisor/companion
 transport, replay, stale guards, unsupported operations and disconnected failure.
-Run `HEY_BOSS_TEST_BINARY=/path/to/hey-boss node tools/chief_metadata_checks.mjs`
-to qualify an installed binary against eighteen private fleet stages. It requires
+Run `HEY_BOSS_TEST_BINARY=/path/to/hey-boss cargo run --example chief-metadata --`
+to qualify an installed binary over a private supervisor/companion connection. It requires
 normal exits and removes its services and temporary stores. Add `--serve` for the
 57-assertion `tools/chief_metadata_browser_checks.js` visual session, then stop
 the fixture and require its cleanup completion message. The 75-assertion
 `tools/fleet_tunnel_browser_checks.js` session additionally covers guarded drafts,
 tunnel recovery, phone layouts, and the committed draft response before replica sync.
 
-Reopen qualification adds `--reopen` to the private-fleet command (23 stages).
+Reopen qualification adds `--reopen` to the private-fleet command.
 With `--serve`, run `tools/reopen_tunnel_browser_checks.js` through Playwright CLI:
 161 checks cover reopened, dependency-blocked and actively owned issues at
 1440, 768, 390 and 320 pixels in light/dark themes. The Rust `fleet_tunnel`
