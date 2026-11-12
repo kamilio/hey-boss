@@ -187,7 +187,7 @@ final class Overlay {
     var onShowHistory: (() -> Void)?
     var onStartConversation: (() -> Void)?
     var onOpenTranscript: (() -> Void)?
-    var onChatWithContext: (() -> Void)?
+    var onCatchUpAndTalk: (() -> Void)?
     var onInterruptConversation: (() -> Void)?
     var onStopConversation: (() -> Void)?
     var speechEnabled: () -> Bool = { false }
@@ -578,7 +578,7 @@ final class Overlay {
         menu.addItem(.sectionHeader(title: "Conversation"))
         let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
         start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
-        let context = NSMenuItem(title: "Chat with Context", action: #selector(chatWithContext), keyEquivalent: "m")
+        let context = NSMenuItem(title: "Catch Up and Talk", action: #selector(catchUpAndTalk), keyEquivalent: "m")
         context.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         context.target = self; menu.addItem(context)
         menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Setup"))
@@ -606,7 +606,7 @@ final class Overlay {
     }
     @objc private func startConversation() { onStartConversation?() }
     @objc private func openTranscript() { onOpenTranscript?() }
-    @objc private func chatWithContext() { onChatWithContext?() }
+    @objc private func catchUpAndTalk() { onCatchUpAndTalk?() }
     @objc private func interruptConversation() { onInterruptConversation?() }
     @objc private func stopConversation() { onStopConversation?() }
     private func updateModeAppearance() {

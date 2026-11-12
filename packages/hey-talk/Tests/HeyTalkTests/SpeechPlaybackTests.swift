@@ -214,6 +214,31 @@ final class SpeechPlaybackTests: XCTestCase {
         XCTAssertNil(playback.error)
         playback.stop()
     }
+    @MainActor func testRecapHandoffWaitsForPlaybackAndNeverRunsAfterInterruption() throws {
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let player = SpeechPlayback(engine: engine, output: output)
+        var heard: [String] = []
+        for action in ["stop", "fail", "replace", "resume", "finish while paused"] {
+            try player.start("An update.", streaming: true)
+            engine.replies.last?(.success(SpeechAudio(samples: [0], sampleRate: 100)))
+            drain()
+            let played = try XCTUnwrap(output.completions.last)
+            player.togglePause()
+            if action == "finish while paused" { played() }
+            let previous = heard.count
+            player.finishStream { heard.append($0) }
+            XCTAssertEqual(heard.count, previous)
+            switch action {
+            case "stop": player.stop()
+            case "fail": player.fail("Audio lost")
+            case "replace": try player.start("Replacement.")
+            default: player.togglePause()
+            }
+            played()
+            XCTAssertEqual(heard.count, previous + (["resume", "finish while paused"].contains(action) ? 1 : 0))
+        }
+        XCTAssertEqual(heard, ["An update.", "An update."])
+    }
     @MainActor private func drain() {
         let done = expectation(description: "main callbacks")
         DispatchQueue.main.async { done.fulfill() }
