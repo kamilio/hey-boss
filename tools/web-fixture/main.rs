@@ -14,6 +14,8 @@ use std::{
 };
 mod agents;
 mod archive;
+#[cfg(test)]
+mod browser;
 
 mod controls;
 mod desktop;
