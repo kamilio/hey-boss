@@ -292,3 +292,6 @@ mod issue_links;
 
 #[path = "navigation.rs"]
 mod navigation;
+
+#[path = "workers.rs"]
+mod workers;

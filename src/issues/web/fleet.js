@@ -191,7 +191,6 @@ function fleetAttention(data,now=Date.now()) {
   }
   return notices;
 }
-if (typeof module !== 'undefined') module.exports = {syncProblem, fleetAttention, fleetView, elapsed, projectView, agentState, scheduledRetries, retryLabel, deviceView, assignedAgentEntry, resolveAssignedAgent, managedFleet, workerPhase, slotUsage, projectWorkers, workerCapacityUpdate, workerLimitState, configurationProblems, jobConversation};
 if (typeof document !== 'undefined') (() => {
   const $ = id => document.getElementById(id);
   const element = (tag, cls, text) => {const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e;};
