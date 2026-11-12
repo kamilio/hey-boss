@@ -1,4 +1,4 @@
-// Run through playwright-cli run-code with serve_live_prompt_fixture.mjs active.
+// Run on the URL printed by cargo run --example web-fixture -- live-prompt.
 async page => {
  const checks=[],errors=[];
  const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};

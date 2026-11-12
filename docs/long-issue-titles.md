@@ -24,10 +24,10 @@ Verification:
 - `node tools/test_quick_issue.js`
 - Native Quick Add audit described in [native-quick-issue.md](native-quick-issue.md),
   including long-title request contents, retries, and light/dark window captures.
-- `node tools/serve_long_title_fixture.mjs [path-to-built-hey-boss]` starts an
-  isolated native server at port 59653 and paired relay at port 52053. Pair using
-  the synthetic code from `/fixture-pairing`, then run
-  `tools/long_title_browser_checks.js` with Playwright CLI on each surface. It
+- Build the CLI with `cargo build --locked -p hey-boss --bin hey-boss`, then run
+  `cargo run --locked -p hey-boss --example web-fixture -- long-title`.
+  Open the printed native URL (port 59653) and run
+  `tools/long_title_browser_checks.js` with Playwright CLI. It
   checks 320–1440 px layouts in light/dark mode, full creation and reload,
   Unicode byte boundaries, complete descriptions, and lost-response retries.
   Stop the fixture with SIGINT to remove its processes and temporary store.

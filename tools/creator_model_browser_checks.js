@@ -1,4 +1,4 @@
-// Run via playwright-cli run-code with serve_creator_model_fixture.mjs.
+// Run on the URL printed by cargo run --example web-fixture -- creator-model.
 async page => {
   const checks = [], errors = [];
   page.on('pageerror',error=>errors.push(error.message));

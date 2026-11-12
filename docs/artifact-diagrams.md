@@ -1,7 +1,7 @@
 # Diagrams in artifacts
 
 Artifacts render fenced `mermaid` blocks as diagrams in the reader and editor
-preview, both locally and in the paired mobile app. For example:
+preview. For example:
 
 ````markdown
 ```mermaid
@@ -20,7 +20,7 @@ and renders diagrams as they approach the viewport. It uses strict security mode
 SVG text labels, and bounded source/edge counts. Diagram styles follow the system
 light/dark appearance. It does not load a CDN or enable diagram links/callbacks.
 
-To verify the production native and paired-mobile UI, build the mobile app and
-CLI, run `node tools/serve_artifact_diagrams_fixture.mjs`, then use Playwright CLI
-to open each fixture URL and run `tools/artifact_diagrams_browser_checks.js`.
-The fixture uses an isolated database and removes it when stopped.
+To verify the native web UI, build the CLI with `cargo build --locked -p hey-boss --bin hey-boss`.
+Run `cargo run --locked -p hey-boss --example web-fixture -- artifact-diagrams`, open
+the printed URL, and run `tools/artifact_diagrams_browser_checks.js` with Playwright CLI.
+Stop the fixture with Ctrl+C to remove its isolated database.
