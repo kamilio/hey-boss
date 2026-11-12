@@ -70,16 +70,12 @@ fn mentions_and_task_labels() {
             "{text}"
         );
     }
-    assert!(
-        call("parse", json!(["Fix @poe-code", duplicates, current]))
-            .unwrap_err()
-            .contains("ambiguous")
-    );
-    assert!(
-        call("parse", json!(["Fix", projects, null]))
-            .unwrap_err()
-            .contains("project")
-    );
+    assert!(call("parse", json!(["Fix @poe-code", duplicates, current]))
+        .unwrap_err()
+        .contains("ambiguous"));
+    assert!(call("parse", json!(["Fix", projects, null]))
+        .unwrap_err()
+        .contains("project"));
     for (text, caret, start, end, query) in [
         ("Fix @po reconnect", 7, 4, 7, "po"),
         ("Fix @poe-code reconnect", 7, 4, 13, "po"),
@@ -289,13 +285,12 @@ fn create_from_each_surface_and_retry_a_lost_reply() {
     ] {
         fill(&mut p, input);
         key(&mut p, "Enter", 13, 0);
-        assert!(
-            p.eval("document.querySelector('#quick-issue-error').innerText")
-                .unwrap()
-                .as_str()
-                .unwrap()
-                .contains(error)
-        );
+        assert!(p
+            .eval("document.querySelector('#quick-issue-error').innerText")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains(error));
     }
     key(&mut p, "Escape", 27, 0);
     p.wait("document.querySelector('#editor-dialog').open && !document.querySelector('#quick-issue-dialog').open");
@@ -361,4 +356,167 @@ fn create_from_each_surface_and_retry_a_lost_reply() {
         .unwrap(),
         1
     );
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn task_intent_and_queue_placement_survive_drafts_and_retries() {
+    let f = installed_fixture();
+    let project = "Task intent";
+    f.init(project).unwrap();
+    run(f.issue(project, &["create", "--title", "Existing"])).unwrap();
+    let (_web, base) = web(&f, project);
+    let url = format!("{base}/#project=named%3ATask+intent");
+    let mut p = Page::open("about:blank");
+    p.command("Page.enable", json!({})).unwrap();
+    p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);window.click=s=>el(s).click();window.setField=(s,v)=>{const e=el(s);e.value=v;e.dispatchEvent(new Event(e.tagName==='SELECT'?'change':'input',{bubbles:true}))};window.issueOrder=()=>[...document.querySelectorAll('#list-view .issue-row[data-issue-number]')].map(e=>Number(e.dataset.issueNumber));addEventListener('error',e=>window.name=e.message)"})).unwrap();
+    p.command("Page.navigate", json!({"url":url})).unwrap();
+    let order = |p: &mut Page, numbers: &[u32]| {
+        p.wait(&format!(
+            "JSON.stringify(issueOrder())==='{}'",
+            json!(numbers)
+        ))
+    };
+    let view = |number: &str| run(f.issue(project, &["view", number])).unwrap()["issue"].clone();
+    order(&mut p, &[1]);
+    for (kind, number) in [("implement", "2"), ("plan", "3")] {
+        p.eval("click('#new-issue')").unwrap();
+        p.wait("el('#editor-dialog').open && !el('#editor-bottom').checked && el('#editor-kind').value==='implement'");
+        p.eval(&format!("setField('#editor-kind',{0});setField('#editor-subject','Review '+{0});setField('#editor-body','Keep the requirements.');setField('#editor-labels','ready, design');el('#editor-subject').focus()",json!(kind))).unwrap();
+        if kind == "implement" {
+            key(&mut p, "B", 66, 12);
+            assert_eq!(p.eval("el('#editor-bottom').checked").unwrap(), true);
+            p.eval("click('#editor-cancel');click('#new-issue')")
+                .unwrap();
+            p.wait(
+                "el('#editor-bottom').checked && el('#editor-subject').value==='Review implement'",
+            );
+        }
+        p.eval("click('#editor-submit')").unwrap();
+        p.wait("!el('#editor-dialog').open");
+        order(
+            &mut p,
+            if kind == "implement" {
+                &[1, 2]
+            } else {
+                &[3, 1, 2]
+            },
+        );
+        p.wait(&format!(
+            "el('.issue-created')?.dataset.issueNumber==='{number}'"
+        ));
+        let issue = view(number);
+        assert_eq!(issue["body"], "Keep the requirements.");
+        let mut labels = issue["labels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>();
+        labels.sort();
+        assert_eq!(
+            labels,
+            if kind == "plan" {
+                vec!["design", "ready", "task:plan"]
+            } else {
+                vec!["design", "ready"]
+            }
+        );
+    }
+    p.eval("click('[data-issue-number=\"3\"] .issue-title')")
+        .unwrap();
+    p.wait("el('[data-edit]')?.checkVisibility()");
+    p.eval("click('[data-edit]')").unwrap();
+    assert_eq!(p.eval("el('#editor-kind').value==='plan' && !el('#editor-tags .tag-chips').textContent.includes('task:') && !el('#editor-bottom-control').checkVisibility()").unwrap(),true);
+    key(&mut p, "B", 66, 10);
+    assert_eq!(p.eval("el('#editor-bottom').checked").unwrap(), false);
+    p.eval("setField('#editor-kind','implement');click('#editor-cancel');click('[data-edit]')")
+        .unwrap();
+    assert_eq!(p.eval("el('#editor-kind').value").unwrap(), "implement");
+    p.eval("click('#editor-submit')").unwrap();
+    p.wait("!el('#editor-dialog').open");
+    let issue = view("3");
+    assert_eq!(issue["body"], "Keep the requirements.");
+    assert_eq!(issue["labels"].as_array().unwrap().len(), 2);
+    assert!(["ready", "design"]
+        .iter()
+        .all(|name| issue["labels"].as_array().unwrap().contains(&json!(name))));
+    p.wait("el('[data-edit]')?.checkVisibility()");
+    p.eval("click('[data-edit]');setField('#editor-kind','plan');click('#editor-submit')")
+        .unwrap();
+    p.wait("!el('#editor-dialog').open");
+    p.command("Page.navigate", json!({"url":url})).unwrap();
+    order(&mut p, &[3, 1, 2]);
+    open(&mut p);
+    assert_eq!(p.eval("el('#quick-issue-bottom').checked").unwrap(), false);
+    fill(&mut p, "Quick plan");
+    p.eval("setField('#quick-issue-kind','plan')").unwrap();
+    key(&mut p, "B", 66, 10);
+    key(&mut p, "Escape", 27, 0);
+    open(&mut p);
+    p.wait("el('#quick-issue-bottom').checked && el('#quick-issue-kind').value==='plan'");
+    p.eval("window.creates=[];const send=window.fetch.bind(window);window.fetch=(url,options)=>{if(url==='/api/action'){const req=JSON.parse(options.body);if(req.operation.action==='create'){creates.push(req);if(creates.length===1)return Promise.resolve(Response.json({ok:false,error:{message:'Interrupted'}},{status:503}))}}return send(url,options)}").unwrap();
+    p.eval("click('#quick-issue-submit')").unwrap();
+    p.wait("el('#quick-issue-error').innerText.includes('Interrupted') && el('#quick-issue-title').value==='Quick plan' && el('#quick-issue-kind').value==='plan'");
+    p.eval("click('#quick-issue-submit')").unwrap();
+    order(&mut p, &[3, 1, 2, 4]);
+    assert_eq!(p.eval("creates.length===2 && !!creates[0].request_id && JSON.stringify(creates[0])===JSON.stringify(creates[1])").unwrap(),true);
+    assert_eq!(view("4")["labels"], json!(["task:plan"]));
+    open(&mut p);
+    assert_eq!(
+        p.eval("!el('#quick-issue-bottom').checked && el('#quick-issue-kind').value==='implement'")
+            .unwrap(),
+        true
+    );
+    fill(&mut p, "Quick implementation");
+    key(&mut p, "Enter", 13, 0);
+    order(&mut p, &[5, 3, 1, 2, 4]);
+    p.eval("window.beforeReload=true").unwrap();
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait("!window.beforeReload && el('#list-view')?.checkVisibility()");
+    order(&mut p, &[5, 3, 1, 2, 4]);
+    for theme in ["light", "dark"] {
+        p.command("Emulation.setEmulatedMedia",json!({"features":[{"name":"prefers-color-scheme","value":theme},{"name":"prefers-reduced-motion","value":"reduce"}]})).unwrap();
+        for width in [1440, 768, 390, 320] {
+            p.command("Emulation.setDeviceMetricsOverride",json!({"width":width,"height":if width<=390{844}else{1000},"deviceScaleFactor":1,"mobile":false})).unwrap();
+            assert_eq!(
+                p.eval("document.querySelectorAll('#list-view .task-kind-badge').length")
+                    .unwrap(),
+                2
+            );
+            screenshot(&mut p, "out/task-intent", &format!("list-{theme}-{width}"));
+            for (prefix, open, placement) in [
+                ("editor", "#new-issue", "#editor-bottom-control"),
+                ("quick-issue", "#quick-issue-open", "#quick-issue-bottom"),
+            ] {
+                p.eval(&format!("click({})", json!(open))).unwrap();
+                p.wait(&format!(
+                    "el('#{prefix}-dialog').open && !el('#{prefix}-kind').disabled"
+                ));
+                p.eval(&format!(
+                    "setField('#{prefix}-kind','plan');el('#{prefix}-kind').focus()"
+                ))
+                .unwrap();
+                assert_eq!(p.eval(&format!("(()=>{{const e=el('#{prefix}-kind'),d=el('#{prefix}-dialog'),r=d.getBoundingClientRect();return el('{placement}').checkVisibility() && e===document.activeElement && e.labels.length>0 && (innerWidth>390||parseFloat(getComputedStyle(e).fontSize)>=16) && r.left>=0 && r.right<=innerWidth+1 && d.scrollWidth<=d.clientWidth+1}})()")).unwrap(),true,"{prefix} {theme}/{width}");
+                if prefix == "editor" {
+                    assert_eq!(
+                        p.eval("el('#editor-kind-help').textContent").unwrap(),
+                        "A concrete plan, saved as a linked artifact."
+                    );
+                }
+                screenshot(
+                    &mut p,
+                    "out/task-intent",
+                    &format!("{prefix}-{theme}-{width}"),
+                );
+                key(&mut p, "Escape", 27, 0);
+                p.wait(&format!("!el('#{prefix}-dialog').open"));
+            }
+            assert_eq!(
+                p.eval("document.documentElement.scrollWidth<=innerWidth+1 && !window.name")
+                    .unwrap(),
+                true
+            );
+        }
+    }
 }
