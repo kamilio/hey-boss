@@ -10,6 +10,8 @@ mod managed_worker;
 mod assignment_deadline;
 #[path = "project_checkouts.rs"]
 mod project_checkouts;
+#[path = "settings_heading.rs"]
+mod settings_heading;
 #[path = "pr_handoff.rs"]
 mod pr_handoff;
 #[path = "../../tests/support/worker_fixtures.rs"]
