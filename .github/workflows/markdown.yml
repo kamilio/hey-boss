@@ -17,6 +17,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: tools/poe-markdown-tests/package-lock.json
+      - run: cargo run --locked --example import-markdown-suite
       - run: npm ci --ignore-scripts
         working-directory: tools/poe-markdown-tests
       - run: npm run corpus

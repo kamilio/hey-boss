@@ -1,6 +1,6 @@
-//! Refresh the compatibility suite from a local Poe Code checkout.
+//! Reproduce the reference suite, or refresh it from a local Poe Code checkout.
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -11,25 +11,26 @@ use std::{
 
 const SUITE: &str = "packages/toolcraft-design/src/terminal-markdown";
 const ENTRYPOINT: &str = "packages/toolcraft-design/src/index.ts";
+const REPOSITORY: &str = "https://github.com/poe-platform/poe-code";
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Manifest {
-    repository: &'static str,
+    repository: String,
     revision: String,
     test_files: Vec<PathBuf>,
     files: BTreeMap<String, String>,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let checkout = std::env::args_os()
-        .nth(1)
-        .ok_or("expected a Poe Code checkout path")?;
     let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tools/poe-markdown-tests");
-    let dest = base.join("upstream");
+    let manifest_path = base.join("upstream-manifest.json");
+    let stage = tempfile::tempdir_in(&base)?;
+    let checkout = std::env::args_os().nth(1).map(PathBuf::from);
+    let dest = stage.path().join("upstream");
     let git = |args: &[&str]| -> io::Result<Vec<u8>> {
         let output = Command::new("git")
-            .current_dir(&checkout)
+            .current_dir(checkout.as_deref().unwrap_or(stage.path()))
             .args(args)
             .output()?;
         if !output.status.success() {
@@ -37,9 +38,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Ok(output.stdout)
     };
-    let revision = String::from_utf8(git(&["rev-parse", "HEAD"])?)?
-        .trim()
-        .to_owned();
+    let expected: Option<Manifest> = if checkout.is_none() {
+        Some(serde_json::from_slice(&fs::read(&manifest_path)?)?)
+    } else {
+        None
+    };
+    let revision = if let Some(expected) = &expected {
+        git(&["init", "--bare", "--quiet"])?;
+        git(&[
+            "fetch",
+            "--depth=1",
+            "--no-tags",
+            REPOSITORY,
+            &expected.revision,
+        ])?;
+        expected.revision.clone()
+    } else {
+        String::from_utf8(git(&["rev-parse", "HEAD"])?)?
+            .trim()
+            .to_owned()
+    };
     let tree = String::from_utf8(git(&[
         "ls-tree",
         "-r",
@@ -99,14 +117,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     // The tracked test-only entrypoint belongs to the harness, not the upstream snapshot.
     let manifest = Manifest {
-        repository: "https://github.com/poe-platform/poe-code",
+        repository: REPOSITORY.into(),
         revision,
         test_files,
         files,
     };
-    let mut json = serde_json::to_vec_pretty(&manifest)?;
-    json.push(b'\n');
-    fs::write(base.join("upstream-manifest.json"), json)?;
+    if expected
+        .as_ref()
+        .is_some_and(|expected| *expected != manifest)
+    {
+        return Err("upstream files or tests differ from upstream-manifest.json".into());
+    }
+    fs::copy(base.join("theme-entry.ts"), dest.join(ENTRYPOINT))?;
+    let upstream = base.join("upstream");
+    if upstream.exists() {
+        fs::remove_dir_all(&upstream)?;
+    }
+    fs::rename(dest, upstream)?;
+    if expected.is_none() {
+        let mut json = serde_json::to_vec_pretty(&manifest)?;
+        json.push(b'\n');
+        fs::write(manifest_path, json)?;
+    }
     println!(
         "Imported {} tests and {} supporting files.",
         manifest.test_files.len(),

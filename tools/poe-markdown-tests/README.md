@@ -1,15 +1,14 @@
 # Full poe-code Markdown suite
 
-All four Markdown test files are copied byte-for-byte from
-`poe-code/packages/toolcraft-design/src/terminal-markdown`, including their
-parser, terminal, HTML, plaintext, and highlighting assertions: 346 tests.
-The 31 supporting source/fixture/license files let the original tests run
-independently of a poe-code checkout. `upstream-manifest.json` records the
-revision and SHA-256 of every copied file. The two-line package entrypoint and
-frontmatter package adapter only resolve imports; they do not replace renderers.
+The reference run fetches four test files and their 31 supporting files from
+Poe Code on GitHub. The Rust importer verifies their SHA-256 hashes and test
+inventory against `upstream-manifest.json` before replacing the local
+`upstream/` directory. The native Rust tests need only the checked-in corpus
+and run offline.
 
 ```sh
 cd tools/poe-markdown-tests
+cargo run --locked --example import-markdown-suite
 npm ci --ignore-scripts
 npm run corpus
 ```
@@ -62,4 +61,4 @@ The comparison uses `hey-boss` from PATH (or `HEY_BOSS_CLI_PATH`) and writes
 never updates accepted expectations.
 
 The dedicated Markdown CI workflow runs both suites and rejects stale generated
-fixtures. Cargo tests also verify every imported file hash and test inventory.
+fixtures.
