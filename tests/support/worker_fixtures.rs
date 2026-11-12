@@ -5,7 +5,17 @@ use std::{collections::BTreeMap, path::PathBuf, process::Command, sync::OnceLock
 pub fn binary(name: &str) -> PathBuf {
     static BINARIES: OnceLock<BTreeMap<String, PathBuf>> = OnceLock::new();
     let bins = BINARIES.get_or_init(|| {
-        let output = Command::new(env!("CARGO"))
+        let mut cargo = Command::new(env!("CARGO"));
+        // Parent package metadata otherwise changes build-script fingerprints (e.g. ring).
+        for (key, _) in std::env::vars_os() {
+            if key.as_encoded_bytes().starts_with(b"CARGO_PKG_")
+                || key == "CARGO_MANIFEST_DIR"
+                || key == "OUT_DIR"
+            {
+                cargo.env_remove(key);
+            }
+        }
+        let output = cargo
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .args([
                 "build",
