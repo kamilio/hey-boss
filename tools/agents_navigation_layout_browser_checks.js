@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code against serve_agents_navigation_fixture.mjs.
+// Run with playwright-cli run-code against the agents-navigation web-fixture scenario.
 async page => {
   const checks=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
@@ -11,7 +11,7 @@ async page => {
         const links=[...nav.querySelectorAll('.navigation-inner > a')];
         return {
           fits:document.documentElement.scrollWidth<=innerWidth,
-          scrolls:nav.scrollWidth>nav.clientWidth,
+          reachable:links.filter(link=>!link.hidden).every(link=>{link.scrollIntoView({block:'nearest',inline:'nearest'});const r=link.getBoundingClientRect();return r.left>=0 && r.right<=innerWidth+1;}),
           readable:links.every(link=>{
             const box=link.getBoundingClientRect();
             return [...link.childNodes].filter(node=>node.nodeType===Node.TEXT_NODE&&node.textContent.trim()).every(node=>{
@@ -25,14 +25,15 @@ async page => {
       check(layout.fits,width+'px '+name+' fits');
       check(layout.readable,width+'px '+name+' navigation labels fit their links');
       if(width<560) {
-        check(layout.scrolls,width+'px '+name+' navigation scrolls');
+        check(layout.reachable,width+'px '+name+' project links can be brought fully into view');
         await page.locator('#navigation-more').focus();
         await page.keyboard.press('Enter');
         await page.keyboard.press('Tab');
         check(await page.locator('#nav-workers').evaluate(link=>{
           const box=link.getBoundingClientRect();
           return document.activeElement===link&&box.left>=0&&box.right<=innerWidth;
-        }),width+'px '+name+' last link is reachable by keyboard');
+        }),width+'px '+name+' Workers link is reachable by keyboard');
+        await page.keyboard.press('Escape');
       }
     }
   }

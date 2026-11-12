@@ -1,4 +1,4 @@
-// Run with playwright-cli run-code against serve_agents_navigation_fixture.mjs.
+// Run with playwright-cli run-code against the agents-navigation web-fixture scenario.
 async page => {
   const checks=[],errors=[];
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
@@ -6,6 +6,7 @@ async page => {
   const visit=async path=>{await page.goto('http://127.0.0.1:59643'+path);await page.waitForFunction(()=>document.querySelector('#project-name').textContent!=='Projects');};
   await visit('/workers#project=named%3AAtlas');
   check(await page.locator('.fleet-tabs').count()===0,'No standalone conversation navigation');
+  await page.locator('#worker-config').waitFor();
   check(await page.locator('#worker-config').isVisible(),'Workers opens by default');
   await page.locator('#worker-board').waitFor({state:'visible'});
   await page.locator('#project-trigger').click();
@@ -16,6 +17,7 @@ async page => {
   check(await page.locator('.app-navigation #nav-workers').count()===0,'Workers is outside project navigation');
   for(const path of ['/agents','/agents#view=conversations','/workers']) {
     await visit(path);
+    await page.locator('#worker-config').waitFor();
     check(await page.locator('#worker-config').isVisible(),path+' opens worker administration');
     check(await page.locator('#project-name').innerText()==='Beacon','Remembered project retained for project links');
   }

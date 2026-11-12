@@ -1,13 +1,15 @@
-// Run with playwright-cli run-code against serve_origin_fixture.mjs.
+// Run with playwright-cli run-code against the origin web-fixture scenario.
 async page => {
   const checks=[],errors=[];
   page.on('pageerror',e=>errors.push(e.message));
   const check=(ok,name)=>{if(!ok)throw Error(name);checks.push(name);};
   const base='http://127.0.0.1:59675';
   const issue=number=>base+'/#project=named%3AOrigin+QA&issue='+number;
+  const showIssueOrigin=async()=>{const details=page.locator('.issue-context');await details.waitFor();if(!await details.evaluate(e=>e.open))await details.locator('summary').first().click();};
   const fit=async name=>check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),name+': fits viewport');
   for(const [name,width,height,scheme] of [['desktop-light',1440,1000,'light'],['desktop-dark',1440,1000,'dark'],['phone-light',390,844,'light'],['phone-dark',390,844,'dark'],['small-phone',320,740,'light']]){
     await page.setViewportSize({width,height});await page.emulateMedia({colorScheme:scheme});await page.goto(issue(2),{waitUntil:'domcontentloaded'});
+    await showIssueOrigin();
     const origin=page.getByRole('region',{name:'Origin',exact:true});await origin.waitFor();
     const link=origin.getByRole('link',{name:'View creating invocation'});
     check((await link.getAttribute('href')).includes('run=historical-origin&at=173'),name+': preserves exact run and byte offset');
@@ -28,13 +30,13 @@ async page => {
     await page.getByRole('region',{name:'Origin',exact:true}).waitFor();await fit(name+' artifact');
     await page.screenshot({path:'output/playwright/issue75/'+name+'-artifact.png',fullPage:true});
   }
-  await page.goto(issue(3),{waitUntil:'domcontentloaded'});await page.getByRole('link',{name:'View creating invocation'}).click();
+  await page.goto(issue(3),{waitUntil:'domcontentloaded'});await showIssueOrigin();await page.getByRole('link',{name:'View creating invocation'}).click();
   await page.locator('.chat-message.is-origin').waitFor();
   check(page.url().includes('run=session%3A11111111'), 'Standalone creation opens its saved session');
   check(await page.locator('#session-issue').isHidden(),'Standalone session has no invented task');
-  await page.goto(issue(4),{waitUntil:'domcontentloaded'});await page.getByText('Creation context was not recorded.').waitFor();
+  await page.goto(issue(4),{waitUntil:'domcontentloaded'});await showIssueOrigin();await page.getByText('Creation context was not recorded.').waitFor();
   check(await page.getByRole('region',{name:'Origin',exact:true}).getByRole('link').count()===0,'Legacy issue has no invented origin links');
-  await page.goto(issue(5),{waitUntil:'domcontentloaded'});await page.getByRole('link',{name:'View creating invocation'}).click();
+  await page.goto(issue(5),{waitUntil:'domcontentloaded'});await showIssueOrigin();await page.getByRole('link',{name:'View creating invocation'}).click();
   await page.getByRole('alert').filter({hasText:'This device is disconnected'}).waitFor();
   check(await page.locator('.chat-message').count()===0,'Disconnected origin never falls back to another session');
   const refused=await page.request.get(base+'/api/fleet/conversation?host=local&run=unrelated');
