@@ -36,6 +36,8 @@ pub fn binary(name: &str) -> PathBuf {
                 "agent-runtime",
                 "--example",
                 "signing-gh",
+                "--example",
+                "skill-ssh",
                 "--message-format=json-render-diagnostics",
             ])
             .output()

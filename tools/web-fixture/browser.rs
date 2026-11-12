@@ -7,21 +7,20 @@ mod chrome;
 use chrome::Page;
 
 fn web(f: &Fixture, project: &str) -> (Service, String) {
-    let mut service = Service(
-        f.command(&[
-            "issue",
-            "--project",
-            project,
-            "web",
-            "--port",
-            "0",
-            "--no-discovery",
-            "--json",
-        ])
-        .stdout(Stdio::piped())
-        .spawn()
-        .unwrap(),
-    );
+    start_web(f.command(&[
+        "issue",
+        "--project",
+        project,
+        "web",
+        "--port",
+        "0",
+        "--no-discovery",
+        "--json",
+    ]))
+}
+
+fn start_web(mut command: Command) -> (Service, String) {
+    let mut service = Service(command.stdout(Stdio::piped()).spawn().unwrap());
     let (tx, rx) = mpsc::channel();
     let stdout = service.0.stdout.take().unwrap();
     thread::spawn(move || {
@@ -275,3 +274,6 @@ mod issues;
 
 #[path = "jobs_browser.rs"]
 mod jobs;
+
+#[path = "skills_api.rs"]
+mod skills_api;
