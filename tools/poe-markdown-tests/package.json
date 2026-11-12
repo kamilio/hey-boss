@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "test": "FORCE_COLOR=1 vitest run --config vitest.json --reporter=default --reporter=json --outputFile=report.json",
-    "corpus": "POE_MARKDOWN_CAPTURE=1 npm test && cargo run --quiet --locked -p hey-boss --example export-markdown-corpus --features serde_json/preserve_order"
+    "corpus": "cargo test --locked --manifest-path observer/Cargo.toml --test reference -- --nocapture && cargo run --quiet --locked -p hey-boss --example export-markdown-corpus --features serde_json/preserve_order"
   },
   "devDependencies": {
     "vitest": "4.1.11",

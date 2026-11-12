@@ -14,8 +14,10 @@ npm run corpus
 ```
 
 This runs every original assertion against the copied reference implementation.
-During a corpus run, Vitest records calls to the Markdown modules in each test’s
-JSON report entry. The Rust exporter requires a passing result and observations
+During a corpus run, Cargo builds the test-only Rust observer. Vitest loads it
+in each worker to record calls to the upstream Markdown modules in that test’s
+JSON report entry. Plain `npm test` runs the original assertions without the
+observer. The Rust exporter requires a passing result and observations
 for every test before writing the corpus. The checked-in corpus records every test name,
 309 unique Markdown inputs, 31 code inputs, and 46 direct renderer inputs.
 Type-only, invalid-option, invalid-frontmatter, and subprocess theme tests retain

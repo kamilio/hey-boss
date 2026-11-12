@@ -1,7 +1,6 @@
 {
   "test": {
     "include": ["upstream/**/*.test.ts"],
-    "setupFiles": ["./capture.ts"],
     "testTimeout": 30000,
     "maxWorkers": 1
   }
