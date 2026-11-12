@@ -22,11 +22,23 @@ jobs:
       - run: cargo build --locked --manifest-path ../Cargo.toml
       - run: cargo test --locked --test terminal resume:: -- --ignored
       - run: python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
+      - name: Check CLI terminal screens
+        working-directory: .
+        run: |
+          cargo build --locked -p hey-gh --bin hey-gh
+          cargo build --locked --target-dir target --manifest-path packages/git-shelf/Cargo.toml
+          cargo build --locked --target-dir target --manifest-path tools/terminal-checks/Cargo.toml
+          for suite in settings project transactions; do
+            target/debug/terminal-checks "$suite" target/debug/hey-boss
+          done
+          target/debug/terminal-checks comments target/debug/hey-gh
+          target/debug/terminal-checks shelf target/debug/g target/debug/hey-boss
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         if: always()
         with:
           name: worker-tui-terminal-${{ matrix.os }}
           path: |
+            out/terminal-checks
             worker-tui/target/terminal-qa
             worker-tui/target/activity-qa
             worker-tui/target/runtime-qa
