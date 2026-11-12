@@ -277,3 +277,6 @@ mod jobs;
 
 #[path = "skills_api.rs"]
 mod skills_api;
+
+#[path = "skills_browser.rs"]
+mod skills;

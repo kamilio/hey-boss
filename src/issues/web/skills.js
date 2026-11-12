@@ -145,7 +145,6 @@ function machineCoverage(skill, machines) {
       }));
   return { known, present, missing, attention, onAllMachines, inSync, allGreen, tone, tags };
 }
-if(typeof module!=='undefined') module.exports={library,visibleSkills,unresolved,computeDiff,diffFiles,getMarkdownFiles,machineCoverage,shortHost,rolloutFeedback};
 if(typeof document!=='undefined') (()=>{
   const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])), icon=HeyBossUI.icon;
   let data={machines:[],selected:[],choices:{}}, skills=[], selected=new Set(), choices={}, active='', filter='all', csrf='', dirty=false, pending=false, timer, previewDigest='', compareDigest='', maxWords=400;
