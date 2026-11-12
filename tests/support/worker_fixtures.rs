@@ -37,6 +37,8 @@ pub fn binary(name: &str) -> PathBuf {
                 "--example",
                 "signing-gh",
                 "--example",
+                "checkout-git",
+                "--example",
                 "skill-ssh",
                 "--message-format=json-render-diagnostics",
             ])
