@@ -1,3 +1,4 @@
 node_modules/
+/observer/target/
 report.json
 upstream/
