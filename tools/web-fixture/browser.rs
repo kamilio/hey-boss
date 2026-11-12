@@ -38,9 +38,12 @@ fn start_web(mut command: Command) -> (Service, String) {
 }
 
 fn screenshot(page: &mut Page, directory: &str, name: &str) {
-    let png = page
-        .command("Page.captureScreenshot", json!({"format":"png"}))
-        .unwrap();
+    capture(page, directory, name, json!({"format":"png"}));
+}
+
+fn capture(page: &mut Page, directory: &str, name: &str, params: Value) {
+    let png = page.command("Page.captureScreenshot", params).unwrap();
+
     let dir = Path::new(directory);
     fs::create_dir_all(dir).unwrap();
     fs::write(

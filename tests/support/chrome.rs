@@ -152,6 +152,12 @@ impl Page {
                 continue;
             }
             let reply: Value = serde_json::from_str(msg.to_text().unwrap()).unwrap();
+            // Page-enabled tests reload dirty editors to verify recovery after confirming "Leave".
+            if reply["method"] == "Page.javascriptDialogOpening"
+                && reply["params"]["type"] == "beforeunload"
+            {
+                self.socket.send(Message::Text(json!({"id":2,"method":"Page.handleJavaScriptDialog","params":{"accept":true}}).to_string().into())).unwrap();
+            }
             if reply["id"] != 1 {
                 continue;
             }

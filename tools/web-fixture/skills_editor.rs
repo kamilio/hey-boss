@@ -30,7 +30,7 @@ fn slash_edits_skill_markdown_and_only_opens_search_outside_the_editor() {
         ] {
             viewport(p, width, theme);
             p.eval("document.querySelector('.skill-markdown-editor-card').scrollIntoView({block:'center'})").unwrap();
-            shot(p, &format!("skill-edit-{name}"));
+            shot(p, &format!("skill-edit-{name}"), None);
         }
         click(p, "[data-save-markdown=distribute]");
         p.wait("!document.querySelector('[data-save-markdown]') && !document.querySelector('[data-open-native-editor]').disabled");
