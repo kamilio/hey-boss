@@ -58,6 +58,12 @@ fn diagrams_keep_readable_labels_safe_source_and_working_zoom() {
                 json!({"format":"png","captureBeyondViewport":true,"clip":{"x":0,"y":0,"width":size["cssContentSize"]["width"],"height":size["cssContentSize"]["height"],"scale":1}}),
             );
             expand(&mut p);
+            assert_eq!(
+                p.eval("el('.artifact-diagram-dialog output').textContent")
+                    .unwrap(),
+                "100%",
+                "Expand should preserve natural label size"
+            );
             p.wait("(()=>{const r=el('.artifact-diagram-dialog').getBoundingClientRect();return r.left>=0 && r.right<=innerWidth+1 && r.top>=0 && r.bottom<=innerHeight+1})()");
             assert_eq!(p.eval("new Set([...document.querySelectorAll('[id]')].map(n=>n.id)).size===document.querySelectorAll('[id]').length").unwrap(),true);
             screenshot(
@@ -65,12 +71,14 @@ fn diagrams_keep_readable_labels_safe_source_and_working_zoom() {
                 "out/artifact-diagrams",
                 &format!("{theme}-{width}-expanded"),
             );
-            p.eval("window.zoom=()=>parseInt(el('.artifact-diagram-dialog output').textContent);window.fit=zoom();el('.artifact-diagram-dialog [data-in]').click()").unwrap();
-            assert_eq!(p.eval("zoom()>fit").unwrap(), true);
-            for (button, expected) in [("Actual size", "100"), ("Fit", "fit")] {
-                p.eval(&format!("Array.from(el('.artifact-diagram-dialog').querySelectorAll('button')).find(b=>(b.getAttribute('aria-label')||b.textContent).trim()==={}).click()",json!(button))).unwrap();
-                assert_eq!(p.eval(&format!("zoom()==={expected}")).unwrap(), true);
-            }
+            p.eval("window.zoom=()=>parseInt(el('.artifact-diagram-dialog output').textContent);el('.artifact-diagram-dialog [data-in]').click()").unwrap();
+            assert_eq!(p.eval("zoom()>100").unwrap(), true);
+            p.eval("el('.artifact-diagram-dialog [data-fit]').click()")
+                .unwrap();
+            assert_eq!(p.eval("zoom()>0 && zoom()<=100 && el('.artifact-diagram-viewport').scrollWidth<=el('.artifact-diagram-viewport').clientWidth+1").unwrap(),true);
+            p.eval("el('.artifact-diagram-dialog [data-actual]').click()")
+                .unwrap();
+            assert_eq!(p.eval("zoom()").unwrap(), 100);
             close(&mut p);
         }
     }
