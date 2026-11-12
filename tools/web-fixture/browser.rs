@@ -327,3 +327,6 @@ mod assignment_states;
 
 #[path = "issue_list.rs"]
 mod issue_list;
+
+#[path = "artifact_import_browser.rs"]
+mod artifact_import;
