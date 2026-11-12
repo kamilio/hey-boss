@@ -4,6 +4,12 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
     let issue = |args: &[&str]| run(f.issue(p, args));
     match s {
         LocalHttp | NativeArtifactEditor => return desktop::seed(f, s, p),
+        IssueArchitecture => issue_design::architecture(f, p)?,
+        IssueTimeline => issue_design::timeline(f, p)?,
+        AssignmentWatch => {
+            issue_design::watch(f, p)?;
+            return desktop::seed(f, s, p);
+        }
         Origin => return origin::seed(f, p),
         Agents => agents::conversations(f)?,
         AutoWorkers => agents::workers(f, p)?,
