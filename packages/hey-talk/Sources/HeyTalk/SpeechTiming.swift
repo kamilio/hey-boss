@@ -2,6 +2,7 @@ import Foundation
 import TalkCore
 
 struct SpeechSegment {
+    var estimatedSeconds: Double { Double(text.split(whereSeparator: \.isWhitespace).count) / 2.7 }
     let text: String
     let range: NSRange
 }

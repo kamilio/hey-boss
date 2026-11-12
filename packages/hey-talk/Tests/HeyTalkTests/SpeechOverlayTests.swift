@@ -144,6 +144,39 @@ final class SpeechOverlayTests: XCTestCase {
 }
 
 extension SpeechOverlayTests {
+    @MainActor func testCaptionTransportAndExpandedTranscriptSharePosition() throws {
+        let overlay = SpeechOverlay()
+        defer { overlay.hide() }
+        let text = Array(repeating: "The library will extend its pilot for six weeks.", count: 15).joined(separator: "\n\n")
+        overlay.showCaption(text: text, state: .playing)
+        overlay.updateCountdown((0.4, 69.5, true))
+        let panel = try XCTUnwrap(NSApplication.shared.windows.first { $0.title == "Hey Talk — Read Aloud" && $0.isVisible })
+        func views(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(views) }
+        let all = views(try XCTUnwrap(panel.contentView))
+        let clock = try XCTUnwrap(all.compactMap { $0 as? NSTextField }.first { $0.stringValue == "≈ 1:10 left" })
+        let field = try XCTUnwrap(all.compactMap { $0 as? NSTextView }.first)
+        let buttons = all.compactMap { $0 as? NSButton }
+        let toggle = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "Expand transcript" })
+        let pause = try XCTUnwrap(buttons.first { $0.accessibilityLabel() == "Pause Catch Up" })
+        let range = (text as NSString).range(of: "six weeks", options: .backwards)
+        overlay.highlight(SpeechHighlight(range: range, word: true))
+        let compact = panel.frame
+        overlay.onPlay = { [weak overlay] in overlay?.showCaption(text: text, state: .paused) }
+        pause.performClick(nil)
+        XCTAssertEqual(pause.accessibilityLabel(), "Resume Catch Up")
+        toggle.performClick(nil)
+        XCTAssertGreaterThan(panel.frame.height, compact.height)
+        XCTAssertEqual(toggle.accessibilityLabel(), "Collapse transcript")
+        XCTAssertEqual(field.string, text)
+        XCTAssertTrue(field.enclosingScrollView?.hasVerticalScroller == true)
+        XCTAssertEqual(pause.accessibilityLabel(), "Resume Catch Up")
+        XCTAssertEqual(clock.stringValue, "≈ 1:10 left")
+        toggle.performClick(nil)
+        XCTAssertEqual(panel.frame, compact)
+        let lens = try XCTUnwrap(field.subviews.first { $0 is SpeechWordLens })
+        XCTAssertTrue(field.visibleRect.contains(NSPoint(x: lens.frame.midX, y: lens.frame.midY)))
+    }
+
     @MainActor func testRecapUsesOneFloatingLineAndKeepsTheSpokenWordVisible() throws {
         let overlay = SpeechOverlay()
         defer { overlay.hide() }
