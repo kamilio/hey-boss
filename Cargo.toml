@@ -98,3 +98,7 @@ path = "tools/web-fixture/main.rs"
 [[example]]
 name = "signing-gh"
 path = "tests/fixtures/signing-gh.rs"
+
+[[example]]
+name = "skill-ssh"
+path = "tests/fixtures/skill-ssh.rs"
