@@ -19,6 +19,8 @@ exercise a server restart; `root/ready.json` records the PID, port URL and start
 Run `cargo test --locked -p hey-boss --test web_client -- --ignored` to check the
 shipped client in headless Chrome. Set `CHROME_BIN` if Chrome is installed elsewhere.
 After building the CLI, run `cargo test --locked -p hey-boss --example web-fixture -- --ignored`
-to check worker setup and saved conversations. Screenshots are written to `out/worker-browser/`.
+to check worker setup, saved conversations, issue layouts, timelines and the GitHub watcher.
+Screenshots are written to `out/worker-browser/` and `out/issue-browser/`. Rebuild the CLI
+after editing web assets so these fixtures serve the changes.
 For interactive fleet checks, use `auto-workers` for sample activity and `worker-config`
 for edits to a private supervisor configuration.
