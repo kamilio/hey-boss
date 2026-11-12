@@ -57,9 +57,8 @@ Projected stored reads skip decoding omitted row fields while preserving the
 original stored-byte limits, page boundaries, scope/lifecycle filtering, and
 activity events. Raw stored JSON is still read. HTTP/SDK
 projections always retain `complete` and `sourceErrors`; CLI stdout retains only
-requested fields. Use `fields=number,state` for HTTP, Rust
-`ApiClient::pr_status_selected` with `PrStatusSelection`, or Node
-`api.prStatus({ fields: ['number', 'state'], cursor, read })`. Omitted fields are
+requested fields. Use `fields=number,state` for HTTP or Rust
+`ApiClient::pr_status_selected` with `PrStatusSelection`. Omitted fields are
 unknown, and projections do not impose a total wire-size bound.
 
 For usage investigations, `logs --summary` reads retained rotations offline.
@@ -148,6 +147,5 @@ The deadline stops the CLI's wait and additional calls to the daemon. Previously
 started daemon handlers and shared GitHub work can continue; background watches
 and registrations persist.
 
-Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`; napi-rs Node
-bindings use `api.prStatus({ cursor, waitSeconds: 30 })`. These share the daemon.
+Rust uses `ApiClient::pr_status`; HTTP uses `GET /v1/pr-status`. Both share the daemon.
 `hey-gh` implements cached `gh pr` reads with an extended JSON envelope and validated comment posting.

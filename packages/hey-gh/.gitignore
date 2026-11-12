@@ -3,8 +3,3 @@
 *.sqlite-shm
 *.sqlite-wal
 .env
-node_modules/
-*.node
-/bindings/node/native.js
-/bindings/node/native.d.ts
-/bindings/node/*.tgz
