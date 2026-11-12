@@ -421,3 +421,6 @@ fn retained_attempt_viewer_opens_the_live_issue() {
         thread::sleep(Duration::from_millis(50));
     }
 }
+
+#[path = "artifact_visual.rs"]
+mod artifact_visual;
