@@ -13,10 +13,14 @@ fn xml(value: &str) -> String {
 }
 
 pub(super) fn initialize(binary: &Path, label: &str) -> Result<()> {
-    initialize_with(Path::new("/bin/launchctl"), binary, label)
+    initialize_with(binary, label, Command::output)
 }
 
-fn initialize_with(launchctl: &Path, binary: &Path, label: &str) -> Result<()> {
+fn initialize_with(
+    binary: &Path,
+    label: &str,
+    run: impl Fn(&mut Command) -> std::io::Result<std::process::Output>,
+) -> Result<()> {
     let temp = crate::admin::Temporary::new().map_err(|_| Error::StorageFailure)?;
     let job = format!(
         "local.hey-boss.secrets-enroll-{}",
@@ -47,11 +51,10 @@ fn initialize_with(launchctl: &Path, binary: &Path, label: &str) -> Result<()> {
     );
     let path = temp.0.join("job.plist");
     backend::write_private(&path, plist.as_bytes())?;
-    let result = Command::new(launchctl)
+    let result = run(Command::new("/bin/launchctl")
         .args(["bootstrap", &domain])
-        .arg(&path)
-        .output()
-        .map_err(|_| Error::StoreUnavailable)?;
+        .arg(&path))
+    .map_err(|_| Error::StoreUnavailable)?;
     if !result.status.success() {
         return Err(Error::StoreUnavailable);
     }
@@ -72,9 +75,7 @@ fn initialize_with(launchctl: &Path, binary: &Path, label: &str) -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    let _ = Command::new(launchctl)
-        .args(["bootout", &format!("{domain}/{job}")])
-        .output();
+    let _ = run(Command::new("/bin/launchctl").args(["bootout", &format!("{domain}/{job}")]));
     result
 }
 
@@ -86,16 +87,31 @@ mod tests {
     #[test]
     fn enrollment_job_preserves_arguments_and_reports_failures() {
         let temp = crate::admin::Temporary::new().unwrap();
-        let launchctl = temp.0.join("launchctl");
-        // Run exactly the plist argv with a fake launchctl, without creating a real GUI job.
-        fs::write(&launchctl, "#!/bin/sh\nif [ \"$1\" = bootout ]; then exit 0; fi\n/usr/bin/osascript -l JavaScript - \"$3\" <<'JXA'\nObjC.import('Foundation');\nfunction run(args) {\n const plist = $.NSDictionary.dictionaryWithContentsOfFile($(args[0]));\n const argv = ObjC.deepUnwrap(plist.objectForKey('ProgramArguments'));\n const task = $.NSTask.alloc.init;\n task.launchPath = argv.shift(); task.arguments = argv;\n task.launch; task.waitUntilExit;\n}\nJXA\n").unwrap();
-        fs::set_permissions(&launchctl, fs::Permissions::from_mode(0o700)).unwrap();
+        // Execute launchd's actual argv without registering a job on the user's desktop.
+        let run = |command: &mut Command| {
+            let mut args = command.get_args();
+            if args.next().unwrap() == "bootout" {
+                return Command::new("/usr/bin/true").output();
+            }
+            let plist = Command::new("/usr/bin/plutil")
+                .args(["-convert", "json", "-o", "-", "--"])
+                .arg(args.nth(1).unwrap())
+                .output()?;
+            assert!(plist.status.success());
+            let job: serde_json::Value = serde_json::from_slice(&plist.stdout).unwrap();
+            let mut argv = job["ProgramArguments"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap());
+            Command::new(argv.next().unwrap()).args(argv).output()
+        };
         let binary = temp.0.join("binary with ' & < chars");
         for exit in [0, 7] {
             fs::write(&binary, format!("#!/bin/sh\ntest \"$1\" = secrets && test \"$2\" = init && test \"$3\" = --label && test \"$4\" = 'Mac & <one>' || exit 19\nexit {exit}\n")).unwrap();
             fs::set_permissions(&binary, fs::Permissions::from_mode(0o700)).unwrap();
             assert_eq!(
-                initialize_with(&launchctl, &binary, "Mac & <one>").is_ok(),
+                initialize_with(&binary, "Mac & <one>", run).is_ok(),
                 exit == 0
             );
         }
