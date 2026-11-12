@@ -1993,6 +1993,11 @@ pub(crate) fn print_text(value: &Value) {
     if value["instructions"].is_string() {
         let issue = &value["issue"];
         println!(
+            "Task {} in {} was claimed.\n\n---\n",
+            issue["number"],
+            line(&project["name"])
+        );
+        println!(
             "#{} [{}] {}",
             issue["number"],
             line(&issue["state"]),

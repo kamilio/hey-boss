@@ -71,7 +71,7 @@ fn plain_claim_returns_the_task_and_named_links_without_repeating_the_prompt() {
         "--label",
         "push-blocked",
     ]);
-    let task = "#1 [open] Check rollout\n\nVerify rollout.\n\nLabels: push-blocked\n";
+    let task = "Task 1 in Settings QA was claimed.\n\n---\n\n#1 [open] Check rollout\n\nVerify rollout.\n\nLabels: push-blocked\n";
     assert_eq!(f.text(&["claim", "1"]), task);
     let asana = "https://app.asana.com/0/123/456";
     f.text(&["pr", "add", "1", asana]);
