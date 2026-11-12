@@ -52,6 +52,17 @@ fn classification(worker: &Value, build: &str) -> &'static str {
         && worker["active"].as_u64().unwrap_or(0) == 0
         && worker["job_active"].as_u64().unwrap_or(0) == 0
     {
+        // During idle exec an independent worker briefly has no registered PID.
+        // Wait for its live receipt owner to re-register before declaring success.
+        if pending(worker)
+            && worker["rollout_signal"]["result"]
+                .as_str()
+                .and_then(|s| serde_json::from_str::<Value>(s).ok())
+                .and_then(|p| u32::try_from(p["prior_pid"].as_u64()?).ok())
+                .is_some_and(|pid| pid > 0 && pid <= i32::MAX as u32 && super::context::alive(pid))
+        {
+            return "waiting_for_idle";
+        }
         return "inactive";
     }
     if pending(worker) {
@@ -156,6 +167,10 @@ mod tests {
         assert_eq!(classification(&standalone, "new"), "inactive");
         standalone["rollout_signal"] = json!({"state":"pending"});
         assert_eq!(classification(&standalone, "new"), "inactive");
+        standalone["rollout_signal"]["result"] =
+            json!(json!({"prior_pid":std::process::id()}).to_string());
+        assert_eq!(classification(&standalone, "new"), "waiting_for_idle");
+        assert_eq!(report(&[standalone.clone()], "new")["complete"], false);
         standalone["intent"] = json!("running");
         assert_eq!(classification(&standalone, "new"), "restarting");
     }
