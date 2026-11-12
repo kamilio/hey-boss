@@ -286,3 +286,107 @@ fn native_edits_refresh_the_reader_without_overwriting_a_browser_draft() {
     assert_eq!(p.eval("field.isConnected && field.value==='Unsent browser draft' && !document.querySelector('#artifact-editor-native')").unwrap(),true);
     assert_eq!(count(), 2);
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn reply_drafts_survive_resolution_and_retry_an_unacknowledged_save_once() {
+    let f = installed_fixture();
+    let project = "Reading";
+    f.init(project).unwrap();
+    let created = run(f.command(&[
+        "artifact",
+        "create",
+        "--project",
+        project,
+        "--title",
+        "Decisions",
+        "--body",
+        "A discussion worth keeping.",
+        "--json",
+    ]))
+    .unwrap();
+    let id = created["artifact"]["id"].as_str().unwrap();
+    run(f.command(&[
+        "artifact",
+        "comment",
+        id,
+        "--project",
+        project,
+        "--body",
+        "Can we review this decision?",
+        "--json",
+    ]))
+    .unwrap();
+    let (_web, base) = web(&f, project);
+    let mut p = Page::open(&format!(
+        "{base}/artifacts#project=named%3AReading&artifact={id}"
+    ));
+    fn click(p: &mut Page, selector: &str) {
+        p.wait(&format!(
+            "document.querySelector({})?.checkVisibility()",
+            json!(selector)
+        ));
+        p.eval(&format!(
+            "document.querySelector({}).click()",
+            json!(selector)
+        ))
+        .unwrap();
+    }
+    fn type_reply(p: &mut Page, text: &str) {
+        p.eval(&format!("(()=>{{const f=document.querySelector('[data-reply] textarea');f.value={};f.dispatchEvent(new Event('input',{{bubbles:true}}))}})()",json!(text))).unwrap();
+    }
+    click(&mut p, "#artifact-comments-toggle");
+    click(&mut p, ".artifact-reply summary");
+    type_reply(&mut p, "My unfinished reply");
+    click(&mut p, "[data-resolve]");
+    for reload in [false, true] {
+        if reload {
+            p.command("Page.reload", json!({})).unwrap();
+            p.wait("document.querySelector('#artifact-comments-toggle')?.getAttribute('aria-expanded')==='false'");
+            click(&mut p, "#artifact-comments-toggle");
+        }
+        click(&mut p, "details.artifact-thread > summary");
+        click(&mut p, ".artifact-reply summary");
+        assert_eq!(
+            p.eval("document.querySelector('[data-reply] textarea').value")
+                .unwrap(),
+            "My unfinished reply"
+        );
+    }
+    click(&mut p, "[data-reply] button");
+    p.wait("document.querySelector('#artifact-status').innerText==='Reply saved'");
+    click(&mut p, "details.artifact-thread > summary");
+    assert_eq!(p.eval("document.querySelector('.artifact-thread .reply').innerText.includes('My unfinished reply')").unwrap(),true);
+    click(&mut p, "[data-resolve]");
+    click(&mut p, "section.artifact-thread .artifact-reply summary");
+    assert_eq!(
+        p.eval("document.querySelector('[data-reply] textarea').value")
+            .unwrap(),
+        ""
+    );
+    type_reply(&mut p, "Reply after an interrupted acknowledgment");
+    p.eval("const send=window.fetch.bind(window);window.fetch=async (url,opts)=>{const response=await send(url,opts);if(url==='/api/action'&&response.ok&&JSON.parse(opts.body)?.operation?.operation?.parent){window.fetch=send;throw new TypeError('lost acknowledgment')}return response}").unwrap();
+    click(&mut p, "[data-reply] button");
+    p.wait("document.querySelector('#artifact-status').innerText==='Reply pending · retry after reconnecting'");
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait("document.querySelector('#artifact-comments-toggle')?.getAttribute('aria-expanded')==='false'");
+    click(&mut p, "#artifact-comments-toggle");
+    click(&mut p, ".artifact-reply summary");
+    assert_eq!(
+        p.eval("document.querySelector('[data-reply] textarea').readOnly")
+            .unwrap(),
+        true
+    );
+    click(&mut p, "[data-reply] button");
+    p.wait("document.querySelector('#artifact-status').innerText==='Reply saved'");
+    let saved = run(f.command(&["artifact", "view", id, "--project", project, "--json"])).unwrap();
+    assert_eq!(
+        saved["comments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| c["body"] == "Reply after an interrupted acknowledgment")
+            .count(),
+        1
+    );
+}
