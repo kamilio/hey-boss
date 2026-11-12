@@ -4691,3 +4691,69 @@ fn ranked_search_is_opt_in_and_exact_issue_numbers_win() {
         false
     );
 }
+
+#[test]
+fn boss_unassign_cli_replays_each_route_and_protects_other_owners() {
+    let f = Fixture::empty();
+    let project = "named:Unassign fixture";
+    projects::seed(&f.db, &[project]);
+    let _owner = hey_boss::database::Owner::host(&f.db).unwrap();
+    let binary = std::env::var_os("HEY_BOSS_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_hey-boss").into());
+    let binary = fs::canonicalize(binary).unwrap();
+    let call = |actor: &str, args: &[&str]| {
+        Command::new(&binary)
+            .current_dir(&f.cwd)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &f.root)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env("HEY_BOSS_FLEET_STATE", &f.root)
+            .args(["issue", "--project", project, "--json", "--agent", actor])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let issue = |actor: &str, args: &[&str]| success(call(actor, args));
+    issue(
+        "codex:owner",
+        &[
+            "create",
+            "--title",
+            "Assigned",
+            "--body",
+            "Preserve this body",
+        ],
+    );
+    for args in [
+        vec!["unassign", "1"],
+        vec!["assign", "1", "unassigned"],
+        vec!["unassign", "1", "--supervisor"],
+    ] {
+        issue("codex:owner", &["assign-to-boss", "1"]);
+        let key = args.join("-");
+        let mut args = args;
+        args.extend(["--request-id", &key]);
+        let released = issue("codex:delegate", &args);
+        assert_eq!(released["issue"]["assignee"], Value::Null);
+        assert_eq!(released["issue"]["state"], "open");
+        assert_eq!(released["issue"]["body"], "Preserve this body");
+        assert_eq!(
+            issue("codex:delegate", &args)["issue"]["version"],
+            released["issue"]["version"]
+        );
+    }
+    let claimed = issue("codex:owner", &["claim", "1"]);
+    let output = call("codex:delegate", &["unassign", "1"]);
+    assert_eq!(output.status.code(), Some(4));
+    let denied: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(denied["error"]["code"], "conflict");
+    let after = issue("codex:owner", &["view", "1"]);
+    assert_eq!(after["issue"]["assignee"], "codex:owner");
+    assert_eq!(after["issue"]["version"], claimed["issue"]["version"]);
+    issue("codex:owner", &["unassign", "1"]);
+    assert_eq!(
+        issue("codex:owner", &["view", "1"])["issue"]["assignee"],
+        Value::Null
+    );
+}
