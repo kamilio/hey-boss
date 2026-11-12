@@ -30,12 +30,12 @@ async page => {
         check(await page.locator('.issue-assignment .assignment-trace').count()===0,`${surface} ${width}: no session link before launch`);
       }
       await readiness.scrollIntoViewIfNeeded();
-      await page.screenshot({path:`/tmp/hb-scheduled-jobs-qa/${surface}-${width}-${record.state}.png`,fullPage:true});
+      await page.screenshot({path:`output/playwright/scheduled-jobs/${surface}-${width}-${record.state}.png`,fullPage:true});
     }
     await page.goto(base+path+'#project='+encodeURIComponent(project));
     await page.waitForFunction(()=>model.issues.length>0&&!model.detail);
     check(await page.getByText('Scheduled job',{exact:true}).count()>0,`${surface} ${width}: readable actor labels`);
-    await page.screenshot({path:`/tmp/hb-scheduled-jobs-qa/${surface}-${width}-list.png`,fullPage:true});
+    await page.screenshot({path:`output/playwright/scheduled-jobs/${surface}-${width}-list.png`,fullPage:true});
   }
   check(errors.length===0,'No browser JavaScript errors');
   return {surface,checks:checks.length,records};
