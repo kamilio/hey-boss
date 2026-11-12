@@ -1991,7 +1991,8 @@ pub(crate) fn print_text(value: &Value) {
     }
     let project = &value["project"];
     let claim = value["instructions"].as_str();
-    if claim.is_some() {
+    if let Some(instructions) = claim {
+        println!("{}\n\n---\n", instructions.trim_end());
         let issue = &value["issue"];
         println!(
             "#{} [{}] {}",
@@ -2497,10 +2498,9 @@ pub(crate) fn print_text(value: &Value) {
     if let Some(id) = value.get("comment_id").filter(|n| !n.is_null()) {
         println!("Saved comment {id}.");
     }
-    if let Some(instructions) = claim {
-        println!("\n{}\n", instructions.trim_end());
+    if claim.is_some() {
         println!(
-            "Iterations started: {} (agent launches)",
+            "\nIterations started: {} (agent launches)",
             value["issue"]["agent_launch_count"].as_u64().unwrap_or(0)
         );
     }

@@ -53,7 +53,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn claims_lead_with_the_task_and_end_with_actual_iterations() {
+fn claims_lead_with_instructions_and_end_with_actual_iterations() {
     let f = Fixture::new();
     f.text(&[
         "settings",
@@ -82,12 +82,16 @@ fn claims_lead_with_the_task_and_end_with_actual_iterations() {
         }
         for _ in 0..2 {
             let output = f.text(&["claim", "1"]);
+            let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
+            let instructions = json["instructions"].as_str().unwrap().trim_end();
             let label = format!("Iterations started: {count} (agent launches)\n");
             assert!(
-                output.starts_with("#1 [open] Iteration history\n\nVerify rollout.\n"),
+                output.starts_with(&format!(
+                    "{instructions}\n\n---\n\n#1 [open] Iteration history\n\nVerify rollout.\n"
+                )),
                 "{output}"
             );
-            assert!(output.contains("push-blocked") && output.contains("\nFollow the task."));
+            assert!(output.contains("push-blocked") && instructions.contains("Follow the task."));
             assert!(output.ends_with(&label), "{output}");
             for omitted in [
                 "Instructions:",
@@ -97,7 +101,6 @@ fn claims_lead_with_the_task_and_end_with_actual_iterations() {
             ] {
                 assert!(!output.contains(omitted), "{output}");
             }
-            let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
             assert_eq!(json["issue"]["agent_launch_count"], count);
         }
     }
