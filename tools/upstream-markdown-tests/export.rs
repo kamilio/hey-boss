@@ -5,11 +5,7 @@ use semantics::canonical;
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::Path,
-};
+use std::{collections::BTreeMap, fs, path::Path};
 
 fn read(path: &Path) -> Value {
     let bytes = fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
@@ -43,7 +39,7 @@ fn main() {
             && report["numPendingTests"] == 0,
         "upstream suite did not pass"
     );
-    let mut names = BTreeSet::new();
+    let mut cases = BTreeMap::new();
     for suite in report["testResults"].as_array().unwrap() {
         for test in suite["assertionResults"].as_array().unwrap() {
             assert_eq!(test["status"], "passed");
@@ -55,20 +51,23 @@ fn main() {
                 .map(|s| s.as_str().unwrap())
                 .collect::<Vec<_>>()
                 .join(" > ");
-            assert!(names.insert(name), "duplicate upstream test name");
+            let calls = test["meta"]["calls"]
+                .as_array()
+                .expect("missing reference observations");
+            assert!(
+                cases.insert(name, calls).is_none(),
+                "duplicate upstream test name"
+            );
         }
     }
-    assert_eq!(names.len(), total);
+    assert_eq!(cases.len(), total);
     let mut tests = vec![];
     let mut sources: BTreeMap<String, Value> = BTreeMap::new();
     let mut codes = BTreeMap::new();
     let mut render_nodes = vec![];
-    for name in names {
-        let digest = Sha256::digest(name.as_bytes());
-        let case = read(&base.join(format!("captured/{digest:x}.json")));
-        assert_eq!(case["name"], name);
+    for (name, calls) in cases {
         let mut operations = vec![];
-        for call in case["calls"].as_array().unwrap() {
+        for call in calls {
             let op = call["operation"].as_str().unwrap();
             if !operations.contains(&op) {
                 operations.push(op);
@@ -86,7 +85,7 @@ fn main() {
                 assert_eq!(fixture["source"], source, "Markdown fixture ID collision");
                 fixture["tests"].as_array_mut().unwrap().push(json!(name));
             } else if op == "highlightCodeBlock" {
-                let arg = &call["args"][0];
+                let arg = &call["code"];
                 let source = arg["value"].as_str().unwrap();
                 let lang = arg["lang"].as_str().unwrap_or("");
                 let id = id(&format!("{lang}\0{source}"));
