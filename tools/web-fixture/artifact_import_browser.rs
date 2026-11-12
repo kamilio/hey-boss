@@ -533,3 +533,98 @@ fn issue_attachments_keep_the_same_document_after_unlink_and_rename() {
         url
     );
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn merging_a_concurrent_revision_preserves_the_selected_discussion() {
+    let f = installed_fixture();
+    f.init(PROJECT).unwrap();
+    let (_server, base) = web(&f, PROJECT);
+    let mut p = Page::open("about:blank");
+    p.command("Page.enable", json!({})).unwrap();
+    p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);window.fill=(s,v)=>{const e=el(s);e.value=v;e.dispatchEvent(new Event('input',{bubbles:true}))}"})).unwrap();
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{base}/artifacts#project=named%3AMarkdown+attachments&new=1")}),
+    )
+    .unwrap();
+    p.wait("el('#artifact-title')?.checkVisibility()");
+    let body = format!(
+        "# Plan\n\n🐈{}**selected** phrase.\n\n- [x] Verified",
+        "A".repeat(79)
+    );
+    p.eval(&format!(
+        "fill('#artifact-title','Browser plan');fill('#artifact-body',{})",
+        json!(body)
+    ))
+    .unwrap();
+    p.eval("window.oldEditor=true").unwrap();
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait("!window.oldEditor && el('#artifact-title')?.value==='Browser plan' && !!el('#artifact-body')");
+    assert_eq!(p.eval("el('#artifact-body').value").unwrap(), body);
+    p.eval("el('#artifact-preview').click()").unwrap();
+    p.wait("el('#artifact-edit-preview strong')?.textContent==='selected'");
+    p.eval("el('#artifact-editor').requestSubmit()").unwrap();
+    p.wait("el('#artifact-reading strong')?.textContent==='selected'");
+    let document_url = p.eval("location.href").unwrap();
+    let id = p
+        .eval("new URLSearchParams(location.hash.slice(1)).get('artifact')")
+        .unwrap();
+    p.eval("const r=document.createRange();r.selectNodeContents(el('#artifact-reading strong').firstChild);getSelection().removeAllRanges();getSelection().addRange(r);el('#artifact-reading').dispatchEvent(new Event('pointerup'))").unwrap();
+    p.wait("el('#artifact-selection-comment')?.checkVisibility()");
+    p.eval("el('#artifact-selection-comment').click()").unwrap();
+    assert_eq!(
+        p.eval("el('#artifact-quote').textContent").unwrap(),
+        "selected"
+    );
+    p.eval("fill('#artifact-comment','Anchored discussion');el('#artifact-comment-form').requestSubmit()").unwrap();
+    p.wait("el('.artifact-thread blockquote')?.textContent==='selected'");
+    assert_eq!(
+        p.eval("el('.artifact-thread').textContent.includes('Outdated selection')")
+            .unwrap(),
+        false
+    );
+    p.eval("el('.artifact-reply summary').click();fill('[data-reply] textarea','Follow up');el('[data-reply]').requestSubmit()").unwrap();
+    p.wait("el('.artifact-thread .reply')?.textContent.includes('Follow up')");
+    p.eval("el('[data-resolve]').click()").unwrap();
+    p.wait("el('details.artifact-thread.resolved')?.open===false");
+    p.eval("window.oldReader=true").unwrap();
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait("!window.oldReader && !!el('#artifact-comments-toggle')");
+    p.eval("if(el('#artifact-comments').hidden)el('#artifact-comments-toggle').click()")
+        .unwrap();
+    p.wait("el('details.resolved .reply')?.textContent.includes('Follow up')");
+    p.eval("el('.artifact-menu summary').click();el('#artifact-edit-browser').click();fill('#artifact-body','My merged draft')").unwrap();
+    cli(
+        &f,
+        &[
+            "artifact",
+            "edit",
+            id.as_str().unwrap(),
+            "--title",
+            "Concurrent title",
+            "--body",
+            "Other device text",
+            "--if-version",
+            "1",
+        ],
+    );
+    p.eval("el('#artifact-editor').requestSubmit()").unwrap();
+    p.wait("el('#artifact-load-latest')?.checkVisibility()");
+    assert_eq!(
+        p.eval("el('#artifact-body').value").unwrap(),
+        "My merged draft"
+    );
+    p.eval("el('#artifact-load-latest').click()").unwrap();
+    p.wait("el('#artifact-conflict pre')?.textContent==='Other device text'");
+    p.eval("el('#artifact-use-revision').click();fill('#artifact-title','Renamed plan');el('#artifact-editor').requestSubmit()").unwrap();
+    p.wait("el('#artifact-reading p')?.textContent==='My merged draft'");
+    assert_eq!(p.eval("location.href").unwrap(), document_url);
+    assert_eq!(
+        p.eval("el('.artifact-document-heading h1').textContent")
+            .unwrap(),
+        "Renamed plan"
+    );
+    p.eval("if(el('#artifact-comments').hidden)el('#artifact-comments-toggle').click();el('details.resolved summary').click()").unwrap();
+    p.wait("el('details.resolved')?.innerText.includes('Outdated selection · discussion preserved') && el('details.resolved').innerText.includes('Follow up')");
+}
