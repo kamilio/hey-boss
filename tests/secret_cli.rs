@@ -1,6 +1,6 @@
 //! Synthetic credentials only. Assert that neither errors nor child output expose them.
 use std::fs;
-use std::io::{BufRead, Read, Write};
+use std::io::{BufRead, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
@@ -53,9 +53,15 @@ impl Fixture {
         let listener = UnixListener::bind(self.root.join("daemon.sock")).unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            stream.read_to_end(&mut request).unwrap();
-            let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .unwrap();
+            // Reply as soon as the single request object arrives. Waiting for EOF on
+            // this test socket can deadlock with a client already waiting for its reply.
+            let request: serde_json::Value = serde::Deserialize::deserialize(
+                &mut serde_json::Deserializer::from_reader(std::io::BufReader::new(&stream)),
+            )
+            .unwrap();
             assert_eq!(request["command"], "secret");
             assert_eq!(request["sync"], true);
             stream.write_all(&reply).unwrap();
