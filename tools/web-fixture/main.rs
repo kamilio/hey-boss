@@ -23,6 +23,7 @@ mod desktop;
 mod fleet;
 mod issue_design;
 mod markdown_attachments;
+mod metadata_sync;
 mod origin;
 mod reviewed_evidence;
 mod seed;
@@ -31,6 +32,7 @@ mod seed;
 enum Scenario {
     AssignmentWatch,
     RetainedAttempt,
+    MetadataSync,
     IssueArchitecture,
     IssueTimeline,
     IssueStatus,
@@ -70,6 +72,7 @@ impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
             Self::RetainedAttempt => ("Surviving attempt QA", 59673),
+            Self::MetadataSync => ("Metadata sync QA", 59650),
             Self::AssignmentWatch => ("Assignment QA", 48698),
             Self::IssueArchitecture => ("Issue Design QA", 48122),
             Self::IssueTimeline => ("Timeline QA", 48948),

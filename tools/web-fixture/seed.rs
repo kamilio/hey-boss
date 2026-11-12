@@ -58,6 +58,7 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
         }
         AssignedAgent => fleet::assigned_agent(f, p)?,
         RetainedAttempt => return retained_attempt::seed(f, p),
+        MetadataSync => return metadata_sync::verify(f, p),
         ReviewedEvidence => return reviewed_evidence::verify(f, p),
         MarkdownAttachments => return markdown_attachments::seed(f),
         ArtifactDiagrams => {

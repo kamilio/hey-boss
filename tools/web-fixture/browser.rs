@@ -427,3 +427,6 @@ mod artifact_visual;
 
 #[path = "quiet_hours.rs"]
 mod quiet_hours;
+
+#[path = "metadata_browser.rs"]
+mod metadata_browser;

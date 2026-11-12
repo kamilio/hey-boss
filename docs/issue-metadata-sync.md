@@ -42,14 +42,13 @@ Repeatable verification:
 
 - `cargo test --locked -p hey-boss --test issues`
 - `cargo test --locked -p hey-boss --lib fleet::native::replica::tests`
-- `node tools/metadata_sync_checks.mjs /path/to/installed/hey-boss`
-- Add `--serve` to keep the private companion viewer available at port 59650 for
-  visual checks. Stop the fixture afterward to remove its services and files.
+- `HEY_BOSS_TEST_BINARY=/path/to/installed/hey-boss cargo test --locked -p hey-boss --example web-fixture installed_metadata_sync`
+- `HEY_BOSS_TEST_BINARY=/path/to/installed/hey-boss cargo test --locked -p hey-boss --example web-fixture companion_metadata_denial -- --ignored` runs the companion editor check in Chrome.
+- `cargo run --locked -p hey-boss --example web-fixture -- metadata-sync /path/to/installed/hey-boss` keeps the private companion viewer open on port 59650. Stop it with Ctrl+C.
 
-The installed-binary probe requires ten completed stages, advancing pull cursors,
-drained journals, matching labels/lifecycle/comments/audit counts, and database
-integrity. Every CLI invocation requires a normal expected exit. Fixture setup
-only changes private temporary stores.
+The installed-binary check verifies advancing pull cursors, drained journals,
+matching labels, lifecycle, comments and audit counts, and database integrity.
+It works only on disposable controller and companion databases.
 
 The editor preserves denied drafts, clears retry tokens only for definitive
 allocation failures, and scrolls the error above the footer. Cancel restores the
