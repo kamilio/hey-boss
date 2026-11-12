@@ -103,9 +103,18 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
     if !db.query_row("SELECT coalesce((SELECT code_reviews_enabled FROM project_settings WHERE project_id=?1),0)",[&p.id],|r|r.get::<_,bool>(0))?{return Err(Error::invalid("Code Reviews is disabled for this project"))}
     let id = match op {
         Operation::List => {
-            return Ok(
-                json!({"ok":true,"reviews":db.query_collect(&format!("{SELECT} WHERE project_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 200"),[&p.id],row)?}),
-            );
+            let sql = format!("SELECT r.*,
+                (SELECT count(*) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id),
+                (SELECT substr(body,1,240) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id ORDER BY ordinal,id LIMIT 1)
+                FROM ({SELECT} WHERE project_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 200) r
+                ORDER BY r.updated_at DESC,r.id DESC");
+            let reviews = db.query_collect(&sql, [&p.id], |r| {
+                let mut item = row(r)?;
+                item["comment_count"] = json!(r.get::<_, i64>(11)?);
+                item["first_comment"] = json!(r.get::<_, Option<String>>(12)?);
+                Ok::<_, rusqlite::Error>(item)
+            })?;
+            return Ok(json!({"ok":true,"reviews":reviews}));
         }
         Operation::ForPr { number } => {
             let ids=db.query_collect("SELECT id FROM pr_code_reviews WHERE project_id=?1 AND number=?2 ORDER BY updated_at DESC,id DESC",params![p.id,number],|r|r.get::<_,i64>(0))?;

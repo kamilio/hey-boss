@@ -96,16 +96,33 @@ try {
     body: "A reminder scheduled just before midnight can appear on the wrong day.",
   };
   const saved = op(first).review;
-  op({
+  const approval = op({
     ...first,
     number: 72,
     title: "Keep existing reminder labels",
     comments: [],
     verdict: "APPROVE",
     body: "The change preserves existing labels.",
-  });
+  }).review;
+  op({ ...first, number: 73, title: "Draft with inline feedback", verdict: null, body: "" });
   await page.locator("#reviews-refresh").click();
-  await page.getByRole("button", { name: /#71/ }).click();
+  const indexRow = page.getByRole("button", { name: /#71/, expanded: false });
+  await indexRow.waitFor();
+  assert.equal(await page.locator("#reviews-detail").count(), 0);
+  assert.ok((await indexRow.textContent()).includes(first.body));
+  assert.ok((await indexRow.textContent()).includes(first.comments[0].body));
+  assert.ok((await indexRow.textContent()).includes("1 inline comment"));
+  const item = page.locator(".review-index-row").filter({ has: indexRow });
+  await item.getByRole("button", { name: "Like", exact: true }).click();
+  await page.reload();
+  await item.getByRole("button", { name: "Liked", pressed: true }).waitFor();
+  assert.equal(await page.locator("#reviews-detail").count(), 0);
+  const draft = page.locator(".review-index-row").filter({hasText:"#73"});
+  assert.ok((await draft.textContent()).includes(first.comments[0].body));
+  assert.equal(await draft.locator(".button.primary").count(), 0);
+  await item.getByRole("button", {name:"Liked"}).click();
+  await item.getByRole("button", {name:"Like", pressed:false}).waitFor();
+  await indexRow.click();
   await page
     .getByRole("button", { name: /#71/, expanded: true })
     .waitFor();
@@ -204,8 +221,30 @@ try {
     digest: edited.digest,
   });
   assert.equal(op({ command: "view", id: saved.id }).review.stage, "submitted");
-  await page.getByRole("button", { name: /#72/ }).click();
-  await page.getByRole("button", { name: "Approve and publish" }).waitFor();
+  await row.click();
+  const approve = page.getByRole("button", { name: "Approve and publish" });
+  const latest = op({ command:"edit", id:approval.id, version:approval.version,
+    comment:null, body:"Updated approval text." }).review;
+  requested = null;
+  await approve.click();
+  await page.getByRole("alert").getByText(/review changed/i).waitFor();
+  assert.equal(requested, null, "Never publish unseen edits");
+  await page.locator("#reviews-refresh").click();
+  await page.getByText(latest.body, {exact:true}).waitFor();
+  await page.unroute("**/api/code-reviews/publish");
+  await page.route("**/api/code-reviews/publish", (route) => {
+    requested = route.request().postDataJSON();
+    const claim = op({ command:"claim_publication", id:latest.id,
+      version:latest.version, digest:latest.digest }).review;
+    op({ command:"finish_publication", id:latest.id, version:claim.version,
+      receipt:"https://github.com/example/time/pull/72#review-1", author:"qa" });
+    return route.fulfill({ json:{ok:true} });
+  });
+  await approve.click();
+  await page.getByText("Published to GitHub.", {exact:true}).waitFor();
+  assert.deepEqual(requested, {project, id:latest.id, version:latest.version, digest:latest.digest});
+  assert.equal(await page.locator("#reviews-detail").count(), 0);
+  assert.equal(await approve.count(), 0);
   assert.deepEqual(errors, []);
   console.log(
     "Code Reviews: disabled, empty, approval, changes requested, both edits, diff anchors, stale publication and 8 visual variants passed.",

@@ -76,7 +76,7 @@
       const v = await action({ command: "list" });
       if (seq !== serial) return;
       rows = v.reviews;
-      const target = rows.find((x) => x.id == id) || rows[0];
+      const target = rows.find((x) => x.id == id);
       let detail = null;
       if (target)
         detail = (await action({ command: "view", id: target.id })).review;
@@ -176,6 +176,51 @@
     }
     return pre;
   }
+  function publishButton(r) {
+    const label = {
+      APPROVE: "Approve and publish",
+      COMMENT: "Publish comments",
+      REQUEST_CHANGES: "Publish requested changes",
+    }[r.verdict];
+    const publish = btn(label, async () => {
+      if (busy || editing) {
+        error("Save or cancel your edit before publishing.");
+        return;
+      }
+      busy = true;
+      const seq = serial;
+      publish.disabled = true;
+      error("");
+      try {
+        const current = r.digest ? r : (await action({ command: "view", id: r.id })).review;
+        if (seq !== serial) return;
+        if (current.version !== r.version || current.stage !== "submitted")
+          throw Error("This review changed. Refresh the queue before publishing.");
+        await HeyBossUI.post(
+          "/api/code-reviews/publish",
+          {
+            project,
+            ...(host ? { host } : {}),
+            id: r.id,
+            version: r.version,
+            digest: current.digest,
+          },
+          boot,
+          { fallback: "Publication failed" },
+        );
+        if (seq !== serial) return;
+        await load(review?.id);
+        $("#reviews-status").textContent = "Published to GitHub.";
+      } catch (err) {
+        if (seq === serial) error(err.message);
+      } finally {
+        busy = false;
+        publish.disabled = false;
+      }
+    });
+    publish.classList.add("primary");
+    return publish;
+  }
   function render() {
     const list = $("#reviews-list"),
       pane = e("section");
@@ -212,10 +257,53 @@
         e("strong", r.title, "merge-title"),
         e("span", "#" + r.number + " · " + stage[r.stage], "merge-meta"),
       );
+      const count = r.comments?.length ?? r.comment_count;
+      if (!selected) {
+        const body = r.body.trim();
+        const inline = r.comments?.[0]?.body || r.first_comment;
+        if (body) main.append(e("span", body, "review-preview"));
+        if (inline) main.append(e("span", "Inline: " + inline, "review-preview"));
+        if (count) main.querySelector(".merge-meta").append(" · " + count + " inline comment" + (count === 1 ? "" : "s"));
+      }
       const arrow = e("span", undefined, "review-chevron");
       arrow.setAttribute("aria-hidden", "true");
       b.append(icon, main, arrow);
-      list.append(b);
+      const row = e("div", undefined, "review-index-row");
+      row.append(b);
+      if (!selected) {
+        const actions = e("div", undefined, "review-quick-actions");
+        const key = "code-review-like:" + JSON.stringify([host, project, r.id]);
+        const like = btn("", () => {
+          const next = like.getAttribute("aria-pressed") !== "true";
+          try {
+            if (next) localStorage.setItem(key, "1");
+            else localStorage.removeItem(key);
+            showLike(next);
+          } catch {
+            error("This browser could not save your Like.");
+          }
+        });
+        function showLike(on) {
+          like.textContent = on ? "Liked" : "Like";
+          like.setAttribute("aria-pressed", String(on));
+        }
+        try {
+          showLike(localStorage.getItem(key) === "1");
+        } catch {
+          showLike(false);
+          like.disabled = true;
+        }
+        like.classList.add("small");
+        like.title = "Mark this review on this device";
+        actions.append(like);
+        if (r.stage === "submitted") {
+          const publish = publishButton(r);
+          publish.classList.add("small");
+          actions.append(publish);
+        }
+        row.append(actions);
+      }
+      list.append(row);
       if (selected) list.append(pane);
     }
     if (!review) {
@@ -289,46 +377,8 @@
     }
     const footer = e("div", undefined, "review-actions");
     if (r.stage === "submitted") {
-      const label = {
-        APPROVE: "Approve and publish",
-        COMMENT: "Publish comments",
-        REQUEST_CHANGES: "Publish requested changes",
-      }[r.verdict];
-      const publish = btn(label, async () => {
-        if (busy || editing) {
-          error("Save or cancel your edit before publishing.");
-          return;
-        }
-        busy = true;
-        const seq = serial;
-        publish.disabled = true;
-        error("");
-        try {
-          await HeyBossUI.post(
-            "/api/code-reviews/publish",
-            {
-              project,
-              ...(host ? { host } : {}),
-              id: r.id,
-              version: r.version,
-              digest: r.digest,
-            },
-            boot,
-            { fallback: "Publication failed" },
-          );
-          if (seq !== serial) return;
-          await load(r.id);
-          $("#reviews-status").textContent = "Published to GitHub.";
-        } catch (err) {
-          if (seq === serial) error(err.message);
-        } finally {
-          busy = false;
-          publish.disabled = false;
-        }
-      });
-      publish.classList.add("primary");
       footer.append(
-        publish,
+        publishButton(r),
         e("small", "Publishes under your GitHub account."),
       );
     } else if (
