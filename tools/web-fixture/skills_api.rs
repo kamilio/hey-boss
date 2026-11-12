@@ -12,6 +12,21 @@ fn put(path: PathBuf, bytes: impl AsRef<[u8]>) {
     fs::write(path, bytes).unwrap();
 }
 
+fn install_transport(root: &Path) {
+    fs::create_dir(root.join("bin")).unwrap();
+    symlink(worker_fixtures::binary("skill-ssh"), root.join("bin/ssh")).unwrap();
+    symlink("/usr/bin/true", root.join("bin/open")).unwrap();
+}
+fn configure(c: &mut Command, f: &Fixture) {
+    let root = f.root.path();
+    c.env("TMPDIR", root)
+        .env("SKILL_TEST_CLI", &f.binary)
+        .env("SKILL_TEST_STUDIO", root.join("studio"))
+        .env(
+            "PATH",
+            std::env::join_paths([root.join("bin"), "/usr/bin".into(), "/bin".into()]).unwrap(),
+        );
+}
 struct Api {
     _server: Service,
     url: String,
@@ -20,7 +35,6 @@ struct Api {
 }
 impl Api {
     fn start(f: &Fixture) -> Self {
-        let root = f.root.path();
         let mut c = f.command(&[
             "issue",
             "--project",
@@ -31,13 +45,7 @@ impl Api {
             "--no-discovery",
             "--json",
         ]);
-        c.env("TMPDIR", root)
-            .env("SKILL_TEST_CLI", &f.binary)
-            .env("SKILL_TEST_STUDIO", root.join("studio"))
-            .env(
-                "PATH",
-                std::env::join_paths([root.join("bin"), "/usr/bin".into(), "/bin".into()]).unwrap(),
-            );
+        configure(&mut c, f);
         let (server, base) = start_web(c);
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
@@ -150,9 +158,7 @@ fn skills_distribution_survives_conflicts_and_server_restart() {
     let junk = studio.join(".claude/skills/bad-junk");
     put(junk.join("SKILL.md"), "---\nname: bad-junk\n---\nFixture");
     put(root.join("config.yaml"), "ssh_hosts: [studio, offline]\n");
-    fs::create_dir(root.join("bin")).unwrap();
-    symlink(worker_fixtures::binary("skill-ssh"), root.join("bin/ssh")).unwrap();
-    symlink("/usr/bin/true", root.join("bin/open")).unwrap();
+    install_transport(root);
     let api = Api::start(&f);
     let scan = json!({"action":"scan"});
     assert_eq!(
@@ -288,3 +294,6 @@ fn skills_distribution_survives_conflicts_and_server_restart() {
             .all(|c| c["name"] != "bad-junk")
     );
 }
+
+#[path = "skills_native.rs"]
+mod native;
