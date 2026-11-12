@@ -295,3 +295,6 @@ mod navigation;
 
 #[path = "workers.rs"]
 mod workers;
+
+#[path = "quick_issue.rs"]
+mod quick_issue;

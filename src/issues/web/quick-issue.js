@@ -3,12 +3,13 @@ const HeyBossQuickIssue = (() => {
   const taskKind = (labels = []) => labels.some(label => ["task:plan", "task:research"].includes(label)) ? "plan" : "implement";
   const taskLabels = (labels, kind) => [...new Set(labels.filter(label => !["task:plan", "task:research"].includes(label))), ...(kind === "plan" ? [`task:${kind}`] : [])];
   const fold = value => value.normalize("NFC").toLocaleLowerCase();
+  const insideWord = (text, at) => /[\p{L}\p{M}\p{N}_.+\-@]$/u.test(text.slice(Math.max(0, at - 2), at));
   // Scan whole tokens so email addresses, escaped @ signs and @ inside quotes
   // cannot open another picker. Offsets match the input's selection offsets.
   function mentionAt(text, caret) {
     for (let i = 0; i < text.length;) {
       if (text[i] === "\\" && text[i + 1] === "@") { i += 2; continue; }
-      if (text[i] !== "@" || (i && /[\p{L}\p{N}_.+\-@]/u.test(text[i - 1]))) { ++i; continue; }
+      if (text[i] !== "@" || insideWord(text, i)) { ++i; continue; }
       const start = i++, quote = text[i];
       let query = "", closed = false;
       if (quote === '"' || quote === "'") {
@@ -20,7 +21,7 @@ const HeyBossQuickIssue = (() => {
         }
         if (text[i] === quote) { ++i; closed = true; }
       } else {
-        const token = (text.slice(i).match(/^[\p{L}\p{N}_:/\.\-]+/u)?.[0] || "").replace(/\.+$/, "");
+        const token = (text.slice(i).match(/^[\p{L}\p{M}\p{N}_:/\.\-]+/u)?.[0] || "").replace(/\.+$/, "");
         query = text.slice(i,Math.max(i,Math.min(caret,i + token.length)));
         i += token.length;
       }
@@ -37,8 +38,8 @@ const HeyBossQuickIssue = (() => {
   function completeMention(text, mention, project, projects) {
     const unique = projects.filter(p => fold(p.name) === fold(project.name) || fold(p.id) === fold(project.name));
     let name = unique.length === 1 && unique[0].id === project.id ? project.name : project.id;
-    if (!/^[\p{L}\p{N}_:/\.\-]+$/u.test(name) || name.endsWith('.')) name = `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
-    const suffix = text.slice(mention.end), space = !suffix || /^[\p{L}\p{N}_:/\-]/u.test(suffix) ? " " : "";
+    if (!/^[\p{L}\p{M}\p{N}_:/\.\-]+$/u.test(name) || name.endsWith('.')) name = `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    const suffix = text.slice(mention.end), space = !suffix || /^[\p{L}\p{M}\p{N}_:/\-]/u.test(suffix) ? " " : "";
     const prefix = text.slice(0,mention.start) + "@" + name + space;
     return {text:prefix + suffix, caret:prefix.length + (/^\s/.test(suffix) ? 1 : 0)};
   }
@@ -48,7 +49,7 @@ const HeyBossQuickIssue = (() => {
     let title = "", selected = null;
     for (let i = 0; i < text.length;) {
       if (text[i] === "\\" && text[i + 1] === "@") { title += "@"; i += 2; continue; }
-      if (text[i] !== "@" || (i && /[\p{L}\p{N}_.+\-@]/u.test(text[i - 1]))) { title += text[i++]; continue; }
+      if (text[i] !== "@" || insideWord(text, i)) { title += text[i++]; continue; }
       let end = i + 1, name;
       const quote = text[end];
       if (quote === '"' || quote === "'") {
@@ -59,9 +60,9 @@ const HeyBossQuickIssue = (() => {
         }
         if (text[end] !== quote) throw new Error("Close the quote around the project name.");
         ++end;
-        if (/[\p{L}\p{N}_:/\-]/u.test(text[end] || "")) throw new Error("Separate the project mention from the title.");
+        if (/[\p{L}\p{M}\p{N}_:/\-]/u.test(text[end] || "")) throw new Error("Separate the project mention from the title.");
       } else {
-        const token = text.slice(end).match(/^[\p{L}\p{N}_:/\.\-]+/u)?.[0] || "";
+        const token = text.slice(end).match(/^[\p{L}\p{M}\p{N}_:/\.\-]+/u)?.[0] || "";
         name = token.replace(/\.+$/, ""); end += name.length;
       }
       if (!name) throw new Error("Enter a project after @, or use \\@ for literal text.");
@@ -268,7 +269,6 @@ const HeyBossQuickIssue = (() => {
       finally { saving = false; input.disabled = false; bottom.disabled = false; kind.disabled = false; if (dialog.open) { preview(); error.hidden = false; input.focus(); } }
     };
   }
-  if (typeof document !== "undefined") init();
+  init();
   return {parse, mentionAt, suggestions, completeMention, taskKind, taskLabels};
 })();
-if (typeof module !== "undefined") module.exports = HeyBossQuickIssue;
