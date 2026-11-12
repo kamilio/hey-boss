@@ -53,7 +53,7 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn claims_lead_with_instructions_and_end_with_actual_iterations() {
+fn plain_claim_returns_the_task_and_named_links_without_repeating_the_prompt() {
     let f = Fixture::new();
     f.text(&[
         "settings",
@@ -65,46 +65,31 @@ fn claims_lead_with_instructions_and_end_with_actual_iterations() {
     f.text(&[
         "create",
         "--title",
-        "Iteration history",
+        "Check rollout",
         "--body",
         "Verify rollout.",
         "--label",
         "push-blocked",
     ]);
-    let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
-    for count in 0..=2 {
-        if count > 0 {
-            db.execute(
-                "INSERT INTO issue_agent_launches(run_id,project_id,issue_number,launched_at) VALUES(?1,'named:Settings QA',1,1)",
-                [format!("run-{count}")],
-            )
-            .unwrap();
-        }
-        for _ in 0..2 {
-            let output = f.text(&["claim", "1"]);
-            let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
-            let instructions = json["instructions"].as_str().unwrap().trim_end();
-            let label = format!("Iterations started: {count} (agent launches)\n");
-            assert!(
-                output.starts_with(&format!(
-                    "{instructions}\n\n---\n\n#1 [open] Iteration history\n\nVerify rollout.\n"
-                )),
-                "{output}"
-            );
-            assert!(output.contains("push-blocked") && instructions.contains("Follow the task."));
-            assert!(output.ends_with(&label), "{output}");
-            for omitted in [
-                "Instructions:",
-                "PRs enabled:",
-                "Settings QA (named:Settings QA)",
-                "Already in the requested state.",
-            ] {
-                assert!(!output.contains(omitted), "{output}");
-            }
-            assert_eq!(json["issue"]["agent_launch_count"], count);
-        }
-    }
-    assert!(!f.text(&["view", "1"]).contains("Iterations started:"));
+    let task = "#1 [open] Check rollout\n\nVerify rollout.\n\nLabels: push-blocked\n";
+    assert_eq!(f.text(&["claim", "1"]), task);
+    let asana = "https://app.asana.com/0/123/456";
+    f.text(&["pr", "add", "1", asana]);
+    assert_eq!(
+        f.text(&["claim", "1"]),
+        format!("{task}Asana task: {asana}\n")
+    );
+    let pr = "https://github.com/example/project/pull/42";
+    f.text(&["pr", "add", "1", pr]);
+    let output = f.text(&["claim", "1"]);
+    assert!(output.lines().any(|line| line == format!("PR: {pr}")));
+    let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
+    assert!(
+        json["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("Follow the task.")
+    );
 }
 
 #[test]
