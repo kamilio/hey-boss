@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod context;
 pub mod media;
+pub mod notebook;
 pub mod plugins;
 pub mod provider;
 

@@ -101,7 +101,13 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
         acks: &mut acks,
     };
     agent::run(&state, &url, &json!({"turn":"Create notes."}), &mut p).await?;
-    assert_eq!(fs::metadata(&state)?.permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        fs::metadata(state.with_extension("jsonl"))?
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
     agent::run(&state, &url, &json!({"turn":"What happened?"}), &mut p).await?;
     let req = server.await??;
     assert_eq!(req[0]["reasoning"]["effort"], "low");
@@ -118,11 +124,11 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
         req[2]["input"].to_string().contains("function_call_output")
             && req[2]["input"].to_string().contains("exit status: 7")
     );
-    let interrupted = context::restore(
+    let interrupted = hey_boss_conversation::notebook::Notebook::open(
         &home.join("missing"),
         &json!([{"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"shell"}}]}]),
     )?;
-    assert_eq!(interrupted[1]["toolCallId"], "pending");
+    assert_eq!(interrupted.messages[1]["toolCallId"], "pending");
     let long = vec![json!({"role":"user","content":"x".repeat(60000)}); 4];
     for summary in ["", "Earlier decisions."] {
         let (url, server) = mock(vec![msg("Done."), msg(summary)]).await?;
@@ -136,9 +142,13 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
         .await;
         assert_eq!(r.is_err(), summary.is_empty());
         server.await??;
-        let saved = context::restore(&state, &Value::Null)?;
+        let saved = hey_boss_conversation::notebook::Notebook::open(&state, &Value::Null)?;
         assert_eq!(
-            saved.iter().filter(|m| m["role"] == "user").count(),
+            saved
+                .messages
+                .iter()
+                .filter(|m| m["role"] == "user")
+                .count(),
             if summary.is_empty() { 5 } else { 3 }
         );
     }
@@ -279,5 +289,49 @@ async fn login_shell_loads_interactive_startup_and_preserves_quoting() -> Result
     };
     let output=p.call("shell",&json!({"command":"wire_fixture; printf '%s' ' quoted $HOME; $(false)'","description":"Checking terminal commands."})).await?;
     assert_eq!(output, "terminal-yes quoted $HOME; $(false)");
+    Ok(())
+}
+
+#[test]
+fn notebook_extends_the_same_file_and_recovers_an_interrupted_write() -> Result<()> {
+    use hey_boss_conversation::notebook::Notebook;
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    let dir = scratch();
+    let state = dir.path().join("chat.agent.json");
+    let journal = state.with_extension("jsonl");
+    let old = json!({"role":"user","content":"old\nmessage"});
+    fs::write(&state, json!({"messages":[old]}).to_string())?;
+    let mut book = Notebook::open(&state, &Value::Null)?;
+    let prefix = fs::read(&journal)?;
+    let inode = journal.metadata()?.ino();
+    book.push(json!({"role":"assistant","tool_calls":[{"id":"x","function":{"name":"shell"}}]}))?;
+    assert!(fs::read(&journal)?.starts_with(&prefix));
+    assert_eq!(journal.metadata()?.ino(), inode);
+    assert!(Notebook::open(&state, &Value::Null).is_err());
+    drop(book);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)?
+        .write_all(b"{\"role\":\"to")?;
+    let mut book = Notebook::open(&state, &Value::Null)?;
+    assert_eq!(book.messages[0], old);
+    assert_eq!(book.messages[2]["toolCallId"], "x");
+    book.push(json!({"role":"user","content":"next"}))?;
+    let summary = json!({"role":"system","content":"Earlier conversation"});
+    book.compact(3, summary.clone())?;
+    drop(book);
+    let book = Notebook::open(&state, &Value::Null)?;
+    assert_eq!(
+        book.messages,
+        vec![summary, json!({"role":"user","content":"next"})]
+    );
+    assert!(fs::read(&journal)?.starts_with(&prefix));
+    drop(book);
+    fs::OpenOptions::new()
+        .append(true)
+        .open(&journal)?
+        .write_all(b"broken\n")?;
+    assert!(Notebook::open(&state, &Value::Null).is_err());
     Ok(())
 }

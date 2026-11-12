@@ -4891,9 +4891,9 @@ func auditInterruptedChat(_ root: String) {
     precondition(reopened.conversationHistory.last?["content"] == sent)
     let folder = path.deletingLastPathComponent()
     wait("agent accepted the correction and playback cutoff") {
-        guard let file = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first(where: { $0.lastPathComponent.hasSuffix(".agent.json") }),
-              let data = try? Data(contentsOf: file), let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let history = saved["messages"] as? [[String: Any]] else { return false }
+        guard let file = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first(where: { $0.lastPathComponent.hasSuffix(".agent.jsonl") }),
+              let data = try? Data(contentsOf: file) else { return false }
+        let history = data.split(separator: 10).compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
         return history.contains { $0["role"] as? String == "user" && $0["content"] as? String == sent }
     }
     chat.stop("Done")

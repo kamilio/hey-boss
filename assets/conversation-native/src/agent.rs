@@ -20,18 +20,24 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
     } else {
         "local"
     };
-    let mut history = context::restore(state, &request["history"])?;
-    history.push(json!({"role":"user","content":turn}));
-    context::save(state, &history)?;
+    let mut book = crate::notebook::Notebook::open(state, &request["history"])?;
+    book.push(json!({"role":"user","content":turn}))?;
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
     let schemas = schemas();
     loop {
-        let msg =
-            provider::complete(tools.http, url, key, &prompt, &history, &schemas, true).await?;
+        let msg = provider::complete(
+            tools.http,
+            url,
+            key,
+            &prompt,
+            &book.messages,
+            &schemas,
+            true,
+        )
+        .await?;
         let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
         let text = msg["content"].as_str().unwrap_or("").to_owned();
-        history.push(msg);
-        context::save(state, &history)?;
+        book.push(msg)?;
         if !text.is_empty() {
             emit(json!({"Message":{"text":text}}))?;
         }
@@ -42,17 +48,16 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                 tools.call(name, &args).await
             }
             .await;
-            history.push(json!({"role":"tool","name":name,"toolCallId":call["id"],"content":content.unwrap_or_else(|e|json!(e.to_string()))}));
-            context::save(state, &history)?;
+            book.push(json!({"role":"tool","name":name,"toolCallId":call["id"],"content":content.unwrap_or_else(|e|json!(e.to_string()))}))?;
         }
-        if let Some(cut) = compact_at(&history) {
+        if let Some(cut) = compact_at(&book.messages) {
             emit(json!({"AgentStatus":{"text":"Remembering the conversation…"}}))?;
             let msg = provider::complete(
                 tools.http,
                 url,
                 key,
                 include_str!("../../conversation-compact.md"),
-                &history[..cut],
+                &book.messages[..cut],
                 &[],
                 false,
             )
@@ -65,8 +70,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
             let formatted = poe_agent_rust::context_plugins::format_compaction_summary(
                 &summary.encode_utf16().collect::<Vec<_>>(),
             );
-            history.splice(..cut,[json!({"role":"system","name":"compaction","content":String::from_utf16(&formatted)?})]);
-            context::save(state, &history)?;
+            book.compact(cut,json!({"role":"system","name":"compaction","content":String::from_utf16(&formatted)?}))?;
         }
         if calls.is_empty() {
             emit(json!({"TurnCompleted":{"status":"Completed","output":text}}))?;
