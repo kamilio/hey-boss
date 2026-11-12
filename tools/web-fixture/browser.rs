@@ -283,3 +283,6 @@ mod skills_api;
 
 #[path = "skills_browser.rs"]
 mod skills;
+
+#[path = "proxy_browser.rs"]
+mod proxy;
