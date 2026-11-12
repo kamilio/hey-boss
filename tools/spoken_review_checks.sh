@@ -4,7 +4,8 @@ set -eu
 scripts=$(cd "$(dirname "$0")" && pwd)
 cli=$1
 audit=$2
-root=$(mktemp -d -t hb-spoken-review)
+mkdir -p out
+root=$(mktemp -d "$PWD/out/spoken-review.XXXXXX")
 root=$(cd "$root" && pwd -P)
 key=$(printf %s "$root/issues.db" | shasum -a 256 | cut -c1-24)
 socket="/tmp/hey-boss-db-$(id -u)/$key"
@@ -17,22 +18,8 @@ trap 'kill "$owner" 2>/dev/null || true; wait "$owner" 2>/dev/null || true; rm -
 for ((i=0; i<200; i++)); do [ ! -S "$socket.sock" ] || break; sleep .05; done
 test -S "$socket.sock"
 "$cli" project init --project SpokenReview --prs false --worktree false --yes --json >/dev/null
-artifact() { "$cli" artifact --project named:SpokenReview --json "$@"; }
-id=$(artifact create --title "Review fixture" --body $'# First heading\n\nFirst passage.\nSecond passage has several words and continues long enough to interrupt and resume reading.\n\nFinal passage. This section addresses a separate point in the review.' | node -pe 'JSON.parse(require("fs").readFileSync(0)).artifact.id')
 say -v Samantha -o voice.aiff "Please move this paragraph after the introduction."
 ffmpeg -nostdin -loglevel error -i voice.aiff -ar 16000 -ac 1 -f s16le voice.pcm
 say -v Alex -o second.aiff "Please add a date to the last example."
 ffmpeg -nostdin -loglevel error -i second.aiff -ar 16000 -ac 1 -f s16le second.pcm
-node "$scripts/spoken_review_detection.mjs" "$cli" voice.pcm second.pcm
-HEY_BOSS_AUDIT_SPOKEN_REVIEW="$id" "$audit"
-artifact view "$id" | node -e '
-const {comments} = JSON.parse(require("fs").readFileSync(0));
-require("assert").strictEqual(comments.length, 7);
-const [c, second, recovered, typed, reply, note, title] = comments;
-require("assert")(title.body === "Shorten the title." && title.quote === null && title.parent === null);
-require("assert")(typed.quote === "First passage." && !typed.outdated && typed.resolved && reply.parent === typed.id && note.quote === null && note.parent === null);
-require("assert")(second.quote.startsWith("Final passage.") && !second.outdated && second.body.startsWith("Line 6 · revision 1") && /date to the last example/i.test(second.body), JSON.stringify(second));
-require("assert")(recovered.body.endsWith("Keep this quote.") && !recovered.outdated);
-require("assert")(c.quote.startsWith("Second passage") && !c.outdated && c.body.startsWith("Line 4 · revision 1") && /move this paragraph after the introduction/i.test(c.body), JSON.stringify(c));
-console.log("PASS saved transcript, source line, revision and web selection anchor");
-'
+HEY_BOSS_REVIEW_AUDIT="$audit" cargo test --manifest-path "$scripts/../Cargo.toml" -p hey-boss --test spoken_review -- --ignored --nocapture --test-threads=1
