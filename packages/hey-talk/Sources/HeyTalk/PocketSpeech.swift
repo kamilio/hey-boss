@@ -38,39 +38,19 @@ final class PocketSpeech {
         }
     }
 
-    func generate(_ text: String) throws -> SpeechAudio {
+    func generate(_ text: String, chunk: @escaping (SpeechAudio) throws -> Void) throws -> SpeechAudio {
         guard let endpoint else { throw TalkError("Speech model is not ready") }
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"; request.timeoutInterval = 60
         request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
         let escaped = text.addingPercentEncoding(withAllowedCharacters: .alphanumerics)!
         request.httpBody = Data(("text=" + escaped).utf8)
-        let done = DispatchSemaphore(value: 0)
-        var result: Result<Data, Error> = .failure(TalkError("Speech generation timed out"))
-        let task = session.dataTask(with: request) { data, response, error in
-            if let error { result = .failure(error) }
-            else if (response as? HTTPURLResponse)?.statusCode == 200, let data { result = .success(data) }
-            else { result = .failure(TalkError("Could not generate speech")) }
-            done.signal()
-        }
-        task.resume(); done.wait()
-        return try Self.decode(result.get())
-    }
-
-    static func decode(_ wav: Data) throws -> SpeechAudio {
-        // Pocket streams a PCM16 mono WAV with an unknown length in its header.
-        guard wav.count > 44, wav.count <= 44 + 96_000 * 120 * 2, (wav.count - 44) % 2 == 0,
-              String(decoding: wav.prefix(4), as: UTF8.self) == "RIFF",
-              String(decoding: wav[8..<16], as: UTF8.self) == "WAVEfmt ",
-              String(decoding: wav[36..<40], as: UTF8.self) == "data" else { throw TalkError("Invalid speech WAV") }
-        return try wav.withUnsafeBytes { bytes in
-            func u16(_ offset: Int) -> UInt16 { UInt16(littleEndian: bytes.loadUnaligned(fromByteOffset: offset, as: UInt16.self)) }
-            let rate = Int(UInt32(littleEndian: bytes.loadUnaligned(fromByteOffset: 24, as: UInt32.self)))
-            guard u16(20) == 1, u16(22) == 1, u16(34) == 16, (8_000...96_000).contains(rate),
-                  (wav.count - 44) / 2 <= rate * 120 else { throw TalkError("Unsupported speech WAV") }
-            let samples = stride(from: 44, to: wav.count, by: 2).map { Float(Int16(bitPattern: u16($0))) / 32_768 }
-            return SpeechAudio(samples: samples, sampleRate: Double(rate))
-        }
+        let response = StreamingWAV(chunk)
+        let task = session.dataTask(with: request)
+        task.delegate = response
+        task.resume(); response.done.wait()
+        if let error = response.error { throw error }
+        return SpeechAudio(samples: response.samples, sampleRate: Double(response.rate))
     }
 
     func stop() {
@@ -79,4 +59,57 @@ final class PocketSpeech {
         errors.fileHandleForReading.readabilityHandler = nil
     }
     deinit { stop() }
+}
+
+// URLSession serializes delegate calls. WAV payloads can split even a single PCM sample.
+private final class StreamingWAV: NSObject, URLSessionDataDelegate, @unchecked Sendable {
+    let done = DispatchSemaphore(value: 0)
+    private(set) var error: Error?
+    private(set) var samples = [Float](), rate = 0
+    private var pending = Data()
+    private let chunk: (SpeechAudio) throws -> Void
+    init(_ chunk: @escaping (SpeechAudio) throws -> Void) { self.chunk = chunk }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        guard error == nil else { return }
+        do {
+            guard (dataTask.response as? HTTPURLResponse)?.statusCode == 200 else { throw TalkError("Could not generate speech") }
+            pending.append(data)
+            if rate == 0 {
+                guard pending.count >= 44 else { return }
+                let h = Array(pending.prefix(44))
+                func u16(_ i: Int) -> Int { Int(h[i]) | Int(h[i + 1]) << 8 }
+                rate = u16(24) | u16(26) << 16
+                guard String(decoding: h[0..<4], as: UTF8.self) == "RIFF",
+                      String(decoding: h[8..<16], as: UTF8.self) == "WAVEfmt ",
+                      String(decoding: h[36..<40], as: UTF8.self) == "data",
+                      u16(20) == 1, u16(22) == 1, u16(34) == 16, (8_000...96_000).contains(rate)
+                else { throw TalkError("Invalid speech WAV") }
+                pending.removeFirst(44)
+            }
+            guard samples.count + pending.count / 2 <= rate * 120 else { throw TalkError("Invalid speech duration") }
+            // Keep the last block until EOF so the player knows which buffer ends this passage.
+            let frames = rate / 8
+            while pending.count > frames * 2 { try deliver(frames, final: false) }
+        } catch { self.error = error; dataTask.cancel() }
+    }
+
+    private func deliver(_ frames: Int, final: Bool) throws {
+        let block: [Float] = pending.withUnsafeBytes { raw in
+            (0..<frames).map { Float(Int16(littleEndian: raw.loadUnaligned(fromByteOffset: $0 * 2, as: Int16.self))) / 32768 }
+        }
+        pending.removeFirst(frames * 2)
+        samples.append(contentsOf: block)
+        try chunk(SpeechAudio(samples: block, sampleRate: Double(rate), final: final))
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError failure: Error?) {
+        defer { done.signal() }
+        if error == nil { error = failure }
+        guard error == nil else { return }
+        do {
+            guard rate > 0, !pending.isEmpty, pending.count % 2 == 0 else { throw TalkError("Incomplete speech WAV") }
+            try deliver(pending.count / 2, final: true)
+        } catch { self.error = error }
+    }
 }

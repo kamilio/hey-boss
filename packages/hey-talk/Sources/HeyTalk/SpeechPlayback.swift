@@ -159,7 +159,7 @@ final class SpeechPlayback {
         if firstAudioMS == nil { firstAudioMS = (ProcessInfo.processInfo.systemUptime - started) * 1000 }
     }
     private func pump() {
-        guard active, !generating, queued < 2, next < chunks.count else { return }
+        guard active, !generating, next - completed < 2, next < chunks.count else { return }
         generating = true
         let ticket = generation, index = next, text = chunks[next].text
         next += 1
@@ -168,19 +168,22 @@ final class SpeechPlayback {
             self.timings[index]?.words = words
         } }) { [weak self] result in DispatchQueue.main.async {
             guard let self, self.generation == ticket, self.active else { return }
-            self.generating = false
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let audio):
+                self.generating = !audio.final
                 do {
                     let start = try self.output.enqueue(audio) { [weak self] in
                         guard let self, self.generation == ticket, self.active else { return }
-                        self.queued -= 1; self.completed += 1
+                        self.queued -= 1; if audio.final { self.completed += 1 }
                         if !self.streaming && self.completed == self.chunks.count {
                             self.output.stop(); self.state = .idle; self.onChange?()
                         } else { self.onChange?(); self.pump() }
                     }
-                    self.timings[index] = TimedSegment(start: start, duration: Double(audio.samples.count) / audio.sampleRate, words: [])
+                    let beginning = self.timings[index]?.start ?? start
+                    let duration = start - beginning + Double(audio.samples.count) / audio.sampleRate
+                    let estimate = Double(text.split(whereSeparator: \.isWhitespace).count) / 2.7
+                    self.timings[index] = TimedSegment(start: beginning, duration: audio.final ? duration : max(duration, estimate), words: [])
                     self.queued += 1
                     if self.state != .paused {
                         if self.state == .loading { self.output.play(); self.markFirstAudio() }
