@@ -20,17 +20,8 @@ enum ConversationContext {
             switch app.bundleIdentifier {
             case "md.obsidian":
                 unavailable = "Obsidian’s CLI is unavailable. Enable it to read the full note."
-                guard let cli = app.bundleURL?.appendingPathComponent("Contents/MacOS/obsidian-cli") else { break }
-                // Resolve the file and editor in the same invocation, including unpersisted edits.
-                let code = """
-                (async()=>{const view=app.workspace.activeLeaf?.view,f=view?.file;
-                const header="Vault: "+app.vault.getName()+"\\nFile: "+(f?.path??"(none)");
-                if(!f || f.extension!=="md")return header;
-                return header+"\\n\\n"+(view.editor?.getValue()??await app.vault.read(f))})()
-                """
-                let result = try run(cli, ["eval", "code=" + code])
-                guard result.hasPrefix("=> Vault: ") else { throw TalkError("Enable Obsidian’s CLI to read the active note.") }
-                return String(result.dropFirst(3))
+                let note = try obsidianNote(app, focusedOnly: false)
+                return "Vault: " + note.vault + "\nFile: " + note.path + (note.text.isEmpty ? "" : "\n\n" + note.text)
             case "com.tinyspeck.slackmacgap":
                 unavailable = window == nil && !AXIsProcessTrusted() ? "Allow Hey Talk in Privacy & Security → Accessibility to identify the Slack conversation." : "Open a Slack DM, channel, or thread to read its history."
                 guard let window, let route = slackRoute(app, window: window) else {
@@ -112,6 +103,22 @@ enum ConversationContext {
         return route.flatMap { slackURL($0.absoluteString) }
     }
 
+    static func obsidianNote(_ app: NSRunningApplication, focusedOnly: Bool) throws -> ObsidianNote {
+        guard let cli = app.bundleURL?.appendingPathComponent("Contents/MacOS/obsidian-cli") else {
+            throw TalkError("Enable Obsidian’s CLI to read the active note.")
+        }
+        let code = """
+        (async()=>{const view=app.workspace.activeLeaf?.view,f=view?.file;
+        if(\(focusedOnly) && !view?.containerEl.ownerDocument.hasFocus())return "unfocused";
+        return JSON.stringify([app.vault.getName(),f?.path??"(none)"])+"\\n"+
+        (f?.extension==="md"?(view.editor?.getValue()??await app.vault.read(f)):"")})()
+        """
+        let output: String
+        do { output = try run(cli, ["eval", "code=" + code]) }
+        catch { throw TalkError("Enable Obsidian’s CLI to read the active note.") }
+        return try ObsidianNote(output: output)
+    }
+
     private static func run(_ cli: URL, _ args: [String]) throws -> String {
         let process = Process(), output = Pipe()
         process.executableURL = cli; process.arguments = args
@@ -132,5 +139,30 @@ enum ConversationContext {
         process.waitUntilExit()
         guard process.terminationStatus == 0, !data.isEmpty else { throw TalkError("App context unavailable.") }
         return String(decoding: data, as: UTF8.self) + (truncated ? "\n[Capture truncated at 256 KiB.]" : "")
+    }
+}
+
+struct ObsidianNote: Equatable {
+    let vault: String
+    let path: String
+    let text: String
+
+    init(output: String) throws {
+        if output.trimmingCharacters(in: .whitespacesAndNewlines) == "=> unfocused" {
+            throw TalkError("Focus the Obsidian note you want to hear.")
+        }
+        let parts = output.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
+        guard let header = parts.first, header.hasPrefix("=> "),
+              let location = try? JSONDecoder().decode([String].self, from: Data(header.dropFirst(3).utf8)),
+              location.count == 2 else { throw TalkError("Enable Obsidian’s CLI to read the active note.") }
+        (vault, path) = (location[0], location[1])
+        text = parts.count == 2 ? String(parts[1]) : ""
+    }
+
+    func recapText() throws -> String {
+        guard path.hasSuffix(".md") else { throw TalkError("Open a Markdown note in Obsidian to hear a recap.") }
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty else { throw TalkError("This Obsidian note is empty.") }
+        return body
     }
 }

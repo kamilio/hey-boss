@@ -432,7 +432,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
             view.onCatchUp = { [weak self] in
-                do { try self?.speech.catchUp() } catch { self?.speech.onNotice?(error.localizedDescription) }
+                Task { @MainActor in
+                    do { try await self?.speech.catchUp() } catch { self?.speech.onNotice?(error.localizedDescription) }
+                }
             }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
             view.onToggleAuto = { [weak self] in self?.toggleAutoMode() }
@@ -697,8 +699,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     }
                     return
                 case "catch-up":
-                    do { try speech.catchUp() }
-                    catch { speech.onNotice?(error.localizedDescription); throw error }
+                    Task { @MainActor in
+                        do { try await speech.catchUp(); reply(["ok": true, "speech": speech.status]) }
+                        catch { speech.onNotice?(error.localizedDescription); reply(failure(error.localizedDescription)) }
+                    }
+                    return
                 case "pause": speech.pause()
                 case "stop": speech.stop()
                 default:

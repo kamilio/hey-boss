@@ -3,10 +3,15 @@ import NaturalLanguage
 import TalkCore
 
 enum CatchUpSource: Equatable {
-    case t3(environment: String, thread: String), slack(URL)
+    case t3(environment: String, thread: String), slack(URL), obsidian(ObsidianNote)
 
-    static func current() throws -> Self {
-        guard let app = FocusedInput.keyboardApp, let window = ConversationContext.focusedWindow(app) else {
+    @MainActor static func current() async throws -> Self {
+        guard let app = FocusedInput.keyboardApp else { throw TalkError("Focus a T3 thread, Slack conversation, or Obsidian note.") }
+        if app.bundleIdentifier == "md.obsidian" {
+            let note = try await Task.detached { try ConversationContext.obsidianNote(app, focusedOnly: true) }.value
+            return .obsidian(note)
+        }
+        guard let window = ConversationContext.focusedWindow(app) else {
             throw TalkError("Focus a T3 or Slack conversation and allow Hey Talk Accessibility access.")
         }
         switch app.bundleIdentifier {
@@ -18,20 +23,29 @@ enum CatchUpSource: Equatable {
             if let path = ConversationContext.slackRoute(app, window: window), let url = URL(string: path) { return .slack(url) }
         default: break
         }
-        throw TalkError("Open the T3 thread or Slack conversation you want to hear.")
+        throw TalkError("Open the T3 thread, Slack conversation, or Obsidian note you want to hear.")
+    }
+
+    func sameLocation(as other: Self?) -> Bool {
+        if case let .obsidian(note) = self, case let .obsidian(previous) = other {
+            return note.vault == previous.vault && note.path == previous.path
+        }
+        return self == other
     }
 
     func passage() async throws -> SpokenRecap {
         switch self {
         case let .t3(environment, thread): return try await T3Server.shared.catchUp(thread, environment: environment)
+        case let .obsidian(note): return SpokenRecap(note: try note.recapText())
         case let .slack(route): return try await SlackTools.catchUp(route, call: SlackAPI().call)
         }
     }
 }
 
 struct SpokenRecap: Encodable {
-    let lastMessage: String
-    let replies: String
+    var lastMessage: String? = nil
+    var replies: String? = nil
+    var note: String? = nil
 
     @MainActor func summarize(onSentence: (String) throws -> Void) async throws {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
