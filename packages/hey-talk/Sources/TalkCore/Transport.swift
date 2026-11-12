@@ -110,11 +110,11 @@ public enum ControlSocket {
         do { try Wire.prepare(fd) } catch { close(fd); throw error }
         return fd
     }
-    public static func request(_ request: [String: Any]) throws -> [String: Any] {
+    public static func request(_ request: [String: Any], timeout: TimeInterval = 180) throws -> [String: Any] {
         let fd = try connect()
         defer { close(fd) }
         try Wire.write(Wire.json(request), to: fd)
-        let data = try Wire.line(from: fd, timeout: 180)
+        let data = try Wire.line(from: fd, timeout: timeout)
         guard let response = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw TalkError("Invalid service response")
         }

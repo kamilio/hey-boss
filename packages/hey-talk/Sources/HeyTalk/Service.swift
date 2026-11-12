@@ -44,6 +44,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     } }
     private var overlay: Overlay?
     private var conversation: [String: Any]?
+    private var conversationFocus: ConversationFocus?
     private var conversationLevel = 0.0
     private var conversationRevision = 0
     private var openingConversation = false
@@ -244,6 +245,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         if autoTarget != nil || autoRestart != nil { cancel() }
         if speech.active { speech.stop() }
+        conversationFocus = ConversationFocus()
         openingConversation = true
         showOverlay(true)
         applyConversation(["active": true, "phase": "starting", "message": "Opening chat…", "action": "Cancel opening chat"])
@@ -316,6 +318,10 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if autoTarget != nil || autoRestart != nil { cancel() }
             if speech.active { speech.stop() }
         }
+        if next?["phase"] as? String == "recording", conversation?["phase"] as? String != "recording",
+           let app = FocusedInput.keyboardApp, app.bundleIdentifier != "local.hey-boss.desktop" {
+            conversationFocus = ConversationFocus(app: app)
+        }
         let previous = conversation != nil
         conversation = next; conversationLevel = 0
         if next != nil || previous {
@@ -323,6 +329,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             if next == nil { overlay?.update(session.phase) }
         }
         if next == nil, previous {
+            conversationFocus = nil
             if let detail = state?["detail"] as? String, state?["phase"] as? String == "idle",
                !["Ready", "Voice off", "Microphone off"].contains(detail) { overlay?.error(detail) }
             focusTrigger.reset()
@@ -666,6 +673,31 @@ final class TalkService: NSObject, NSApplicationDelegate {
     func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let command = request["command"] as? String ?? ""
         switch command {
+        case "remember_focus":
+            if conversation == nil || conversationFocus == nil { conversationFocus = ConversationFocus() }
+            reply(["ok": true])
+        case "spoken_context":
+            guard let context = conversationFocus else { reply(failure("No pre-focus observation is available.")); return }
+            reply(["ok": true, "id": context.id, "observed": context.evidence])
+        case "paste_text", "spoken_window":
+            if command == "paste_text", !AXIsProcessTrusted() { reply(failure(ConversationFocus.permission)); return }
+            guard let context = conversationFocus, request["focus"] as? String == context.id else {
+                reply(failure("The original focus is unavailable or has changed.")); return
+            }
+            Task { @MainActor in
+                do {
+                    if command == "paste_text" {
+                        guard let text = request["text"] as? String, !text.isEmpty else { throw TalkError("Missing text.") }
+                        try await context.paste(text) { self.conversationFocus?.id == context.id }
+                        reply(["ok": true])
+                    } else {
+                        guard context.canInspectWindow, let window = context.window else { throw TalkError("Original window unavailable or protected.") }
+                        let jpeg = try await WindowInspection.screenshot(context.app, window: window, visible: [])
+                        guard self.conversationFocus?.id == context.id, context.canInspectWindow else { throw TalkError("Original window changed or is protected.") }
+                        reply(["ok": true, "jpeg": jpeg, "source": "Current view of the previously observed window"])
+                    }
+                } catch { reply(failure(error.localizedDescription)) }
+            }
         case "inspect_window":
             guard let target = request["target"] as? String, let mode = request["mode"] as? String else { reply(failure("Missing target or format.")); return }
             Task {

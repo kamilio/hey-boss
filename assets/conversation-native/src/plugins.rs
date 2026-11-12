@@ -28,6 +28,7 @@ pub fn schemas() -> Vec<Value> {
     [
         ("shell",include_str!("../../conversation-tools/shell.md"),cmd.clone()),
         ("batch",include_str!("../../conversation-tools/batch.md"),object(json!({"commands":{"type":"array","items":cmd,"minItems":1,"maxItems":8}}),&["commands"])),
+        ("paste_text",include_str!("../../conversation-tools/paste_text.md"),object(json!({"text":s}),&["text"])),
         ("inspect_window",include_str!("../../conversation-tools/inspect_window.md"),object(json!({"target":s,"mode":{"type":"string","enum":["accessibility","screenshot","both"]}}),&["target","mode"])),
         ("show_media",include_str!("../../conversation-tools/show_media.md"),object(json!({"title":s,"file":s,"url":s,"image":image,"svg":s,"graphviz":s,"mermaid":s}),&[])),
         ("hide_media",include_str!("../../conversation-tools/hide_media.md"),object(json!({}),&[])),
@@ -116,6 +117,7 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
 }
 pub struct Plugins<'a> {
     pub cwd: &'a Path,
+    pub focus: Option<String>,
     pub home: &'a Path,
     pub login: &'a Path,
     pub resources: &'a Path,
@@ -123,8 +125,38 @@ pub struct Plugins<'a> {
     pub acks: &'a mut mpsc::UnboundedReceiver<Value>,
 }
 impl Plugins<'_> {
+    pub async fn talk(&self, request: Value) -> Result<Value> {
+        let mut sock = UnixStream::connect(
+            self.home
+                .join("Library/Application Support/hey-talk/control.sock"),
+        )
+        .await
+        .context("Start Hey Talk on this Mac to use desktop context and paste.")?;
+        let line = format!("{request}\n");
+        ensure!(
+            line.len() < 16384,
+            "Text exceeds Hey Talk's command size limit."
+        );
+        sock.write_all(line.as_bytes()).await?;
+        let data: Value = serde_json::from_slice(&media::limited(sock, 8 * 1024 * 1024).await?)?;
+        ensure!(
+            data["ok"] == true,
+            "{}",
+            data["error"].as_str().unwrap_or("Desktop request failed")
+        );
+        Ok(data)
+    }
     pub async fn call(&mut self, name: &str, args: &Value) -> Result<Value> {
         match name {
+            "paste_text" => {
+                let text = args["text"].as_str().context("Missing text")?;
+                timeout(
+                    Duration::from_secs(5),
+                    self.talk(json!({"command":"paste_text","focus":self.focus,"text":text})),
+                )
+                .await??;
+                Ok(json!("Pasted without submitting."))
+            }
             "shell" => Ok(json!(shell(self.cwd, self.login, args).await?)),
             "batch" => {
                 let list = args["commands"].as_array().context("Missing commands")?;
@@ -179,23 +211,16 @@ impl Plugins<'_> {
                 let mut input = json!({"command":format!("{mode}: {target}"),"description":format!("Looking at {}.",if target=="active"{"the current window"}else{target})});
                 emit(json!({"ToolStarted":{"id":id,"input":input}}))?;
                 let result: Result<Value> = timeout(Duration::from_secs(105), async {
-                    let mut sock = UnixStream::connect(
-                        self.home
-                            .join("Library/Application Support/hey-talk/control.sock"),
-                    )
-                    .await
-                    .map_err(|e| match e.kind() {
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                            anyhow::anyhow!("Start Hey Talk on this Mac to inspect a window.")
-                        }
-                        _ => e.into(),
-                    })?;
-                    let req = json!({"command":"inspect_window","mode":mode,"target":target});
-                    sock.write_all(format!("{req}\n").as_bytes()).await?;
-                    let data: Value =
-                        serde_json::from_slice(&media::limited(sock, 8 * 1024 * 1024).await?)?;
-                    ensure!(data["ok"] == true, "{}", data["error"]);
-                    Ok(data)
+                    let req = if target == "spoken" {
+                        ensure!(
+                            mode == "screenshot",
+                            "Use screenshot for the previously observed window."
+                        );
+                        json!({"command":"spoken_window","focus":self.focus})
+                    } else {
+                        json!({"command":"inspect_window","mode":mode,"target":target})
+                    };
+                    self.talk(req).await
                 })
                 .await
                 .unwrap_or_else(|_| Err(anyhow::anyhow!("Hey Talk did not answer.")));

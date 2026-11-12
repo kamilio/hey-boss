@@ -57,6 +57,10 @@ enum CLI {
     static func run(_ arguments: [String]) throws {
         if arguments.isEmpty || arguments == ["--help"] || arguments == ["help"] { print(help); return }
         if arguments == ["--version"] { print("hey-talk 0.1.0"); return }
+        if arguments == ["remember-focus"] {
+            try output(ControlSocket.request(["command": "remember_focus"], timeout: 1), json: true)
+            return
+        }
         let json = arguments.contains("--json")
         let original = arguments.contains("--original")
         if original && (arguments.first != "last" || arguments.filter({ $0 == "--original" }).count != 1) {
