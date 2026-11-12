@@ -116,3 +116,7 @@ path = "tests/fixtures/skill-ssh.rs"
 [[example]]
 name = "notification-latency-fixture"
 path = "tests/fixtures/notification-latency.rs"
+
+[[example]]
+name = "investigate-turbo-interrupt"
+path = "tests/fixtures/turbo-interrupt.rs"

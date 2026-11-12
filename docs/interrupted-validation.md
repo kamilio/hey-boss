@@ -36,11 +36,11 @@ These results establish behavior of the inspected installation, not the original
 signal source, an upstream source-code cause, or behavior of all Turbo versions.
 Hey Boss does not run or certify the worker's external validation commands.
 
-Reproduce with Node and npm on macOS or Linux, supplying the installed native
+Reproduce with Cargo and npm on macOS or Linux, supplying the installed native
 Turbo executable (for example, `@turbo/darwin-arm64/bin/turbo`):
 
 ```sh
-node tools/investigate_turbo_interrupt.mjs /absolute/path/to/native/turbo
+cargo run --quiet --example investigate-turbo-interrupt -- /absolute/path/to/native/turbo
 ```
 
 The probe prints the version, executable SHA-256 and fresh per-run evidence,
