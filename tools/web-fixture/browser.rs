@@ -38,11 +38,11 @@ fn web(f: &Fixture, project: &str) -> (Service, String) {
     )
 }
 
-fn screenshot(page: &mut Page, name: &str) {
+fn screenshot(page: &mut Page, directory: &str, name: &str) {
     let png = page
         .command("Page.captureScreenshot", json!({"format":"png"}))
         .unwrap();
-    let dir = Path::new("out/worker-browser");
+    let dir = Path::new(directory);
     fs::create_dir_all(dir).unwrap();
     fs::write(
         dir.join(format!("{name}.png")),
@@ -78,7 +78,7 @@ fn workers_open_saved_conversations_and_retain_reading_position() {
         3
     );
     assert_eq!(page.eval("document.querySelector('[data-host=studio] .project-worker-task-state span').textContent").ok(),Some(json!("Last seen")));
-    screenshot(&mut page, "workers");
+    screenshot(&mut page, "out/worker-browser", "workers");
     page.eval("document.querySelector('[href*=\"run=atlas-1\"]').click()")
         .unwrap();
     page.wait("document.querySelectorAll('.chat-message').length === 5");
@@ -114,7 +114,11 @@ fn workers_open_saved_conversations_and_retain_reading_position() {
         )
         .unwrap();
         page.wait("document.documentElement.scrollWidth <= innerWidth");
-        screenshot(&mut page, &format!("conversation-{width}-{theme}"));
+        screenshot(
+            &mut page,
+            "out/worker-browser",
+            &format!("conversation-{width}-{theme}"),
+        );
     }
 
     // A real rollout across the 1 MiB history window, including a live append.
@@ -258,6 +262,13 @@ fn first_worker_uses_the_selected_checkout_and_capacity() {
         )
         .unwrap();
         page.wait("document.documentElement.scrollWidth <= innerWidth");
-        screenshot(&mut page, &format!("first-worker-{width}"));
+        screenshot(
+            &mut page,
+            "out/worker-browser",
+            &format!("first-worker-{width}"),
+        );
     }
 }
+
+#[path = "issue_browser.rs"]
+mod issues;
