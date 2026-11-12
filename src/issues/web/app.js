@@ -1937,13 +1937,25 @@ function updateEditorReadiness() {
   $("#editor-submit").disabled = ctx.busy || (checked && (!ctx.draftSettings || !!reason));
 }
 function saveEditor() {
-  if (model.editor) storage.set(model.editor.key, editorValues());
+  const editor = model.editor;
+  if (!editor) return;
+  const values = editorValues();
+  if (Object.keys(values).every(key => values[key] === editor.lastValues[key])) return;
+  if (Object.keys(editor.initial).every(key => values[key] === editor.initial[key])) storage.remove(editor.key);
+  else storage.set(editor.key, values);
+  editor.lastValues = values;
 }
 function openEditor(issue = null, options = {}) {
   const project = model.project;
   const key = draftKey("editor", project.id, issue?.number || (options.parent ? `subtask-${options.parent.number}` : "new"));
   const draft = storage.get(key);
+  const labels = (issue?.labels ?? []).filter(label => label !== "yolo");
+  const initial = {
+    title: issue?.title ?? "", body: issue?.body ?? "", draft: !!issue?.draft, bottom: false,
+    labels: HeyBossQuickIssue.taskLabels(labels, HeyBossQuickIssue.taskKind(labels)).join(", "),
+  };
   model.editor = {
+    initial,
     project: project.id,
     number: issue?.number,
     parent: options.parent ? {...options.parent,version:draft?.parentVersion ?? options.parent.version} : null,
@@ -1956,13 +1968,13 @@ function openEditor(issue = null, options = {}) {
   $("#editor-title").textContent = issue ? "Edit issue" : options.parent ? "New subtask" : "New issue";
   $("#editor-subtask-help").hidden = !options.parent;
   $("#editor-project").textContent = project.name;
-  $("#editor-subject").value = draft?.title ?? issue?.title ?? "";
-  $("#editor-body").value = draft?.body ?? issue?.body ?? "";
-  const taskLabels = (draft?.labels ?? issue?.labels.join(", ") ?? "").split(",").map(s => s.trim()).filter(Boolean);
+  $("#editor-subject").value = draft?.title ?? initial.title;
+  $("#editor-body").value = draft?.body ?? initial.body;
+  const taskLabels = (draft?.labels ?? initial.labels).split(",").map(s => s.trim()).filter(Boolean);
   $("#editor-kind").value = HeyBossQuickIssue.taskKind(taskLabels);
   updateEditorTaskHelp();
-  $("#editor-draft").checked = !options.parent && (draft?.draft ?? issue?.draft ?? false);
-  $("#editor-bottom").checked = draft?.bottom ?? false;
+  $("#editor-draft").checked = !options.parent && (draft?.draft ?? initial.draft);
+  $("#editor-bottom").checked = draft?.bottom ?? initial.bottom;
   $("#editor-bottom-control").hidden = !!issue;
   $("#editor-draft-control").hidden = !!options.parent;
   $("#editor-draft").disabled = true;
@@ -1986,6 +1998,7 @@ function openEditor(issue = null, options = {}) {
   $("#editor-error").hidden = true;
   $("#editor-conflict").hidden = true;
   $("#conflict-replace").textContent = options.parent ? "Create using the latest parent revision" : "Save my draft over this version";
+  editor.lastValues = editorValues();
   editorBusy(false);
   preview("editor", false);
   $("#editor-dialog").showModal();
