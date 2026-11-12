@@ -288,6 +288,7 @@ final class Overlay {
         chatButton.target = self; chatButton.action = #selector(startConversation)
         pillContent.addSubview(chatButton)
         listenPause.isBordered = false; listenPause.imagePosition = .imageOnly
+        listenPause.contentTintColor = TalkDesign.active
         listenPause.target = self; listenPause.action = #selector(pauseListening)
         listenPause.isHidden = true; pillContent.addSubview(listenPause)
         connecting.font = .systemFont(ofSize: 12, weight: .medium)
@@ -667,7 +668,6 @@ final class Overlay {
         if let pause {
             let action = pause ? "Resume listening" : "Pause listening"
             listenPause.image = NSImage(systemSymbolName: pause ? "play.fill" : "pause.fill", accessibilityDescription: nil)
-            listenPause.contentTintColor = pause ? TalkDesign.active : .labelColor
             listenPause.toolTip = action; listenPause.setAccessibilityLabel(action)
         }
         let showChat = hover && canRevealChat
