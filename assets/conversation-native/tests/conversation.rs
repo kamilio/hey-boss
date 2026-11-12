@@ -93,6 +93,7 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
     let state = home.join("history/session.json");
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        focus: None,
         home,
         cwd: &cwd,
         login: &login,
@@ -118,7 +119,7 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
             && prompt.contains("Organize notes")
             && !prompt.contains("Private skill body")
     );
-    assert_eq!(req[0]["tools"].as_array().unwrap().len(), 5);
+    assert_eq!(req[0]["tools"].as_array().unwrap().len(), 6);
     assert_eq!(fs::read_to_string(cwd.join("one.txt"))?, "one\n");
     assert!(
         req[2]["input"].to_string().contains("function_call_output")
@@ -212,10 +213,35 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
         assert_eq!(serde_json::from_str::<Value>(&line)?["target"], "Gmail");
         s.write_all(br#"{"ok":true,"source":"Gmail","text":"AXButton: Compose","jpeg":"YWJj"}"#)
             .await?;
+
+        drop(s);
+        let (mut s, _) = listener.accept().await?;
+        let mut line = String::new();
+        BufReader::new(&mut s).read_line(&mut line).await?;
+        assert_eq!(
+            serde_json::from_str::<Value>(&line)?,
+            json!({"command":"spoken_context"})
+        );
+        s.write_all(br#"{"ok":true,"id":"captured-field","observed":{"app":"Fixture","window":"Original window","field":"AXTextArea"}}"#).await?;
+        drop(s);
+        for reply in [
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"error":"Allow Hey Talk in Accessibility"}"#,
+        ] {
+            let (mut s, _) = listener.accept().await?;
+            let mut line = String::new();
+            BufReader::new(&mut s).read_line(&mut line).await?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&line)?,
+                json!({"command":"paste_text","focus":"captured-field","text":"  Hi 🌍\n"})
+            );
+            s.write_all(reply.as_bytes()).await?;
+        }
         Ok::<_, anyhow::Error>(())
     });
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        focus: None,
         home: &socket_home,
         cwd,
         login: Path::new("/bin/zsh"),
@@ -226,6 +252,29 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
     let output = p
         .call("inspect_window", &json!({"target":"Gmail","mode":"both"}))
         .await?;
+    let args = json!({"text":"  Hi 🌍\n"});
+    let (url, server) = mock(vec![tool("paste_text", args.clone()), msg("Pasted.")]).await?;
+    agent::run(
+        &cwd.join("paste-session.json"),
+        &url,
+        &json!({"turn":"Paste this."}),
+        &mut p,
+    )
+    .await?;
+    let requests = server.await??;
+    assert!(requests[0]["input"].to_string().contains("Original window"));
+    assert!(
+        requests[1]["input"]
+            .to_string()
+            .contains("Pasted without submitting.")
+    );
+    assert!(
+        p.call("paste_text", &args)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("Allow Hey Talk in Accessibility")
+    );
     task.await??;
     let wire = provider::input(&[json!({"role":"tool","toolCallId":"cap","content":output})])?;
     assert_eq!(
@@ -246,6 +295,7 @@ async fn cancelling_shell_kills_descendants() -> Result<()> {
     let cwd = tmp.path();
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        focus: None,
         home: cwd,
         cwd,
         login: Path::new("/bin/zsh"),
@@ -280,6 +330,7 @@ async fn login_shell_loads_interactive_startup_and_preserves_quoting() -> Result
     fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        focus: None,
         home: &cwd,
         cwd: &cwd,
         login: &shell,

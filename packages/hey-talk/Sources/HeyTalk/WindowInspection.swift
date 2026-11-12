@@ -79,7 +79,7 @@ enum WindowInspection {
         return result
     }
 
-    private static func screenshot(_ owner: NSRunningApplication, window selectedWindow: AXUIElement?, visible: [[String: Any]]) async throws -> String {
+    static func screenshot(_ owner: NSRunningApplication, window selectedWindow: AXUIElement?, visible: [[String: Any]]) async throws -> String {
         guard CGPreflightScreenCaptureAccess() || CGRequestScreenCaptureAccess() else { throw TalkError("Allow Hey Talk in Privacy & Security → Screen & System Audio Recording, then retry.") }
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
         let candidates = content.windows.filter { $0.owningApplication?.processID == owner.processIdentifier && $0.windowLayer == 0 }

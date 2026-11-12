@@ -8086,6 +8086,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         refreshScope(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
+        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() {
+            let task = Process()
+            task.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-talk")
+            task.arguments = ["remember-focus"]; task.standardOutput = FileHandle.nullDevice
+            task.terminationHandler = { [weak self] _ in DispatchQueue.main.async { self?.presentConversation() } }
+            do { try task.run(); return } catch {}
+        }
+        presentConversation()
+    }
+    private func presentConversation() {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if !rows.isEmpty { revealLatest() }
         scheduleVisibleMedia()

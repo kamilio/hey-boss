@@ -38,6 +38,7 @@ async fn serve() -> Result<()> {
     let work = async {
         while let Some(req) = turns.recv().await {
             let mut plugins = Plugins {
+                focus: None,
                 home: &home,
                 cwd: &cwd,
                 login: &login,
