@@ -306,6 +306,8 @@ fn first_worker_uses_the_selected_checkout_and_capacity() {
 
 #[path = "draft_readiness.rs"]
 mod draft_readiness;
+#[path = "issue_accessibility.rs"]
+mod issue_accessibility;
 #[path = "issue_browser.rs"]
 mod issues;
 
