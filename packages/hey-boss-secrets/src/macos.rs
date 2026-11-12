@@ -78,6 +78,56 @@ impl Keychain {
         Ok((i32::from_be_bytes(*status), Secret::new(value.to_vec())))
     }
 
+    fn native_read(&self, key: &str) -> Result<Option<Secret>> {
+        let Some(reader) = self.reader()? else {
+            return Ok(None);
+        };
+        match Self::call(&reader, "read", key, &[])? {
+            (0, bytes) => Ok(Some(bytes)),
+            (-25300, _) => Ok(None),
+            _ => Err(Error::StoreUnavailable),
+        }
+    }
+
+    fn imported(&self) -> Self {
+        Self(self.0.join("imported"))
+    }
+
+    pub fn migrate_identity(home: &Path, card: &crate::Enrollment) -> Result<()> {
+        Self::new(home).migrate("identity", "identity.native-v1", card)
+    }
+
+    fn migrate(&self, key: &str, dest: &str, card: &crate::Enrollment) -> Result<()> {
+        card.validate()?;
+        let verify = |raw: &Secret| -> Result<()> {
+            let id: crate::crypto::Identity =
+                serde_json::from_slice(raw.expose()).map_err(|_| Error::InvalidRecord)?;
+            if id.enrollment(&card.machine.label)? != *card {
+                return Err(Error::InvalidRecord);
+            }
+            Ok(())
+        };
+        let reader = self.reader()?.ok_or(Error::StoreUnavailable)?;
+        let imported = self.imported();
+        if let Some(raw) = imported.native_read(dest)? {
+            return verify(&raw);
+        }
+        match Self::call(&reader, "read", key, &[])? {
+            (0, raw) => return verify(&raw),
+            (-25293 | -25308, _) => (),
+            _ => return Err(Error::StoreUnavailable),
+        }
+        let raw = Self::read_service(SERVICE, key)?.ok_or(Error::NotInitialized)?;
+        verify(&raw)?;
+        match imported.create(dest, raw.expose()) {
+            Err(Error::Conflict) => match imported.native_read(dest)? {
+                Some(copy) if copy.expose() == raw.expose() => Ok(()),
+                _ => Err(Error::Conflict),
+            },
+            result => result,
+        }
+    }
+
     /// Legacy identities and explicitly requested imports keep their original trusted accessor.
     pub fn read_service(service: &str, account: &str) -> Result<Option<Secret>> {
         use base64::{Engine, engine::general_purpose::STANDARD};
@@ -113,6 +163,11 @@ impl Backend for Keychain {
         "keychain"
     }
     fn get(&self, key: &str) -> Result<Option<Secret>> {
+        if key == "identity"
+            && let Some(raw) = self.imported().native_read("identity.native-v1")?
+        {
+            return Ok(Some(raw));
+        }
         if let Some(reader) = self.reader()? {
             match Self::call(&reader, "read", key, &[])? {
                 (0, bytes) => return Ok(Some(bytes)),
@@ -151,6 +206,83 @@ impl Backend for Keychain {
 mod tests {
     use super::*;
 
+    struct Item(String);
+    impl Drop for Item {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/security")
+                .args(["delete-generic-password", "-s", SERVICE, "-a", &self.0])
+                .output();
+        }
+    }
+
+    #[test]
+    #[ignore = "uses an unlocked macOS Keychain with disposable synthetic items"]
+    fn migrates_only_the_enrolled_identity_and_preserves_the_original() {
+        let original = Item(format!("synthetic-old-{}", rand::random::<u128>()));
+        let destination = Item(format!("synthetic-copy-{}", rand::random::<u128>()));
+        let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        let vault = Keychain(temp.path().join("private"));
+        vault.prepare().unwrap();
+        let id = crate::crypto::Identity::generate();
+        let card = id.enrollment("fixture").unwrap();
+        let wrong = crate::crypto::Identity::generate()
+            .enrollment("fixture")
+            .unwrap();
+        let raw = Secret::new(crate::crypto::encode(&id).unwrap());
+        // Build the fixture with the actual previous writer and its original Keychain ACL.
+        use base64::Engine;
+        let writer = Command::new("git")
+            .args(["show", "b8304b4d:packages/hey-boss-secrets/src/keychain.js"])
+            .output()
+            .unwrap();
+        assert!(writer.status.success());
+        let mut legacy = Command::new("/usr/bin/osascript");
+        legacy.args([
+            "-l",
+            "JavaScript",
+            "-e",
+            std::str::from_utf8(&writer.stdout).unwrap(),
+        ]);
+        let setup = serde_json::to_vec(&serde_json::json!({
+            "op": "put", "service": SERVICE, "account": original.0,
+            "data": base64::engine::general_purpose::STANDARD.encode(raw.expose()),
+        }))
+        .unwrap();
+        let status = command(legacy, &setup).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(status.expose()).unwrap()["status"],
+            0
+        );
+        let migrate = |card| vault.migrate(&original.0, &destination.0, card);
+        assert_eq!(migrate(&wrong), Err(Error::InvalidRecord));
+        assert!(
+            vault
+                .imported()
+                .native_read(&destination.0)
+                .unwrap()
+                .is_none()
+        );
+        migrate(&card).unwrap();
+        migrate(&card).unwrap();
+        assert_eq!(migrate(&wrong), Err(Error::InvalidRecord));
+        assert_eq!(
+            vault
+                .imported()
+                .native_read(&destination.0)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            raw.expose()
+        );
+        assert_eq!(
+            Keychain::read_service(SERVICE, &original.0)
+                .unwrap()
+                .unwrap()
+                .expose(),
+            raw.expose()
+        );
+    }
+
     #[test]
     fn installing_again_preserves_the_exact_reader_and_rejects_symlinks() {
         let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -177,14 +309,6 @@ mod tests {
     #[test]
     #[ignore = "uses an unlocked macOS Keychain with a disposable synthetic item"]
     fn native_reader_recovers_binary_data_and_never_replaces_an_existing_identity() {
-        struct Item(String);
-        impl Drop for Item {
-            fn drop(&mut self) {
-                let _ = Command::new("/usr/bin/security")
-                    .args(["delete-generic-password", "-s", SERVICE, "-a", &self.0])
-                    .output();
-            }
-        }
         let item = Item(format!("synthetic-{}", rand::random::<u128>()));
         let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let dir = temp.path().join("private");
