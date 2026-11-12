@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build-artifact-editor.mjs && node build-artifact-diagrams.mjs"
+    "build": "cargo run --quiet --locked"
   },
   "devDependencies": {
     "@codemirror/commands": "6.11.1",

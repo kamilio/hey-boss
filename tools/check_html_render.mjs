@@ -1,4 +1,4 @@
-// cargo build --bin hey-boss; npm --prefix tools/web-assets run build
+// cargo build --bin hey-boss; cargo run --locked --manifest-path tools/web-assets/Cargo.toml
 // PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node tools/check_html_render.mjs
 import assert from 'node:assert/strict';
 import {readFileSync, mkdirSync} from 'node:fs';

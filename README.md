@@ -137,7 +137,7 @@ Open the issue interface with `hey-boss issue web`, then visit
 includes a project switcher, Markdown editing, comments, claims, search, history,
 and light/dark themes. All web assets are embedded in the binary; no frontend
 build or separate service is needed. To rebuild the bundled editor and diagram assets,
-run `npm ci --prefix tools/web-assets` and `npm run build --prefix tools/web-assets`. See the [web interface guide](docs/issues.md#web-interface)
+run `npm ci --ignore-scripts --prefix tools/web-assets`, then `cargo run --locked --manifest-path tools/web-assets/Cargo.toml`. See the [web interface guide](docs/issues.md#web-interface)
 and [verification results](docs/issues-web-verification.md).
 
 Issue filters combine search, labels, assignment, and minimum agent launches. Quick

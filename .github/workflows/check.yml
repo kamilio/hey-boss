@@ -70,7 +70,7 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-      - run: npm ci
-      - run: npm run build
-      - run: git diff --exit-code -- src/issues/web
+      - run: npm ci --ignore-scripts
+      - run: cargo run --locked
+      - run: git diff --exit-code -- src/issues/web && test -z "$(git ls-files --others --exclude-standard src/issues/web)"
         working-directory: .
