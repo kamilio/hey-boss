@@ -3,6 +3,37 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
     use Scenario::*;
     let issue = |args: &[&str]| run(f.issue(p, args));
     match s {
+        Html => {
+            let body = include_str!("../../tests/fixtures/html-render.md");
+            let page = include_str!("../../tests/fixtures/html-page.html");
+            let mut info = desktop::seed(f, s, p)?;
+            for (key, title, source) in [
+                ("artifact", "HTML preview", body),
+                ("full", "A complete HTML page", page),
+            ] {
+                let result = run(f.command(&[
+                    "artifact",
+                    "create",
+                    "--project",
+                    p,
+                    "--json",
+                    "--title",
+                    title,
+                    "--body",
+                    source,
+                ]))?;
+                info[key] = result["artifact"]["id"]
+                    .as_str()
+                    .ok_or("missing artifact ID")?
+                    .into();
+            }
+            info["issue"] =
+                issue(&["create", "--title", "HTML issue", "--body", body])?["issue"]["number"]
+                    .as_i64()
+                    .ok_or("missing issue number")?
+                    .into();
+            return Ok(info);
+        }
         LocalHttp | NativeArtifactEditor => return desktop::seed(f, s, p),
         IssueArchitecture => issue_design::architecture(f, p)?,
         IssueTimeline => issue_design::timeline(f, p)?,

@@ -1,14 +1,17 @@
-// cargo build --bin hey-boss; cargo run --locked --manifest-path tools/web-assets/Cargo.toml
-// PLAYWRIGHT_MODULE=/path/to/playwright/index.mjs node tools/check_html_render.mjs
+// In one terminal: mkdir -p out && cargo build --bin hey-boss && cargo run --example web-fixture -- html >out/html.json
+// Then run: node tools/check_html_render.mjs out/html.json
 import assert from 'node:assert/strict';
 import {readFileSync, mkdirSync} from 'node:fs';
-import {startFixture} from './serve_html_fixture.mjs';
+const fixture=JSON.parse(readFileSync(process.argv[2],'utf8'));
+assert.equal(new URL(fixture.native).hostname,'127.0.0.1');
+assert.equal(fixture.project,'named:HTML QA');
+const fullBody=readFileSync(new URL('../tests/fixtures/html-page.html',import.meta.url),'utf8');
 const {chromium,webkit}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
 const check=eval('('+readFileSync(new URL('./html_render_browser_checks.js',import.meta.url),'utf8').replace(/;\s*$/,'')+')');
 const snapshots=process.env.HTML_SNAPSHOTS;
 if(snapshots)mkdirSync(snapshots,{recursive:true});
 for(const engine of [chromium,webkit]){
- const fixture=await startFixture();let browser;
+ let browser;
  try{
   browser=await engine.launch({headless:true,...(engine===chromium?{channel:'chrome'}:{})});
   for(const width of [1280,390]){
@@ -25,11 +28,11 @@ for(const engine of [chromium,webkit]){
      assert.equal(await page.locator('.issue-description .html-preview').frameLocator('iframe').locator('#counter').innerText(),'1','Issue comments preserve the running preview');
      await page.locator('[data-edit]').click();
      const body=await page.locator('#editor-body').inputValue();
-     await page.locator('#editor-body').fill(fixture.fullBody);
+     await page.locator('#editor-body').fill(fullBody);
      await page.locator('#editor-preview').click();
      await page.locator('#editor-rendered .html-preview[data-state="ready"]').waitFor();
      await page.waitForFunction(()=>document.querySelector('#editor-rendered iframe').clientHeight>2800);
-     await page.locator('#editor-write').click();assert.equal(await page.locator('#editor-body').inputValue(),fixture.fullBody);
+     await page.locator('#editor-write').click();assert.equal(await page.locator('#editor-body').inputValue(),fullBody);
      await page.locator('#editor-body').fill(body+'\n<!-- HTML editor verified -->\n');
      await page.locator('#editor-submit').click();await page.locator('#editor-dialog').waitFor({state:'hidden'});
      await page.locator('.issue-description .html-preview[data-state="ready"]').waitFor();
@@ -90,5 +93,5 @@ for(const engine of [chromium,webkit]){
    console.log('PASS',label,'whole HTML, uncapped height, selection comments, editing, source export and failure fallback');
    await context.close();
   }
- }finally{await browser?.close();await fixture.close();}
+ }finally{await browser?.close();}
 }
