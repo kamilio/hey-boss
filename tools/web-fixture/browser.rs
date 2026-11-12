@@ -446,3 +446,6 @@ fn pointer_click(p: &mut Page, selector: &str) {
 
 #[path = "search_performance.rs"]
 mod search_performance;
+
+#[path = "artifact_diagrams.rs"]
+mod artifact_diagrams;
