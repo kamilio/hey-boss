@@ -69,6 +69,9 @@ fn project_workflow_links_open_their_markdown_files_and_recover_a_failed_save() 
     p.command("Page.enable", json!({})).unwrap();
     p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);window.field=()=>el('.fx-paper > div')?.shadowRoot?.querySelector('.cm-content');window.lines=()=>[...field().querySelectorAll('.cm-line')].map(e=>e.textContent).join('\\n')"})).unwrap();
     for (file, section) in [
+        ("worker.md", "worker"),
+        ("delivery-pr.md", "prs"),
+        ("delivery-main.md", "main"),
         ("plan.md", "plan"),
         ("workspace-worktree.md", "worktree"),
         ("workspace-checkout.md", "checkout"),
@@ -93,12 +96,16 @@ fn project_workflow_links_open_their_markdown_files_and_recover_a_failed_save() 
                 .unwrap(),
             "named:Workflow QA"
         );
-        let original = defaults["prompt_defaults"][section]
-            .as_str()
-            .unwrap()
-            .trim_end();
+        let original = if section == "worker" {
+            &defaults["worker_prompt_default"]
+        } else {
+            &defaults["prompt_defaults"][section]
+        }
+        .as_str()
+        .unwrap()
+        .trim_end();
         assert_eq!(p.eval("lines().trimEnd()").unwrap(), original);
-        if section == "checkout" {
+        if matches!(section, "checkout" | "main" | "prs") {
             continue;
         }
         for theme in ["light", "dark"] {
@@ -127,7 +134,7 @@ fn project_workflow_links_open_their_markdown_files_and_recover_a_failed_save() 
         p.wait("el('[data-save]')?.disabled===false");
         let draft = p.eval("lines()").unwrap();
         assert_ne!(draft.as_str().unwrap().trim_end(), original);
-        p.eval("el('.fx-row[title=\"worker.md\"]').click()")
+        p.eval("el('.fx-row[title=\"delivery-pr.md\"]').click()")
             .unwrap();
         assert_eq!(p.eval("el('.fx-document h3').textContent").unwrap(), file);
         assert_eq!(p.eval("lines()").unwrap(), draft);
@@ -136,11 +143,16 @@ fn project_workflow_links_open_their_markdown_files_and_recover_a_failed_save() 
         assert_eq!(p.eval("lines()").unwrap(), draft);
         p.eval("el('[data-save]').click()").unwrap();
         p.wait("el('.fx-document [role=status]')?.textContent==='Saved'");
+        let saved = settings();
         assert_eq!(
-            settings()["prompt_overrides"][section]
-                .as_str()
-                .unwrap()
-                .trim_end(),
+            (if section == "worker" {
+                &saved["prompt"]
+            } else {
+                &saved["prompt_overrides"][section]
+            })
+            .as_str()
+            .unwrap()
+            .trim_end(),
             draft.as_str().unwrap().trim_end()
         );
         p.eval("window.loaded=true").unwrap();
@@ -153,6 +165,11 @@ fn project_workflow_links_open_their_markdown_files_and_recover_a_failed_save() 
         p.eval("window.confirm=()=>true;[...el('.fx-actions').children].find(b=>b.textContent==='Restore default…').click()").unwrap();
         p.wait("el('.fx-document [role=status]')?.textContent==='Default restored'");
         assert_eq!(p.eval("lines().trimEnd()").unwrap(), original);
-        assert!(settings()["prompt_overrides"][section].is_null());
+        let reset = settings();
+        if section == "worker" {
+            assert_eq!(reset["prompt"].as_str().unwrap().trim_end(), original);
+        } else {
+            assert!(reset["prompt_overrides"][section].is_null());
+        }
     }
 }

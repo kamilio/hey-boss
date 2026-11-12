@@ -201,6 +201,31 @@ fn rejected_agent_messages_are_reported_without_retrying() {
 
 fn live_prompt_scenario(mode: &str) {
     let f = Fixture::new(&format!("live-prompt-{mode}"));
+    // The scheduler needs a registered checkout to claim the fixture issue.
+    let result = f
+        .process(env!("CARGO_BIN_EXE_hey-boss"))
+        .current_dir(&f.root)
+        .env("HEY_BOSS_ISSUE_DB", &f.db)
+        .args([
+            "project",
+            "init",
+            "--project",
+            "named:Worker fixture",
+            "--prs",
+            "false",
+            "--worktree",
+            "false",
+            "--yes",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
     f.setup(&[]);
     let mut worker = f.worker();
     // Cold CLI/mock startup can be slow alongside the rest of the integration
