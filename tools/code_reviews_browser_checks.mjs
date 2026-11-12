@@ -107,6 +107,10 @@ try {
   await page.locator("#reviews-refresh").click();
   await page.getByRole("button", { name: /#71/ }).click();
   await page
+    .getByRole("button", { name: /#71/, expanded: true })
+    .waitFor();
+  assert.equal(await page.getByText(first.title, { exact: true }).count(), 1);
+  await page
     .getByRole("button", {
       name: "Edit comment on scheduler/reminders.rs line 42",
     })
@@ -118,9 +122,9 @@ try {
   await page
     .getByText("Please test 23:59 in the selected time zone.", { exact: true })
     .waitFor();
-  await page.getByRole("button", { name: "Edit review summary" }).click();
+  await page.getByRole("button", { name: "Edit review comment" }).click();
   await page
-    .getByRole("textbox", { name: "review summary" })
+    .getByRole("textbox", { name: "review comment" })
     .fill("Fix the midnight boundary before merging.");
   await page.getByRole("button", { name: "Save", exact: true }).click();
   await page
@@ -141,6 +145,14 @@ try {
       await page.locator(".review-comment header a").getAttribute("href")
     ).endsWith("R42"),
   );
+  const row = page.getByRole("button", { name: /#71/ });
+  await row.click();
+  assert.equal(await row.getAttribute("aria-expanded"), "false");
+  assert.equal(await page.locator("#reviews-detail").count(), 0);
+  await row.press("Enter");
+  await page.getByText(edited.body, { exact: true }).waitFor();
+  assert.ok(await page.getByRole("button", { name: "Publish requested changes" })
+    .evaluate((el) => el.matches(".button.primary")));
   const snap = process.env.CODE_REVIEW_SCREENSHOTS;
   if (snap) mkdirSync(snap, { recursive: true });
   for (const width of [1440, 768, 390, 320])
@@ -154,14 +166,14 @@ try {
       );
       assert.ok(
         await page
-          .locator("#reviews-list button")
+          .locator("#reviews-list .review-row")
           .first()
           .evaluate(
             (el) =>
               el.getBoundingClientRect().right <=
-              el.closest("aside").getBoundingClientRect().right + 1,
+              el.closest("#reviews-list").getBoundingClientRect().right + 1,
           ),
-        "Queue rows must fit inside their column",
+        "Queue rows must fit inside the list",
       );
       if (snap)
         await page.screenshot({

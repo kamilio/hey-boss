@@ -108,13 +108,13 @@
   }
   function editor(label, body, comment) {
     const box = e("div", undefined, "review-editor");
-    box.append(e("p", body || "No summary."));
+    box.append(e("p", body || "No review comment."));
     if (!["draft", "submitted"].includes(review.stage)) return box;
     const controls = e("div", undefined, "review-controls");
     const edit = btn("Edit", () => {
       if (busy || editing) return;
       editing = true;
-      const ta = e("textarea");
+      const ta = e("textarea", undefined, "text-input");
       ta.value = body;
       ta.setAttribute("aria-label", label);
       const save = btn("Save", () =>
@@ -131,11 +131,16 @@
         editing = false;
         render();
       });
+      save.classList.add("small", "primary");
+      cancel.classList.add("small");
       controls.replaceChildren(save, cancel);
       box.replaceChildren(ta, controls);
       ta.focus();
     });
     edit.setAttribute("aria-label", "Edit " + label);
+    edit.className = "icon-button";
+    edit.title = "Edit " + label;
+    edit.innerHTML = HeyBossUI.icon("edit");
     controls.append(edit);
     box.append(controls);
     return box;
@@ -173,34 +178,51 @@
   }
   function render() {
     const list = $("#reviews-list"),
-      pane = $("#reviews-detail");
+      pane = e("section");
+    pane.id = "reviews-detail";
+    pane.setAttribute("aria-label", "Selected review");
     list.replaceChildren();
-    pane.replaceChildren();
+    list.classList.toggle("merge-rows", rows.length > 0);
     $("#reviews-count").textContent = rows.length;
     for (const r of rows) {
-      const b = btn("", () => {
+      const selected = r.id === review?.id;
+      const b = btn("", async () => {
         if (!busy && leave()) {
           const hash = new URLSearchParams(location.hash.slice(1));
-          hash.set("review", r.id);
+          if (selected) hash.delete("review");
+          else hash.set("review", r.id);
           history.replaceState(null, "", "#" + hash);
-          load(r.id);
+          if (selected) {
+            ++serial;
+            review = null;
+            editing = false;
+            render();
+          } else await load(r.id);
+          list.querySelector('[data-review-id="' + r.id + '"]')
+            ?.focus({ preventScroll: true });
         }
       });
-      b.setAttribute("aria-current", String(r.id === review?.id));
-      b.append(
-        e("small", "#" + r.number + " · " + stage[r.stage]),
-        e("strong", r.title),
+      b.className = "merge-row review-row";
+      b.dataset.reviewId = r.id;
+      b.setAttribute("aria-expanded", String(selected));
+      const icon = e("span", undefined, "review-pr-icon");
+      icon.innerHTML = HeyBossUI.icon("pull-request");
+      const main = e("span", undefined, "merge-main");
+      main.append(
+        e("strong", r.title, "merge-title"),
+        e("span", "#" + r.number + " · " + stage[r.stage], "merge-meta"),
       );
+      const arrow = e("span", undefined, "review-chevron");
+      arrow.setAttribute("aria-hidden", "true");
+      b.append(icon, main, arrow);
       list.append(b);
+      if (selected) list.append(pane);
     }
     if (!review) {
-      pane.append(
-        e(
-          "p",
-          "No reviews yet. Submitted PR reviews for this project will appear here.",
-          "review-empty",
-        ),
-      );
+      if (!rows.length)
+        list.append(
+          e("p", "No reviews yet. Submitted PR reviews for this project will appear here.", "review-empty"),
+        );
       return;
     }
     const r = review;
@@ -208,21 +230,18 @@
     const url = repo
       ? "https://github.com/" + repo + "/pull/" + r.number
       : null;
-    pane.append(
-      e("div", stage[r.stage].toUpperCase(), "review-kicker"),
-      e("h2", r.title),
-    );
+
     const meta = e("div", undefined, "review-meta");
     meta.append(
-      e("span", verdict[r.verdict], "review-chip"),
+      e("strong", "Verdict: " + verdict[r.verdict]),
       e("code", r.head.slice(0, 8)),
     );
     if (url) meta.append(link("Open PR #" + r.number + " ↗", url));
     pane.append(
       meta,
-      e("h3", "Review summary"),
-      editor("review summary", r.body, null),
-      e("h3", "Inline comments · " + r.comments.length),
+      e("h2", "Review comment"),
+      editor("review comment", r.body, null),
+      e("h2", "Inline comments · " + r.comments.length),
     );
     if (!r.comments.length) pane.append(e("p", "No inline comments."));
     for (const c of r.comments) {
@@ -241,7 +260,13 @@
       );
       if (url) {
         const header = card.firstChild,
-          anchor = link(header.textContent, url + "/files");
+          anchor = link("", url + "/files");
+        const parts = a.path.split("/");
+        parts.forEach((part, i) => {
+          if (i) anchor.append("/", e("wbr"));
+          anchor.append(part);
+        });
+        anchor.append(header.textContent.slice(a.path.length));
         header.replaceChildren(anchor);
         crypto.subtle
           ?.digest("SHA-256", new TextEncoder().encode(a.path))
@@ -301,7 +326,7 @@
           publish.disabled = false;
         }
       });
-      publish.classList.add("publish");
+      publish.classList.add("primary");
       footer.append(
         publish,
         e("small", "Publishes under your GitHub account."),
