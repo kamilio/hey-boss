@@ -26,3 +26,7 @@ tempfile = "3"
 opt-level = 2
 
 [workspace]
+
+[[example]]
+name = "terminal-queue"
+path = "tests/fixtures/queue.rs"

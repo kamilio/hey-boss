@@ -109,32 +109,20 @@ dashboard and renderer do not start a worker or change queue state.
 
 ## Verification
 
+From `worker-tui`, run:
+
 ```sh
-cargo test --locked --manifest-path worker-tui/Cargo.toml
-cargo clippy --locked --manifest-path worker-tui/Cargo.toml --all-targets -- -D warnings
-cargo build --locked --manifest-path worker-tui/Cargo.toml
-cd worker-tui
-npm ci
-npm run test:terminal
-npm run test:projects
-cargo build --locked --manifest-path ../Cargo.toml
-node tests/resume-terminal.mjs
-python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
+cargo test --locked
+cargo test --locked --test terminal resume:: -- --ignored
+cargo clippy --locked --all-targets -- -D warnings
 ```
 
-The terminal walkthrough uses the terminal-pilot SDK and a temporary synthetic
-queue. It tests history, navigation, help during slow requests, resizing,
-outage recovery, pasted keys, confirmation cancellation,
-pause/stop, and restored terminal settings after quit and SIGTERM. It writes screenshots
-under the ignored `worker-tui/target/terminal-qa` directory. Real queues and
-workers are not changed. The activity walkthrough adds color screenshots across
-five terminal sizes, paging, waiting/failure states, compact help, and disconnect
-recovery under `worker-tui/target/activity-qa`. Run `cargo test --locked --test terminal`
-from `worker-tui` for the native activity, runtime, shared-worker, and tab-order
-checks. They use Poe Code’s Rust PTY and PNG crates and save labeled screenshots
-under `target/{activity,runtime,project-tabs,tab-order}-qa`.
-CI checks the Rust package and PTY walkthrough on macOS
-and Linux. Node.js 22+ and Python 3 are required only for the walkthrough.
+The first command exercises controls, project tabs, activity, timers, reconnects,
+resizing, and terminal restoration against a synthetic queue. The second builds
+the main CLI and runs a private supervisor with a fixture agent. It checks that
+opening the dashboard leaves pickup paused and that resuming pickup lets the
+same agent finish its work.
 
-`TERMINAL_PILOT_MODULE` and `TERMINAL_PNG_MODULE` can point to built local SDK
-modules when testing from a poe-code development checkout.
+Both use Poe Code’s Rust PTY and PNG crates. Find the captured screens and text
+in `target/{terminal,activity,runtime,project-tabs,tab-order,resume}-qa`.
+CI runs these on macOS and Linux, plus a separate Python check for terminal titles.

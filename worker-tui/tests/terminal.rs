@@ -1,10 +1,12 @@
-//! Process-level checks against a synthetic status snapshot; never access a real worker.
+//! Process-level dashboard checks using synthetic queues or a private fixture supervisor.
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 use serde_json::{Value, json};
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    process::Command,
+    rc::Rc,
+    sync::OnceLock,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -21,7 +23,7 @@ struct Terminal {
     pending: Vec<u8>,
     start: Instant,
     output: PathBuf,
-    dir: tempfile::TempDir,
+    dir: Rc<tempfile::TempDir>,
 }
 impl Terminal {
     fn launch(suite: &str, cols: usize, rows: usize, snapshot: &Value, projects: bool) -> Self {
@@ -31,45 +33,72 @@ impl Terminal {
         fs::create_dir_all(&output).unwrap();
         let dir = tempfile::tempdir_in(&output).unwrap();
         fs::write(dir.path().join("snapshot.json"), snapshot.to_string()).unwrap();
-        let backend = dir.path().join("backend");
-        fs::write(
-            &backend,
-            r#"#!/bin/sh
-for last do :; done
-if [ "$last" != status ]; then touch unexpected-command; exit 2; fi
-if [ -f offline ]; then echo 'Synthetic queue offline' >&2; exit 1; fi
-exec /bin/cat snapshot.json
-"#,
+        static QUEUE: OnceLock<String> = OnceLock::new();
+        let backend = QUEUE.get_or_init(|| {
+            let result = Command::new(env!("CARGO"))
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .args([
+                    "run",
+                    "--locked",
+                    "--quiet",
+                    "--example",
+                    "terminal-queue",
+                    "--",
+                    "--print-path",
+                ])
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            String::from_utf8(result.stdout).unwrap().trim().to_owned()
+        });
+        let mut cli = vec![
+            env!("CARGO_BIN_EXE_hey-boss-worker-tui").into(),
+            "--binary".into(),
+            backend.clone(),
+        ];
+        if projects {
+            cli.push("--projects".into());
+        }
+        Self::open(
+            output,
+            Rc::new(dir),
+            (cols, rows),
+            cli,
+            vec![("PATH".into(), std::env::var("PATH").unwrap())],
         )
-        .unwrap();
-        fs::set_permissions(&backend, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    fn open(
+        output: PathBuf,
+        dir: Rc<tempfile::TempDir>,
+        (cols, rows): (usize, usize),
+        cli: Vec<String>,
+        mut env: Vec<(String, String)>,
+    ) -> Self {
         let mut args = vec![
             "-c".into(),
             r#"before=$(stty -g) || exit 98
-"$@"
+/bin/sh -c 'echo $$ > dashboard.pid; exec "$@"' dashboard "$@"
 code=$?
 [ "$(stty -g)" = "$before" ] || exit 99
 printf 'TERMINAL_RESTORED\n'
 exit "$code""#
                 .into(),
             "terminal".into(),
-            env!("CARGO_BIN_EXE_hey-boss-worker-tui").into(),
-            "--binary".into(),
-            backend.to_str().unwrap().into(),
         ];
-        if projects {
-            args.push("--projects".into());
-        }
+        args.extend(cli);
+        env.extend([
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ]);
         let pty = Pty::spawn(Options {
             command: "/bin/sh".into(),
             args,
             cwd: Some(dir.path().to_str().unwrap().into()),
-            env: vec![
-                ("TERM".into(), "xterm-256color".into()),
-                ("COLORTERM".into(), "truecolor".into()),
-                ("NO_COLOR".into(), "".into()),
-                ("PATH".into(), std::env::var("PATH").unwrap()),
-            ],
+            env,
             cols,
             rows,
         })
@@ -110,13 +139,7 @@ exit "$code""#
         let until = Instant::now() + Duration::from_secs(12);
         loop {
             self.pump();
-            let text = self
-                .screen
-                .screen_lines()
-                .iter()
-                .map(|l| String::from_utf16_lossy(&strip_ansi(l)))
-                .collect::<Vec<_>>()
-                .join("\n");
+            let text = self.text();
             if predicate(&text) {
                 return text;
             }
@@ -129,6 +152,32 @@ exit "$code""#
     }
     fn wait(&mut self, text: &str) {
         self.wait_for(|s| s.contains(text));
+    }
+    fn state(&self) -> Value {
+        serde_json::from_slice(&fs::read(self.dir.path().join("snapshot.json")).unwrap()).unwrap()
+    }
+    fn text(&self) -> String {
+        String::from_utf16_lossy(&strip_ansi(&self.screen.screen_lines().join(&10)))
+    }
+    // An automatic refresh can briefly disable controls. Retry opening a dialog, never confirmation.
+    fn open_dialog(&mut self, key: &str, title: &str) {
+        let end = Instant::now() + Duration::from_secs(12);
+        loop {
+            self.key(key);
+            let retry = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < retry {
+                self.pump();
+                if self.text().contains(title) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                Instant::now() < end,
+                "could not open {title}: {}",
+                self.text()
+            );
+        }
     }
     fn key(&mut self, key: &str) {
         self.pty.write(key.as_bytes()).unwrap();
@@ -182,6 +231,9 @@ exit "$code""#
             "read-only walkthrough attempted a mutation"
         );
         self.key("q");
+        self.wait_exit();
+    }
+    fn wait_exit(&mut self) {
         let until = Instant::now() + Duration::from_secs(4);
         loop {
             self.pump();
@@ -564,3 +616,9 @@ fn activity_history_help_and_recovery() {
     t.wait_for(|s| s.contains("Supervisor: connected") && !s.contains("Synthetic queue offline"));
     t.quit();
 }
+
+#[path = "terminal/controls.rs"]
+mod controls;
+
+#[path = "terminal/resume.rs"]
+mod resume;
