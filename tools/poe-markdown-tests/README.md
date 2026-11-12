@@ -1,6 +1,6 @@
 # Full poe-code Markdown suite
 
-The reference run fetches four test files and their 31 supporting files from
+The reference run fetches four test files and their dependencies from
 Poe Code on GitHub. The Rust importer verifies their SHA-256 hashes and test
 inventory against `upstream-manifest.json` before replacing the local
 `upstream/` directory. The native Rust tests need only the checked-in corpus

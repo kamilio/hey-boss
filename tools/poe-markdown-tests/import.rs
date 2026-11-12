@@ -10,7 +10,6 @@ use std::{
 };
 
 const SUITE: &str = "packages/toolcraft-design/src/terminal-markdown";
-const ENTRYPOINT: &str = "packages/toolcraft-design/src/index.ts";
 const REPOSITORY: &str = "https://github.com/poe-platform/poe-code";
 
 #[derive(Deserialize, Serialize, PartialEq)]
@@ -85,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut files = BTreeMap::new();
     while let Some(file) = todo.pop() {
         let relative = file.to_str().ok_or("upstream path is not UTF-8")?;
-        if relative == ENTRYPOINT || files.contains_key(relative) {
+        if files.contains_key(relative) {
             continue;
         }
         let data = git(&["show", &format!("{revision}:{relative}")])?;
@@ -115,7 +114,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::write(output, &data)?;
         files.insert(relative.to_owned(), format!("{:x}", Sha256::digest(&data)));
     }
-    // The tracked test-only entrypoint belongs to the harness, not the upstream snapshot.
     let manifest = Manifest {
         repository: REPOSITORY.into(),
         revision,
@@ -128,7 +126,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("upstream files or tests differ from upstream-manifest.json".into());
     }
-    fs::copy(base.join("theme-entry.ts"), dest.join(ENTRYPOINT))?;
+    fs::copy(
+        base.join("frontmatter-package.json"),
+        dest.join("packages/frontmatter/package.json"),
+    )?;
     let upstream = base.join("upstream");
     if upstream.exists() {
         fs::remove_dir_all(&upstream)?;
