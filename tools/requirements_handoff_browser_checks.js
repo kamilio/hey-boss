@@ -1,4 +1,4 @@
-// Playwright CLI run-code after requirements_handoff_install_checks.mjs --serve.
+// Playwright CLI run-code after cargo run -p hey-boss --example requirements-handoff -- BINARY --serve.
 // Create /tmp/hb-handoff-qa first; remove screenshots after visual inspection.
 async page => {
   const checks = [], errors = [];

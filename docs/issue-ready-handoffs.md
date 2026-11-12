@@ -66,7 +66,7 @@ The mutation path supports resident workers that compare exact versions. Replica
 replay invalidates the issue before publishing external history, even when comment
 rows, events and issue deltas arrive separately. Existing version receipts remain
 readable; the writer never rewinds versions or renews a stale acknowledgment.
-Verify mixed builds with `node tools/requirements_handoff_install_checks.mjs BINARY BUILD --worker-binary PATH`.
+Verify mixed builds with `cargo run -p hey-boss --example requirements-handoff -- BINARY BUILD --worker-binary PATH`.
 This uses disposable state and does not restart the live pool.
 
 When the watcher is behind the evidence you reviewed, add

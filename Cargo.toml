@@ -77,3 +77,7 @@ path = "tests/fixtures/workers/codex-github-watch.rs"
 [[example]]
 name = "provider-worker"
 path = "tests/fixtures/workers/provider-worker.rs"
+
+[[example]]
+name = "requirements-handoff"
+path = "tests/fixtures/workers/requirements-handoff.rs"
