@@ -28,6 +28,8 @@ pub fn binary(name: &str) -> PathBuf {
                 "codex-approvals",
                 "--example",
                 "codex-github-watch",
+                "--example",
+                "provider-worker",
                 "--message-format=json-render-diagnostics",
             ])
             .output()

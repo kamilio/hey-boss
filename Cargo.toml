@@ -73,3 +73,7 @@ path = "tests/fixtures/workers/codex-approvals.rs"
 [[example]]
 name = "codex-github-watch"
 path = "tests/fixtures/workers/codex-github-watch.rs"
+
+[[example]]
+name = "provider-worker"
+path = "tests/fixtures/workers/provider-worker.rs"
