@@ -53,9 +53,24 @@ impl Drop for Fixture {
 }
 
 #[test]
-fn claims_show_iteration_count_before_instructions_without_counting_claims() {
+fn claims_lead_with_the_task_and_end_with_actual_iterations() {
     let f = Fixture::new();
-    f.text(&["create", "--title", "Iteration history"]);
+    f.text(&[
+        "settings",
+        "set",
+        "--prs-enabled",
+        "--prompt",
+        "Follow the task.",
+    ]);
+    f.text(&[
+        "create",
+        "--title",
+        "Iteration history",
+        "--body",
+        "Verify rollout.",
+        "--label",
+        "push-blocked",
+    ]);
     let db = rusqlite::Connection::open(f.0.join("issues.db")).unwrap();
     for count in 0..=2 {
         if count > 0 {
@@ -68,8 +83,20 @@ fn claims_show_iteration_count_before_instructions_without_counting_claims() {
         for _ in 0..2 {
             let output = f.text(&["claim", "1"]);
             let label = format!("Iterations started: {count} (agent launches)\n");
-            let count_position = output.find(&label).expect(&output);
-            assert!(count_position < output.find("Instructions:").unwrap());
+            assert!(
+                output.starts_with("#1 [open] Iteration history\n\nVerify rollout.\n"),
+                "{output}"
+            );
+            assert!(output.contains("push-blocked") && output.contains("\nFollow the task."));
+            assert!(output.ends_with(&label), "{output}");
+            for omitted in [
+                "Instructions:",
+                "PRs enabled:",
+                "Settings QA (named:Settings QA)",
+                "Already in the requested state.",
+            ] {
+                assert!(!output.contains(omitted), "{output}");
+            }
             let json: Value = serde_json::from_str(&f.text(&["claim", "1", "--json"])).unwrap();
             assert_eq!(json["issue"]["agent_launch_count"], count);
         }
@@ -123,7 +150,6 @@ fn ordinary_issue_output_omits_absent_and_disabled_settings() {
     let f = Fixture::new();
     for args in [
         vec!["create", "--title", "Readable issue"],
-        vec!["claim", "1"],
         vec!["unassign", "1"],
         vec!["view", "1"],
         vec!["list"],
