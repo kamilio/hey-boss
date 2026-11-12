@@ -2,6 +2,8 @@
 mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use serde_json::Value;
 use std::{
     fs,
@@ -16,27 +18,29 @@ struct Fixture {
 }
 impl Fixture {
     fn new(mode: &str) -> Self {
-        let root = (if mode == "offline-updates" {
-            PathBuf::from("/tmp")
-        } else {
-            std::env::temp_dir()
-        })
-        .join(format!("hey-boss-workers-{}-{}", std::process::id(), mode));
+        static SERIAL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("out")
+            .join(format!("w{}-{serial}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("mode.txt"), mode).unwrap();
         let db = root.join("issues.db");
         projects::seed(&db, &["named:Worker fixture"]);
         Self { root, db }
     }
+    fn process(&self, binary: impl AsRef<std::ffi::OsStr>) -> Command {
+        let mut c = Command::new(binary);
+        // A disposable checkout under out/ must not inherit the source repository.
+        c.env("GIT_CEILING_DIRECTORIES", self.root.parent().unwrap());
+        c
+    }
     fn command(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        let mut c = self.process(env!("CARGO_BIN_EXE_hey-boss"));
         c.current_dir(&self.root)
             .env("HEY_BOSS_ISSUE_DB", &self.db)
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", self.notification_cli())
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .args([
@@ -54,7 +58,8 @@ impl Fixture {
         let o = self.command(args).output().unwrap();
         assert!(
             o.status.success(),
-            "{} {}",
+            "{args:?} exited with {}: {} {}",
+            o.status,
             String::from_utf8_lossy(&o.stdout),
             String::from_utf8_lossy(&o.stderr)
         );
@@ -83,44 +88,45 @@ impl Fixture {
         }
     }
     fn worker(&self) -> Worker {
-        self.worker_binary(std::path::Path::new(env!("CARGO_BIN_EXE_hey-boss")))
-    }
-    fn worker_binary(&self, binary: &std::path::Path) -> Worker {
-        let extra: Vec<String> =
-            serde_json::from_slice(&fs::read(self.root.join("worker-args.json")).unwrap()).unwrap();
         Worker(
-            Command::new(binary)
-                .current_dir(&self.root)
-                .env("HEY_BOSS_ISSUE_DB", &self.db)
-                .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
-                .env("HEY_BOSS_TEST_CLI", self.notification_cli())
-                .env(
-                    "HEY_BOSS_CODEX",
-                    if self.root.join("codex.sh").exists() {
-                        self.root.join("codex.sh")
-                    } else {
-                        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                            .join("tests/fixtures/codex-worker.mjs")
-                    },
-                )
-                .env_remove("HEY_BOSS_ISSUE_HOST")
-                .env("HEY_BOSS_FLEET_MANAGED", "1")
-                .args([
-                    "worker",
-                    "run",
-                    "--id",
-                    &managed_worker::register(&self.db),
-                    "--project",
-                    "Worker fixture",
-                    "--directory",
-                    self.root.to_str().unwrap(),
-                ])
-                .args(extra)
-                .stdout(Stdio::null())
-                .stderr(Stdio::inherit())
+            self.worker_command(env!("CARGO_BIN_EXE_hey-boss"))
                 .spawn()
                 .unwrap(),
         )
+    }
+    fn worker_command(&self, binary: impl AsRef<std::ffi::OsStr>) -> Command {
+        let extra: Vec<String> =
+            serde_json::from_slice(&fs::read(self.root.join("worker-args.json")).unwrap()).unwrap();
+        let mut command = self.process(binary);
+        command
+            .current_dir(&self.root)
+            .env("HEY_BOSS_ISSUE_DB", &self.db)
+            .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent-inbox.sock"))
+            .env("HEY_BOSS_TEST_CLI", self.notification_cli())
+            .env(
+                "HEY_BOSS_CODEX",
+                if self.root.join("codex.sh").exists() {
+                    self.root.join("codex.sh")
+                } else {
+                    worker_fixtures::binary("codex-worker")
+                },
+            )
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env("HEY_BOSS_FLEET_MANAGED", "1")
+            .args([
+                "worker",
+                "run",
+                "--id",
+                &managed_worker::register(&self.db),
+                "--project",
+                "Worker fixture",
+                "--directory",
+                self.root.to_str().unwrap(),
+            ])
+            .args(extra)
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        command
     }
     fn control(&self, command: &str, run: &str) {
         let s = self.cli(&["worker", "status"]);
@@ -141,7 +147,7 @@ impl Fixture {
         }
     }
     fn wait(&self, predicate: impl Fn(&Value) -> bool) -> Value {
-        // Several scenarios launch multiple real CLI/Node processes in order.
+        // Several scenarios launch multiple CLI and worker processes in order.
         // Three successful turns can exceed 15s on a busy developer machine.
         self.wait_for(Duration::from_secs(30), predicate)
     }
@@ -194,39 +200,8 @@ fn rejected_agent_messages_are_reported_without_retrying() {
 }
 
 fn live_prompt_scenario(mode: &str) {
-    use std::os::unix::fs::PermissionsExt;
     let f = Fixture::new(&format!("live-prompt-{mode}"));
     f.setup(&[]);
-    fs::write(f.root.join("prompt-mode.txt"), mode).unwrap();
-    let script = f.root.join("codex.sh");
-    fs::write(&script, r#"#!/usr/bin/env node
-const fs = require('node:fs');
-const {spawnSync} = require('node:child_process');
-const send = value => process.stdout.write(JSON.stringify(value)+'\n');
-const mode=fs.readFileSync('prompt-mode.txt','utf8');let turns=0;
-require('node:readline').createInterface({input:process.stdin}).on('line', line => {
- const v=JSON.parse(line);fs.appendFileSync('protocol.jsonl',line+'\n');
- if(v.method==='initialize')send({id:v.id,result:{}});
- if(v.method==='thread/start')send({id:v.id,result:{thread:{id:'live-prompt-session'}}});
- if(v.method==='turn/start'){
-  turns++;
-  const claim=spawnSync(process.env.HEY_BOSS_TEST_CLI,['issue','--project','Worker fixture','--agent','codex:live-prompt-session','claim','1','--json']);
-  if(claim.status)process.exit(1);
-  send({id:v.id,result:{turn:{id:turns===1?'owned-turn':'updated-turn'}}});
-  send({method:'item/started',params:{threadId:'live-prompt-session',item:{type:'agentMessage'}}});
- }
- if(v.method==='turn/steer'){
-  if(mode==='message-race'){
-   send({method:'item/completed',params:{threadId:'live-prompt-session',item:{type:'agentMessage',text:'{"status":"completed","summary":"Old instructions done"}'}}});
-   send({method:'turn/completed',params:{threadId:'live-prompt-session',turn:{id:'owned-turn',status:'completed'}}});
-   send({id:v.id,error:{message:'Turn has already completed'}});
-  }else if(mode==='message-uncertain')send({id:v.id,result:{turnId:'wrong-turn'}});
-  else if(mode==='message-rejected')send({id:v.id,error:{message:'Temporary steering failure'}});
-  else send({id:v.id,result:{turnId:v.params.expectedTurnId}});
- }
-});
-"#).unwrap();
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
     let mut worker = f.worker();
     // Cold CLI/mock startup can be slow alongside the rest of the integration
     // suite. Wait for the claim before measuring instruction delivery.
@@ -367,7 +342,8 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
         let path = f.root.join(name);
         fs::create_dir(&path).unwrap();
         fs::write(path.join("mode.txt"), "delay-unclaimed").unwrap();
-        let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        let initialized = f
+            .process(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&path)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
             .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -375,6 +351,8 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
             .args([
                 "project",
                 "init",
+                "--project",
+                name,
                 "--prs",
                 "false",
                 "--worktree",
@@ -389,7 +367,8 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
             "{}",
             String::from_utf8_lossy(&initialized.stdout)
         );
-        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        let output = f
+            .process(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&path)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
             .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
@@ -420,15 +399,11 @@ fn repeatable_checkouts_pick_only_selected_projects_and_survive_restart() {
     }
     let start = |args: &[&str]| {
         Worker(
-            Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+            f.process(env!("CARGO_BIN_EXE_hey-boss"))
                 .current_dir(&f.root)
                 .env("HEY_BOSS_ISSUE_DB", &f.db)
                 .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
-                .env(
-                    "HEY_BOSS_CODEX",
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                        .join("tests/fixtures/codex-worker.mjs"),
-                )
+                .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
                 .env_remove("HEY_BOSS_ISSUE_HOST")
                 .env("HEY_BOSS_FLEET_MANAGED", "1")
                 .args(["worker", "run", "--json"])
@@ -969,7 +944,6 @@ fn timed_out_unassigned_work_starts_fresh_and_claims_again() {
 
 #[test]
 fn every_retry_starts_fresh_without_losing_history() {
-    use std::os::unix::fs::PermissionsExt;
     for (name, state, summary) in [
         (
             "missing-rollout",
@@ -1024,37 +998,7 @@ fn every_retry_starts_fresh_without_losing_history() {
             "Existing implementation stays intact",
         )
         .unwrap();
-        let script = f.root.join("codex.sh");
-        fs::write(&script, r#"#!/usr/bin/env node
-const fs = require('node:fs');
-const {spawnSync} = require('node:child_process');
-const readline = require('node:readline');
-const send = value => process.stdout.write(JSON.stringify(value) + '\n');
-let session;
-readline.createInterface({input:process.stdin}).on('line', line => {
-    fs.appendFileSync('protocol.jsonl', line + '\n');
-    const request = JSON.parse(line);
-    if (request.method === 'initialize') send({id:request.id,result:{}});
-    if (request.method === 'thread/start' || request.method === 'thread/resume') {
-        session = request.params.threadId || 'fresh-session';
-        send({id:request.id,result:{thread:{id:session,turns:[]}}});
-    }
-    if (request.method === 'turn/start') {
-        if (session !== 'fresh-session') {
-            send({id:request.id,error:{code:-32600,message:'failed to submit turn input: ActiveTurnOutputSchemaMismatch'}});
-            return;
-        }
-        const claim = spawnSync(process.env.HEY_BOSS_TEST_CLI, ['issue','--project','Worker fixture','--agent',`codex:${session}`,'claim','1','--json']);
-        if (claim.status !== 0) throw new Error(claim.stderr.toString());
-        const close = spawnSync(process.env.HEY_BOSS_TEST_CLI, ['issue','--project','Worker fixture','--agent',`codex:${session}`,'close','1','--json']);
-        if (close.status !== 0) throw new Error(close.stderr.toString());
-        send({id:request.id,result:{turn:{id:'turn'}}});
-        send({method:'item/completed',params:{threadId:session,item:{type:'agentMessage',text:JSON.stringify({status:'completed',summary:'Recovery verified'})}}});
-        send({method:'turn/completed',params:{threadId:session,turn:{id:'turn',status:'completed'}}});
-    }
-});
-"#).unwrap();
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(f.root.join("mode.txt"), "retry-history").unwrap();
         let mut worker = f.worker();
         let finished =
             f.wait(|s| s["runs"][0]["id"] != "previous" && s["runs"][0]["finished_at"].is_number());
@@ -1274,7 +1218,8 @@ fn stopping_a_killed_worker_recovers_its_orphaned_agent_and_claim() {
     let id = running["worker_id"].as_str().unwrap();
     worker.0.kill().unwrap();
     worker.0.wait().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+    let output = f
+        .process(env!("CARGO_BIN_EXE_hey-boss"))
         .current_dir(&f.root)
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -1332,7 +1277,8 @@ fn worker_queue_distinguishes_open_issues_from_pickup_eligibility() {
     assert_eq!(status["eligible"], 1);
 
     f.cli(&["claim", "1"]);
-    let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+    let output = f
+        .process(env!("CARGO_BIN_EXE_hey-boss"))
         .current_dir(&f.root)
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -1691,14 +1637,11 @@ fn private_issue_database_does_not_modify_default_fleet_configuration() {
     let original = br#"{"role":"controller","revision":"sentinel","workers":[]}"#;
     fs::write(&config, original).unwrap();
     let mut worker = Worker(
-        Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        f.process(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&f.root)
             .env("HOME", &home)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_FLEET_STATE")
             .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -1848,7 +1791,7 @@ fn rollout_waits_for_busy_old_workers_and_verifies_idle_reload_without_restartin
     fs::create_dir_all(&directory).unwrap();
     let binary = directory.join("hey-boss");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
-    let mut worker = f.worker_binary(&binary);
+    let mut worker = Worker(f.worker_command(&binary).spawn().unwrap());
     let before = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
     let id = before["worker_id"].as_str().unwrap();
     let old_run = before["runs"][0]["id"].clone();
@@ -1865,17 +1808,14 @@ fn rollout_waits_for_busy_old_workers_and_verifies_idle_reload_without_restartin
     }
     fs::write(f.root.join("saved-work.txt"), "unfinished work").unwrap();
     let rollout = |check: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_hey-boss"));
+        let mut command = f.process(env!("CARGO_BIN_EXE_hey-boss"));
         command
             .current_dir(&f.root)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
             .env("HEY_BOSS_FLEET_STATE", f.root.join("fleet"))
             .env("HEY_BOSS_FLEET_DESIRED", f.root.join("fleet.yaml"))
             .env("HEY_BOSS_INBOX_SOCKET", f.root.join("absent-inbox.sock"))
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .args([
@@ -2001,7 +1941,7 @@ fn cli_update_idle_handoff(emergency: bool) {
     fs::create_dir_all(&directory).unwrap();
     let binary = directory.join("hey-boss");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
-    let mut worker = f.worker_binary(&binary);
+    let mut worker = Worker(f.worker_command(&binary).spawn().unwrap());
     let initial = f.wait(|s| s["active"] == 1 && s["runs"][0]["state"] == "running");
     let id = initial["worker_id"].as_str().unwrap().to_owned();
     let run = initial["runs"][0]["id"].as_str().unwrap().to_owned();
@@ -2054,7 +1994,7 @@ fn routine_cli_update_keeps_picking_up_work_and_emergency_drain_is_reversible() 
     fs::create_dir_all(&directory).unwrap();
     let binary = directory.join("hey-boss");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &binary).unwrap();
-    let mut worker = f.worker_binary(&binary);
+    let mut worker = Worker(f.worker_command(&binary).spawn().unwrap());
     let initial = f.wait(|s| s["runs"][0]["claimed_at"].is_number());
     let replacement = directory.join("hey-boss.new");
     fs::copy(env!("CARGO_BIN_EXE_hey-boss"), &replacement).unwrap();
@@ -2105,7 +2045,8 @@ fn terminal_history_is_separate_bounded_and_can_be_hidden() {
         db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at) SELECT ?1,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,finished_at FROM worker_runs LIMIT 1", [format!("historical-{n}")]).unwrap();
     }
     for (limit, expected) in [(2, 2), (0, 0)] {
-        let output = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        let output = f
+            .process(env!("CARGO_BIN_EXE_hey-boss"))
             .current_dir(&f.root)
             .env("HEY_BOSS_ISSUE_DB", &f.db)
             .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -2399,7 +2340,8 @@ fn disconnected_mac_does_not_block_issue_completion_pickup_or_worker_stop_and_up
     let f = Fixture::new("offline-updates");
     let notifications = f.root.join("notifications");
     fs::create_dir(&notifications).unwrap();
-    let initialized = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+    let initialized = f
+        .process(env!("CARGO_BIN_EXE_hey-boss"))
         .current_dir(&notifications)
         .env("HEY_BOSS_ISSUE_DB", &f.db)
         .env_remove("HEY_BOSS_ISSUE_HOST")
@@ -2791,8 +2733,9 @@ fn worker_startup_waits_for_transient_writer_contention() {
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.setup(&["--concurrency", "1"]);
     let db = rusqlite::Connection::open(&f.db).unwrap();
+    let mut command = f.worker_command(env!("CARGO_BIN_EXE_hey-boss"));
     db.execute_batch("BEGIN IMMEDIATE").unwrap();
-    let mut worker = f.worker();
+    let mut worker = Worker(command.spawn().unwrap());
     thread::sleep(Duration::from_secs(12));
     assert!(
         worker.0.try_wait().unwrap().is_none(),
@@ -2810,7 +2753,7 @@ fn codex_sqlite_startup_contention_retries_the_same_reservation() {
     let f = Fixture::new("codex-sqlite-startup");
     fs::write(f.root.join("mode.txt"), "completed").unwrap();
     f.setup(&["--concurrency", "1"]);
-    let mock = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs");
+    let mock = worker_fixtures::binary("codex-worker");
     let wrapper = f.root.join("codex.sh");
     fs::write(&wrapper, format!("#!/bin/sh\nif [ ! -f startup-retried ]; then\n touch startup-retried\n printf 'Error: failed to initialize sqlite state runtime: database is locked\\n' >&2\n exit 1\nfi\nexec '{}' \"$@\"\n", mock.display())).unwrap();
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
@@ -3024,6 +2967,7 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         f.cli(&["comment", "1", "--body", "Preserved history"]);
         let db = rusqlite::Connection::open(&f.db).unwrap();
         db.busy_timeout(Duration::from_secs(10)).unwrap();
+        let mut command = f.worker_command(env!("CARGO_BIN_EXE_hey-boss"));
         db.execute_batch("DROP INDEX issue_list_summary; DROP INDEX issue_dependency_metadata; ALTER TABLE issues DROP COLUMN draft;")
             .unwrap();
         if version == 10 {
@@ -3036,7 +2980,7 @@ fn worker_startup_repairs_missing_draft_schema_before_pickup() {
         }
         db.pragma_update(None, "user_version", version).unwrap();
 
-        let mut worker = f.worker();
+        let mut worker = Worker(command.spawn().unwrap());
         // Read SQLite directly: a status CLI would repair the store itself and
         // could conceal a worker that queried i.draft before migrating.
         let deadline = Instant::now() + Duration::from_secs(15);

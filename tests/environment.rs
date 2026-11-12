@@ -2,6 +2,8 @@
 mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use std::{fs, os::unix::fs::PermissionsExt};
 #[path = "support/environment.rs"]
 mod support;
@@ -170,13 +172,7 @@ fn quota_pool_startup_releases_five_issues_and_recovers_with_one_identity_check(
         f.command(env!("CARGO_BIN_EXE_hey-boss"))
             .env("HEY_BOSS_ISSUE_DB", &db_path)
             .env_remove("HEY_BOSS_ISSUE_HOST")
-            .env(
-                "HEY_BOSS_CODEX",
-                concat!(
-                    env!("CARGO_MANIFEST_DIR"),
-                    "/tests/fixtures/codex-worker.mjs"
-                ),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env("HEY_BOSS_FLEET_MANAGED", "1")
             .args([

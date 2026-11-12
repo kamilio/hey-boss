@@ -1,5 +1,7 @@
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use serde_json::{Value, json};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -75,10 +77,7 @@ impl Web {
             .current_dir(&root)
             .env("HEY_BOSS_ISSUE_DB", root.join("issues.db"))
             .env("HEY_BOSS_INBOX_SOCKET", root.join("inbox.sock"))
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
@@ -1051,7 +1050,7 @@ fn opening_web_does_not_start_standalone_workers() {
     ] {
         assert!(!html.contains(absent), "Unexpected worker UI: {absent}");
     }
-    assert!(html.contains("project-instructions-preview"));
+    assert!(html.contains("id=\"project-settings-form\""));
     assert_eq!(web.http("GET", "/workers.js", &[], b"").status, 404);
     let script = String::from_utf8(web.http("GET", "/project-settings.js", &[], b"").body).unwrap();
     assert!(!script.contains("SQLite"));
