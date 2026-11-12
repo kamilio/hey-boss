@@ -21,6 +21,7 @@ mod controls;
 mod desktop;
 mod fleet;
 mod issue_design;
+mod markdown_attachments;
 mod origin;
 mod seed;
 
@@ -45,6 +46,7 @@ enum Scenario {
     ProjectSettings,
     QuietHours,
     ArtifactDiagrams,
+    MarkdownAttachments,
     PlanPrompt,
     LivePrompt,
     ProjectPicker,
@@ -80,6 +82,7 @@ impl Scenario {
             Self::AgentsNavigation => ("Home", 59643),
             Self::ProjectSettings => ("Settings fixture", 59642),
             Self::QuietHours => ("Quiet hours QA", 59651),
+            Self::MarkdownAttachments => (markdown_attachments::PROJECT, 0),
             Self::ArtifactDiagrams => ("Flowchart QA", 59549),
             Self::PlanPrompt => ("Plan QA", 59693),
             Self::LivePrompt => ("Prompt Studio", 4883),
@@ -305,6 +308,10 @@ fn main() -> Result<()> {
             info["fixture_pid"] = json!(std::process::id());
             info["owner_pid"] = info["fixture_pid"].clone();
             info["url"] = json!(url);
+            if matches!(args.scenario, Scenario::MarkdownAttachments) {
+                info["base"] = json!(url.trim_end_matches('/'));
+                info["url"] = json!(markdown_attachments::url(url, &info["id"]));
+            }
             info["native"] = json!(url.trim_end_matches('/'));
             info["project"] = boot["project"]["id"].clone();
             if matches!(args.scenario, Scenario::LocalHttp) {
