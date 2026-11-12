@@ -59,6 +59,9 @@ impl Web {
         Self::start_with_args(&[])
     }
     fn start_with_args(args: &[&str]) -> Self {
+        Self::start_with_binary(std::path::Path::new(env!("CARGO_BIN_EXE_hey-boss")), args)
+    }
+    fn start_with_binary(binary: &std::path::Path, args: &[&str]) -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("out")
             .join(format!(
@@ -73,12 +76,12 @@ impl Web {
         )
         .unwrap();
         projects::seed(&root.join("issues.db"), &[&project.id]);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_hey-boss"))
+        let mut child = Command::new(binary)
             .current_dir(&root)
             .env("HEY_BOSS_ISSUE_DB", root.join("issues.db"))
             .env("HEY_BOSS_INBOX_SOCKET", root.join("inbox.sock"))
             .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
-            .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
+            .env("HEY_BOSS_TEST_CLI", binary)
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .args([
@@ -2138,4 +2141,89 @@ fn batch_unassign_from_boss_clears_allocations_protects_holds_and_releases_picku
         )
         .unwrap();
     assert_eq!(remaining_targets, 0);
+}
+
+/// HEY_BOSS_TEST_BINARY and HEY_BOSS_TEST_VERSION can select and verify an installed build.
+#[test]
+fn installed_agents_ui_and_saved_conversation_cursor() {
+    let binary = PathBuf::from(
+        std::env::var_os("HEY_BOSS_TEST_BINARY")
+            .unwrap_or_else(|| env!("CARGO_BIN_EXE_hey-boss").into()),
+    )
+    .canonicalize()
+    .unwrap();
+    let version = Command::new(&binary).arg("--version").output().unwrap();
+    assert!(version.status.success());
+    let version = String::from_utf8(version.stdout).unwrap();
+    if let Ok(expected) = std::env::var("HEY_BOSS_TEST_VERSION") {
+        assert!(version.contains(&expected), "{version}");
+    }
+    let web = Web::start_with_binary(&binary, &[]);
+    web.ok(json!({"action":"create","title":"Saved conversation","body":"","labels":[]}));
+    let codex = web.root.join("codex");
+    let sessions = codex.join("sessions/2026/09/19");
+    fs::create_dir_all(&sessions).unwrap();
+    let session = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    let mut file =
+        fs::File::create(sessions.join(format!("rollout-test-{session}.jsonl"))).unwrap();
+    for (role, text) in [
+        ("user", "Original request"),
+        ("assistant", "Verified reply"),
+    ] {
+        writeln!(file,"{}",json!({"type":"response_item","payload":{"type":"message","role":role,"content":[{"type":"output_text","text":text}]}})).unwrap();
+    }
+    let path = web.root.join("issues.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,session_id,state,owner_pid,owner_start,machine,started_at,updated_at,expanded_prompt) SELECT 'verify-run',project_id,number,?1,created_by,?2,'completed',1,'start','fixture',1,1,'Original request' FROM issues WHERE number=1",rusqlite::params![json!({"issue":{"title":"Saved conversation"}}).to_string(),session]).unwrap(),1);
+    let history = |request: Value| {
+        let mut child = Command::new(&binary)
+            .current_dir(&web.root)
+            .env("HEY_BOSS_ISSUE_DB", &path)
+            .env("HEY_BOSS_FLEET_STATE", &web.root)
+            .env("CODEX_HOME", &codex)
+            .env_remove("HEY_BOSS_ISSUE_HOST")
+            .env_remove("HEY_BOSS_ISSUE_PROJECT")
+            .env_remove("HEY_BOSS_STATE_DIR")
+            .args(["fleet", "conversation"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        serde_json::to_writer(child.stdin.take().unwrap(), &request).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        serde_json::from_slice::<Value>(&out.stdout).unwrap()
+    };
+    let first = history(json!({"run":"verify-run","latest":true}));
+    assert_eq!(first["ok"], true, "{first}");
+    let messages: Vec<_> = first["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(messages, ["Original request", "Verified reply"]);
+    let next = history(json!({"run":"verify-run","cursor":first["cursor"]}));
+    assert_eq!(next["messages"], json!([]));
+    for path in ["/agents", "/agents/session", "/workers"] {
+        let reply = web.http("GET", path, &[], b"");
+        assert_eq!(reply.status, 200);
+        let html = String::from_utf8(reply.body).unwrap();
+        assert!(
+            html.contains("Workers · Hey Boss")
+                && html.contains("id=\"conversation\"")
+                && !html.contains("coordinates workers"),
+            "{path}"
+        );
+    }
+    let reply = web.http("GET", "/fleet.js", &[], b"");
+    assert_eq!(reply.status, 200);
+    let script = String::from_utf8(reply.body).unwrap();
+    for name in ["pageshow", "projectView", "conversation-end"] {
+        assert!(script.contains(name), "{name}");
+    }
 }
