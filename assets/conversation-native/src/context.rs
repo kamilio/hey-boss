@@ -1,10 +1,10 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use poe_agent_rust::context_plugins::parse_import_path;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashSet},
     fs,
-    io::{ErrorKind, Write},
+    io::ErrorKind,
     path::{Path, PathBuf},
 };
 
@@ -143,62 +143,4 @@ pub fn prompt(home: &Path, cwd: &Path) -> Result<String> {
     }
     sections.push(include_str!("../../conversation-visuals.md").trim().into());
     Ok(sections.join("\n\n"))
-}
-pub fn restore(state: &Path, legacy: &Value) -> Result<Vec<Value>> {
-    let messages = if let Some(s) = optional(state)? {
-        serde_json::from_str::<Value>(&s)?["messages"]
-            .as_array()
-            .context("Invalid conversation history")?
-            .clone()
-    } else if legacy.is_null() {
-        vec![]
-    } else {
-        legacy
-            .as_array()
-            .context("Invalid conversation history")?
-            .clone()
-    };
-    // An interrupted call may have changed files. Supply its missing response
-    // when resuming history, but never execute the call again.
-    let answered: HashSet<String> = messages
-        .iter()
-        .filter(|m| m["role"] == "tool")
-        .filter_map(|m| m["toolCallId"].as_str().map(str::to_owned))
-        .collect();
-    let mut restored = Vec::with_capacity(messages.len());
-    for message in messages {
-        let missing: Vec<_> = message["tool_calls"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter(|call| call["id"].as_str().is_some_and(|id| !answered.contains(id)))
-            .map(|call| {
-                json!({
-                    "role": "tool", "toolCallId": call["id"], "name": call["function"]["name"],
-                    "content": "Interrupted before the result was saved. The command may have run."
-                })
-            })
-            .collect();
-        restored.push(message);
-        restored.extend(missing);
-    }
-    Ok(restored)
-}
-pub fn save(path: &Path, messages: &[Value]) -> Result<()> {
-    let Some(dir) = path.parent() else {
-        bail!("Missing state directory")
-    };
-    use std::os::unix::fs::DirBuilderExt;
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)?;
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(br#"{"messages":"#)?;
-    serde_json::to_writer(&mut tmp, messages)?;
-    tmp.write_all(b"}")?;
-    tmp.flush()?;
-    tmp.as_file().sync_all()?;
-    tmp.persist(path)?;
-    Ok(())
 }
