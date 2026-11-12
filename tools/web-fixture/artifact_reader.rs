@@ -217,3 +217,72 @@ fn selecting_passages_and_editing_long_drafts_keeps_controls_reachable() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn native_edits_refresh_the_reader_without_overwriting_a_browser_draft() {
+    let f = installed_fixture();
+    let (project, _) = Scenario::NativeArtifactEditor.destination();
+    f.init(project).unwrap();
+    let info = desktop::seed(&f, Scenario::NativeArtifactEditor, project).unwrap();
+    let id = info["id"].as_str().unwrap();
+    let (_web, base) = web(&f, project);
+    let mut p = Page::open(&format!(
+        "{base}/artifacts#project=named%3ANative%20editor%20QA&artifact={id}"
+    ));
+    p.wait("document.querySelector('#artifact-edit')?.checkVisibility()");
+    p.eval("document.querySelector('#artifact-edit').click()")
+        .unwrap();
+    let launched = "document.querySelector('#artifact-status').textContent==='Opened in native editor · auto-saving'";
+    p.wait(launched);
+    let count = || {
+        serde_json::from_slice::<Value>(&fs::read(f.root.path().join("launches.json")).unwrap())
+            .unwrap()["count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(count(), 1);
+    assert_eq!(
+        p.eval("document.querySelector('#artifact-editor')===null")
+            .unwrap(),
+        true
+    );
+    for event in ["keyDown", "keyUp"] {
+        p.command(
+            "Input.dispatchKeyEvent",
+            json!({"type":event,"key":"e","code":"KeyE","windowsVirtualKeyCode":69,"modifiers":4}),
+        )
+        .unwrap();
+    }
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    while count() != 2 {
+        assert!(
+            std::time::Instant::now() < end,
+            "shortcut did not open native editor"
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    let edit = |version: &str, body: &str| {
+        run(f.command(&[
+            "artifact",
+            "edit",
+            id,
+            "--project",
+            project,
+            "--if-version",
+            version,
+            "--body",
+            body,
+            "--json",
+        ]))
+        .unwrap()
+    };
+    edit("1", "Native save visible in reader.");
+    p.wait("document.querySelector('#artifact-reading').innerText.trim()==='Native save visible in reader.'");
+    p.eval("document.querySelector('.artifact-menu summary').click();document.querySelector('#artifact-edit-browser').click();const field=document.querySelector('#artifact-body');field.value='Unsent browser draft';field.dispatchEvent(new Event('input',{bubbles:true}))").unwrap();
+    edit("2", "Newer native edit.");
+    p.eval("dispatchEvent(new Event('focus')); new Promise(resolve=>setTimeout(resolve,1700))")
+        .unwrap();
+    assert_eq!(p.eval("field.isConnected && field.value==='Unsent browser draft' && !document.querySelector('#artifact-editor-native')").unwrap(),true);
+    assert_eq!(count(), 2);
+}
