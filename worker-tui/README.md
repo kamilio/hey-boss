@@ -116,8 +116,7 @@ cargo build --locked --manifest-path worker-tui/Cargo.toml
 cd worker-tui
 npm ci
 npm run test:terminal
-npm run test:activity
-node tests/runtime-terminal.mjs
+npm run test:projects
 cargo build --locked --manifest-path ../Cargo.toml
 node tests/resume-terminal.mjs
 python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
@@ -130,7 +129,10 @@ pause/stop, and restored terminal settings after quit and SIGTERM. It writes scr
 under the ignored `worker-tui/target/terminal-qa` directory. Real queues and
 workers are not changed. The activity walkthrough adds color screenshots across
 five terminal sizes, paging, waiting/failure states, compact help, and disconnect
-recovery under `worker-tui/target/activity-qa`; its fixtures use Node and shell.
+recovery under `worker-tui/target/activity-qa`. Run `cargo test --locked --test terminal`
+from `worker-tui` for the native activity, runtime, shared-worker, and tab-order
+checks. They use Poe Code’s Rust PTY and PNG crates and save labeled screenshots
+under `target/{activity,runtime,project-tabs,tab-order}-qa`.
 CI checks the Rust package and PTY walkthrough on macOS
 and Linux. Node.js 22+ and Python 3 are required only for the walkthrough.
 
