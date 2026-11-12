@@ -51,6 +51,10 @@ fn serve_client(server: Server, tx: mpsc::Sender<(String, Value)>, done: mpsc::R
                 include_str!("../src/issues/web/artifacts.js"),
                 "text/javascript; charset=utf-8",
             ),
+            "/git-review/diff.js" => (
+                include_str!("../src/issues/web/git-review/diff.js"),
+                "text/javascript; charset=utf-8",
+            ),
             "/api/inbox" => {
                 assert_eq!(r.method(), &tiny_http::Method::Post);
                 let csrf = r
@@ -352,5 +356,31 @@ fn agent_guide_tracks_the_current_route_and_quotes_the_lookup_argument() {
             empty.eval("history.pushState === beforeGuide").unwrap(),
             true
         );
+    });
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn commit_diff_keeps_literal_header_lines_and_deleted_paths() {
+    let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,2 @@\n--- literal\n++++ literal\n+second\ndiff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed\n";
+    with_client(|port, _| {
+        let mut page = Page::open(&format!("http://127.0.0.1:{port}/"));
+        let files = page
+            .eval(&format!(
+                "import('/git-review/diff.js').then(m => m.parseUnifiedDiff({}))",
+                json!(patch)
+            ))
+            .unwrap();
+        assert_eq!(files.as_array().unwrap().len(), 2);
+        assert_eq!(files[0]["path"], "a.txt");
+        let lines: Vec<_> = files[0]["hunks"][0]["lines"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|line| line["content"].as_str().unwrap())
+            .collect();
+        assert_eq!(lines, ["-- literal", "+++ literal", "second"]);
+        assert_eq!(files[1]["path"], "gone.txt");
+        assert_eq!(files[1]["status"], "deleted");
     });
 }
