@@ -221,7 +221,5 @@
     const label = !finished && !online ? 'Last seen' : ({running:'Working',reserved:'Starting',starting:'Starting',completed:'Completed',approval_required:'Needs approval',needs_input:'Needs your answer',blocked:'Needs attention',failed:'Failed',interrupted:'Interrupted',stopped:'Stopped',cancelled:'Stopped',timed_out:'Interrupted',attempt_held:'Pickup paused',infrastructure_blocked:'Needs attention'})[run.state] || 'Status unknown';
     return {duration, label, live, caption:finished ? 'Total runtime' : live ? 'Elapsed time' : 'Last known runtime'};
   }
-  const api = {current, owner, selectedTarget, describe, render, status, fetchOverview, initWatcher, runtime};
-  if (typeof module !== "undefined") module.exports = api;
-  else root.IssueAssignments = api;
+  root.IssueAssignments = {current, owner, selectedTarget, describe, render, status, fetchOverview, initWatcher, runtime};
 })(globalThis);
