@@ -1986,3 +1986,6 @@ fn scheduled_service_timer_queues_once_and_worker_executes_without_creating_a_ta
     worker.unwrap().terminate();
     supervisor.terminate();
 }
+
+#[path = "fleet_native/job_worker.rs"]
+mod job_worker;
