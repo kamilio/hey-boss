@@ -499,3 +499,71 @@ fn blocked_issue_views_distinguish_holds_from_dependency_chains() {
         assert!(html.as_str().unwrap().contains(expected), "{expected}");
     }
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn special_tags_use_guarded_writes_and_owner_only_controls() {
+    let f = fixture();
+    f.init("Tags").unwrap();
+    let created = run(f.issue("Tags", &["create", "--title", "Tag controls"])).unwrap();
+    let version = created["issue"]["version"].as_i64().unwrap();
+    let (_web, base) = web(&f, "Tags");
+    let mut p = Page::open(&format!("{base}/#project=named%3ATags&issue=1"));
+    p.wait("!!document.querySelector('[data-tag-picker]')");
+    assert_eq!(
+        p.eval("document.querySelectorAll('[data-tag-picker]').length")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        p.eval("document.querySelector('.tag-section').textContent.includes('agent-permissions')")
+            .unwrap(),
+        false
+    );
+    // Record the two real POSTs, including the revision and destination sent by the UI.
+    p.eval("window.tagWrites=[]; const originalFetch=window.fetch; window.fetch=(path,opts)=>{if(path==='/api/action' && opts?.body){const b=JSON.parse(opts.body); if(b.operation?.action==='set_yolo')tagWrites.push(b)} return originalFetch(path,opts)}; undefined").unwrap();
+    p.eval("document.querySelector('[data-tag-picker]').click()")
+        .unwrap();
+    p.wait("document.querySelector('[data-issue-tag=yolo]')?.disabled===false");
+    p.wait("document.querySelector('.tag-option .yolo-badge')?.title.includes('No sandbox or approval prompts') && !!document.querySelector('.tag-option .yolo-badge svg')");
+    p.eval("document.querySelector('[data-issue-tag=yolo]').click()")
+        .unwrap();
+    p.wait("!!document.querySelector('[data-remove-issue-tag=yolo]') && !document.querySelector('[data-issue-tag=yolo]').disabled");
+    p.wait("new URL(document.querySelector('.side-labels a').href).hash.includes('label=yolo')");
+    assert_eq!(
+        run(f.issue("Tags", &["view", "1"])).unwrap()["issue"]["labels"],
+        json!(["yolo"])
+    );
+    // Inspect the controls for an agent, then restore the actual viewer before making the second request.
+    let owner = p.eval("model.actor.id").unwrap();
+    assert_eq!(owner, "human:boss");
+    p.eval("model.actor.id='codex:tag-reader'; renderIssueTagOptions()")
+        .unwrap();
+    p.wait("document.querySelector('[data-issue-tag=yolo]').disabled");
+    assert_eq!(
+        p.eval("renderIssueTagChips(model.detail.issue).includes('data-remove-issue-tag')")
+            .unwrap(),
+        false
+    );
+    p.eval(&format!("model.actor.id={owner}; renderIssueTagOptions()"))
+        .unwrap();
+    assert_eq!(p.eval("renderIssueTagChips({...model.detail.issue,deleted_at:1}).includes('data-remove-issue-tag')").unwrap(),false);
+    p.eval("document.querySelector('[data-remove-issue-tag=yolo]').click()")
+        .unwrap();
+    p.wait("!document.querySelector('[data-remove-issue-tag=yolo]') && !model.detail.issue.labels.includes('yolo')");
+    assert_eq!(
+        run(f.issue("Tags", &["view", "1"])).unwrap()["issue"]["labels"],
+        json!([])
+    );
+    let writes = p.eval("tagWrites").unwrap();
+    let writes = writes.as_array().unwrap();
+    assert_eq!(writes.len(), 2);
+    for (index, enabled) in [true, false].into_iter().enumerate() {
+        assert_eq!(
+            writes[index]["operation"],
+            json!({"action":"set_yolo","number":1,"enabled":enabled,"if_version":version+index as i64})
+        );
+        assert_eq!(writes[index]["project"], "named:Tags");
+        assert!(writes[index]["host"].is_null() || writes[index]["host"] == "");
+    }
+}
