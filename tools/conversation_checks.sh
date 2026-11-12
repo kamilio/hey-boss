@@ -28,6 +28,8 @@ say -v Alex -o "$root/accounts.aiff" 'Only after switching accounts.'
 mkdir "$root/interruptions"
 ffmpeg -nostdin -loglevel error -i "$root/mobile.aiff" -ar 16000 -ac 1 -f s16le "$root/interruptions/first.pcm"
 ffmpeg -nostdin -loglevel error -i "$root/accounts.aiff" -ar 16000 -ac 1 -f s16le "$root/interruptions/second.pcm"
+say -v Samantha -o "$root/ack.aiff" "Yeah."
+ffmpeg -nostdin -loglevel error -i "$root/ack.aiff" -ar 16000 -ac 1 -f s16le "$root/interruptions/ack.pcm"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_INTERRUPTED_CHAT="$root/interruptions" "$2"
 say -v Samantha -o "$root/reply.aiff" 'Here is more of the conversation. The next example needs a longer explanation.'
 say -v Alex -o "$root/blue.aiff" 'Blue.'

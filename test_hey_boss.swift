@@ -4907,8 +4907,22 @@ func auditInterruptedChat(_ root: String) {
     chat.receive(.pcm(Data(count: 32000))); chat.receive(.ended)
     wait("noise decoded") { chat.phase != .decoding }
     precondition(chat.phase == .speaking && voice.player.isPlaying && chat.conversationHistory.count == 2, "An empty interruption must resume the same reply")
+    let ack = try! Data(contentsOf: dir.appendingPathComponent("ack.pcm"))
+    chat.receive(.began)
+    for offset in stride(from: 0, to: ack.count, by: 640) {
+        chat.receive(.pcm(ack.subdata(in: offset..<min(ack.count, offset + 640))))
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.018))
+    }
+    precondition(chat.phase == .recording && chat.conversationHistory.count == 2, "Never act on a partial transcript")
+    chat.receive(.ended)
+    wait("spoken acknowledgment") { chat.phase != .decoding }
+    precondition(chat.phase == .speaking && voice.player.isPlaying && chat.conversationHistory.count == 2,
+                 "Yeah during an explanation must resume the same passage")
+    precondition(!VoiceConversation.acknowledgment("Yeah", during: "Would you like me to continue?"))
+    precondition(!VoiceConversation.acknowledgment("Okay, wait.", during: answer))
     chat.receive(.candidate)
     for name in ["first", "second"] {
+
         chat.receive(.began)
         precondition(chat.phase == .recording, "New speech must be accepted during transcription")
         chat.receive(.pcm(try! Data(contentsOf: dir.appendingPathComponent(name + ".pcm"))))
