@@ -3,6 +3,7 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
     use Scenario::*;
     let issue = |args: &[&str]| run(f.issue(p, args));
     match s {
+        LocalHttp | NativeArtifactEditor => return desktop::seed(f, s, p),
         Origin => return origin::seed(f, p),
         AgentsNavigation => {
             f.init("Atlas")?;
