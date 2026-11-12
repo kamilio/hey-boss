@@ -8,6 +8,8 @@ mod chrome;
 mod managed_worker;
 #[path = "assignment_deadline.rs"]
 mod assignment_deadline;
+#[path = "project_checkouts.rs"]
+mod project_checkouts;
 #[path = "pr_handoff.rs"]
 mod pr_handoff;
 #[path = "../../tests/support/worker_fixtures.rs"]
