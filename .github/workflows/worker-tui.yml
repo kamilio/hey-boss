@@ -20,7 +20,7 @@ jobs:
       - run: cargo build --locked --release
       - run: cargo build --locked
       - run: cargo build --locked --manifest-path ../Cargo.toml
-      - run: cargo test --locked --test terminal resume:: -- --ignored
+      - run: "cargo test --locked --test terminal resume:: -- --ignored"
       - run: python3 ../tools/worker_title_terminal_checks.py ../target/debug/hey-boss
       - name: Check CLI terminal screens
         working-directory: .
