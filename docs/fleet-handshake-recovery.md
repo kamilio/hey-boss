@@ -97,7 +97,8 @@ Verification uses private databases and transport processes:
 ```sh
 cargo test --locked -p hey-boss --lib fleet::native::
 cargo test --locked -p hey-boss --test fleet_native --test fleet_tunnel
-node tools/test_fleet_view.js
+cargo build --locked -p hey-boss --bin hey-boss
+cargo test --locked -p hey-boss --example web-fixture browser::workers:: -- --ignored
 node tools/fleet_contention_browser_checks.mjs
 ```
 
