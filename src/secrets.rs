@@ -40,36 +40,7 @@ pub fn install() -> Result<()> {
         }
         result => result,
     };
-    initialized?;
-    let destination = home.join(".local/share/hey-boss/sdk/secrets");
-    for (path, contents) in [
-        (
-            "python/pyproject.toml",
-            include_bytes!("../packages/hey-boss-secrets/sdk/python/pyproject.toml").as_slice(),
-        ),
-        (
-            "python/hey_boss_secrets/__init__.py",
-            include_bytes!("../packages/hey-boss-secrets/sdk/python/hey_boss_secrets/__init__.py")
-                .as_slice(),
-        ),
-        (
-            "javascript/package.json",
-            include_bytes!("../packages/hey-boss-secrets/sdk/javascript/package.json").as_slice(),
-        ),
-        (
-            "javascript/index.js",
-            include_bytes!("../packages/hey-boss-secrets/sdk/javascript/index.js").as_slice(),
-        ),
-        (
-            "javascript/index.d.ts",
-            include_bytes!("../packages/hey-boss-secrets/sdk/javascript/index.d.ts").as_slice(),
-        ),
-    ] {
-        let path = destination.join(path);
-        std::fs::create_dir_all(path.parent().unwrap()).map_err(|_| Error::StorageFailure)?;
-        backend::write_private(&path, contents)?;
-    }
-    Ok(())
+    initialized.map(|_| ())
 }
 
 #[cfg(target_os = "macos")]

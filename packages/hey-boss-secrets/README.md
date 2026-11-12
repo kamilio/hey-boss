@@ -4,7 +4,7 @@
 
 ## Setup
 
-The installer runs `hey-boss secrets install`: a private machine identity goes in macOS Keychain or Linux pass. A Linux machine without a pass store gets its own passphrase-free GPG key. Existing stores and keys are preserved. Python and JavaScript SDK sources are installed at `~/.local/share/hey-boss/sdk/secrets/`.
+The installer runs `hey-boss secrets install`: a private machine identity goes in macOS Keychain or Linux pass. A Linux machine without a pass store gets its own passphrase-free GPG key. Existing stores and keys are preserved.
 
 macOS SSH logins can have a locked Keychain even when the desktop session is unlocked. Installation retries identity initialization in that user's existing desktop session through a temporary launchd job. Only setup arguments and an exit status cross that boundary; no credential files are created. If that session is also locked or absent, installation fails. Reads and writes run in the caller's session and still fail closed when its Keychain is unavailable.
 
@@ -32,28 +32,7 @@ Revocation cannot erase copies already delivered, old encrypted journal entries,
 
 Rust: depend on the `hey-boss-secrets` workspace crate. `client::Client::default().get("google/personal")` returns `(Record, Secret)`. `Secret::expose()` returns bytes. `put(name, bytes, "bundle", Some(&record.revision))` saves changed bytes.
 
-Python: install `~/.local/share/hey-boss/sdk/secrets/python` with pip, or add it to the tool's module path.
-
-```python
-from hey_boss_secrets import Client
-store = Client()
-record, secret = store.get("google/personal")
-# Give secret.expose() to the official Google credentials library.
-# After that library refreshes, save its updated credential JSON:
-# store.put(record["id"], updated_json_bytes, kind="bundle", expected=record["revision"])
-```
-
-JavaScript: install `~/.local/share/hey-boss/sdk/secrets/javascript` with npm, or import its `index.js` directly.
-
-```js
-import { Client } from '@hey-boss/secrets';
-const store = new Client();
-const { record, secret } = await store.get('google/personal');
-// Pass secret.expose() to the official client, then save updated bytes:
-// await store.put(record.id, updatedBytes, {kind: 'bundle', expected: record.revision});
-```
-
-All three SDKs use the local CLI over private pipes, not a daemon. Secret wrappers redact normal printing/inspection; exposing or parsing bytes hands responsibility to the caller. Managed runtimes may retain copies in memory. Errors use fixed codes and discard subprocess diagnostics. For tools that require files, create an owner-only temporary directory, export there, let the official tool refresh its file, then write it back and remove the temporary file. Do not keep credentials in skill folders.
+Other languages can call `hey-boss secrets get NAME --stdout` over a private pipe and send bytes to `hey-boss secrets put NAME` on stdin. The Rust SDK uses the same local CLI and redacts secrets when printed. Errors use fixed codes and discard subprocess diagnostics. For tools that require files, create an owner-only temporary directory, export there, let the official tool refresh its file, then write it back and remove the temporary file. Do not keep credentials in skill folders.
 
 ## Local security boundary
 
