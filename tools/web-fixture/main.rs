@@ -16,6 +16,7 @@ mod agents;
 mod archive;
 #[cfg(test)]
 mod browser;
+mod retained_attempt;
 
 mod controls;
 mod desktop;
@@ -29,6 +30,7 @@ mod seed;
 #[derive(Clone, Copy, ValueEnum)]
 enum Scenario {
     AssignmentWatch,
+    RetainedAttempt,
     IssueArchitecture,
     IssueTimeline,
     IssueStatus,
@@ -67,6 +69,7 @@ enum Scenario {
 impl Scenario {
     fn destination(self) -> (&'static str, u16) {
         match self {
+            Self::RetainedAttempt => ("Surviving attempt QA", 59673),
             Self::AssignmentWatch => ("Assignment QA", 48698),
             Self::IssueArchitecture => ("Issue Design QA", 48122),
             Self::IssueTimeline => ("Timeline QA", 48948),
@@ -314,6 +317,9 @@ fn main() -> Result<()> {
             if matches!(args.scenario, Scenario::MarkdownAttachments) {
                 info["base"] = json!(url.trim_end_matches('/'));
                 info["url"] = json!(markdown_attachments::url(url, &info["id"]));
+            }
+            if matches!(args.scenario, Scenario::RetainedAttempt) {
+                info["url"] = json!(retained_attempt::url(url, &info["number"]));
             }
             info["native"] = json!(url.trim_end_matches('/'));
             info["project"] = boot["project"]["id"].clone();

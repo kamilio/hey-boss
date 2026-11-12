@@ -359,3 +359,43 @@ fn installed_reviewed_evidence_handoff_is_atomic_and_replayable() {
     f.init(project).unwrap();
     reviewed_evidence::verify(&f, project).unwrap();
 }
+
+#[test]
+fn installed_retained_attempts_require_terminal_evidence() {
+    let f = installed_fixture();
+    let (project, _) = Scenario::RetainedAttempt.destination();
+    f.init(project).unwrap();
+    let seeded = retained_attempt::seed(&f, project).unwrap();
+    let inspected = run(f.issue(
+        project,
+        &["attempt", "inspect", &seeded["number"].to_string()],
+    ))
+    .unwrap();
+    assert_eq!(inspected["evidence"]["process"], "live");
+}
+
+#[test]
+#[ignore = "requires Chrome and a built web-fixture example"]
+fn retained_attempt_viewer_opens_the_live_issue() {
+    let executable = std::env::current_exe()
+        .unwrap()
+        .with_file_name("web-fixture");
+    let mut command = Command::new(executable);
+    command.arg("retained-attempt");
+    if let Some(binary) = std::env::var_os("HEY_BOSS_TEST_BINARY") {
+        command.arg(binary);
+    }
+    let (_server, url) = start_web(command);
+    let mut p = Page::open("about:blank");
+    p.command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":390,"height":844,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .unwrap();
+    p.command("Page.navigate", json!({"url":url})).unwrap();
+    p.wait("document.querySelector('.attempt-notice h2')?.textContent==='Task attempt protected'");
+    p.eval("document.querySelector('.attempt-notice summary').click()")
+        .unwrap();
+    p.wait("document.querySelector('.attempt-notice details').innerText.includes('validation-with-a-long-descriptive-name-for-layout-testing.log') && document.documentElement.scrollWidth<=innerWidth");
+    assert_eq!(p.eval("model.detail.issue.assignee===null && model.detail.issue.attempt_hold.owner==='codex:attempt-qa'").unwrap(),true);
+}
