@@ -10,8 +10,24 @@ pub(super) fn respond(
     records: &Value,
     sequence: &mut u32,
 ) {
+    if matches!(scenario, Scenario::JobsUi)
+        && req.method() == &Method::Get
+        && req.url() == "/fixture-instructions.md"
+    {
+        let _ = req.respond(
+            Response::from_string(include_str!("../../src/jobs/fixtures/original.md"))
+                .with_header(Header::from_bytes("Content-Type", "text/markdown").unwrap()),
+        );
+        return;
+    }
     let result = (|| -> Result<(u16, Value)> {
         match (scenario, req.method(), req.url()) {
+            (Scenario::JobsUi, Method::Post, "/fixture-session" | "/fixture-calendar-run") => {
+                let Ok(body) = serde_json::from_reader::<_, Value>(req.as_reader()) else {
+                    return Ok((400, json!({"ok":false})));
+                };
+                jobs_control(f, project, req.url(), body)
+            }
             (Scenario::IssueStatus, Method::Get, "/fixture/history") => Ok((
                 200,
                 run(f.issue(project, &["status-history", "1", "--limit", "100"]))?,
@@ -159,4 +175,53 @@ pub(super) fn jobs(f: &Fixture, project: &str) -> Result<Value> {
         }
     }
     Ok(json!({"records":records}))
+}
+
+fn jobs_control(f: &Fixture, project: &str, path: &str, body: Value) -> Result<(u16, Value)> {
+    let invalid = (400, json!({"ok":false}));
+    let Some(run) = body["run"].as_str() else {
+        return Ok(invalid);
+    };
+    let project = format!("named:{project}");
+    let mut db = rusqlite::Connection::open(&f.db)?;
+    if path == "/fixture-session" {
+        let tx = db.transaction()?;
+        let node: String =
+            tx.query_row("SELECT node FROM fleet_meta WHERE id=1", [], |r| r.get(0))?;
+        let session = uuid::Uuid::new_v4().to_string();
+        if tx.execute("UPDATE scheduled_job_runs SET session_id=?1,machine=?2 WHERE id=?3 AND project_id=?4 AND state='cancelled'", [&session,&node,run,&project])? == 0 {
+            return Ok(invalid);
+        }
+        let line = json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Synthetic saved job result."}]}});
+        fs::write(
+            f.root
+                .path()
+                .join(format!("codex/sessions/rollout-test-{session}.jsonl")),
+            format!("{line}\n"),
+        )?;
+        tx.commit()?;
+        return Ok((200, json!({"ok":true,"node":node})));
+    }
+    let (Some(state), Some(at)) = (body["state"].as_str(), body["at"].as_i64()) else {
+        return Ok(invalid);
+    };
+    if at.unsigned_abs() > (1 << 53) - 1 {
+        return Ok(invalid);
+    }
+    let reason = match state {
+        "pending" => Some("Chosen runtime is unavailable; waiting for a connected job service."),
+        "running" | "succeeded" => None,
+        "failed" => Some("Synthetic runtime failure"),
+        "cancelled" => Some("Stopped by user"),
+        "skipped" => Some("overlap"),
+        _ => return Ok(invalid),
+    };
+    let start = matches!(state, "running" | "failed" | "succeeded").then_some(at + 180_000);
+    let end = (!matches!(state, "running" | "pending")).then_some(at + 240_000);
+    let n = db.execute("UPDATE scheduled_job_runs SET scheduled_at=?1,created_at=?2,started_at=?3,finished_at=?4,state=?5,reason=?6 WHERE id=?7 AND project_id=?8 AND (state='skipped')=(?5='skipped')",rusqlite::params![at,at+120_000,start,end,state,reason,run,project])?;
+    Ok(if n == 1 {
+        (200, json!({"ok":true}))
+    } else {
+        invalid
+    })
 }

@@ -138,6 +138,7 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
               INSERT INTO issue_agent_launches(run_id, project_id, issue_number, launched_at) SELECT 'fixture-'||issues.number||'-'||n.x,project_id,number,created_at FROM issues JOIN n ON n.x<=CASE number WHEN 2 THEN 1 WHEN 3 THEN 12 WHEN 4 THEN 1234 ELSE 0 END;")?;
         }
         IssueListActions => {}
+        JobsUi => fs::write(f.root.path().join("fleet.yaml"), "machines: {}\n")?,
         ScheduledJobs => return controls::jobs(f, p),
         StatusDot | IssueStatus => {
             for (title, level, comment) in [

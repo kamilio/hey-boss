@@ -22,7 +22,7 @@ async page => {
    await page.keyboard.press('Escape');
    check(await page.locator('#project-trigger').evaluate(e=>e===document.activeElement),`${path} menu restores focus`);
    check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`${path} ${width} ${colorScheme}: no overflow`);
-   if(path==='/jobs')await page.screenshot({path:`/tmp/hb-calendar-qa/${paired?'paired':'desktop'}-shared-theme-${width}-${colorScheme}.png`,fullPage:true});
+   if(path==='/jobs')await page.screenshot({path:`out/hb-calendar-qa/${paired?'paired':'desktop'}-shared-theme-${width}-${colorScheme}.png`,fullPage:true});
   }
  }
  return {checks:checks.length};

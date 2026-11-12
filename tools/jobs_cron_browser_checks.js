@@ -1,5 +1,5 @@
-// Run against serve_jobs_ui_fixture.mjs; all mutations stay in its disposable store.
-async (page, outputDir='/tmp/hb-jobs-cron-qa') => {
+// Run against the Rust web-fixture jobs-ui scenario; all mutations stay in its disposable store.
+async (page, outputDir='out/hb-jobs-cron-qa') => {
  const origin=new URL(page.url()).origin,project='named:Jobs UI QA';
  if(!['http://127.0.0.1:59649'].includes(origin))throw Error('Isolated fixture required');
  const checks=[],errors=[];

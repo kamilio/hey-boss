@@ -1,4 +1,4 @@
-// Run against serve_jobs_ui_fixture.mjs; mutations stay in its disposable store.
+// Run against the Rust web-fixture jobs-ui scenario; mutations stay in its disposable store.
 async (page) => {
  const origin=page.url().split('/').slice(0,3).join('/');
  if(origin!=='http://127.0.0.1:59649')throw Error('Isolated native fixture required');
@@ -28,7 +28,7 @@ async (page) => {
   await page.setViewportSize({width,height:950});await page.emulateMedia({colorScheme:theme});
   await page.locator('#job-targets').scrollIntoViewIfNeeded();
   check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No horizontal overflow');
-  await page.screenshot({path:'/tmp/jobs-machines-'+width+'-'+theme+'.png'});
+  await page.screenshot({path:'out/jobs-machines-'+width+'-'+theme+'.png'});
  }
  await page.locator('#job-placement').selectOption('auto');
  await page.getByRole('button',{name:'Save changes',exact:true}).click();
@@ -43,7 +43,7 @@ async (page) => {
  await page.reload();await page.waitForSelector('#job-placement');
  check(await page.locator('#job-placement').inputValue()==='all','All machines persists after reload');
  await page.locator('#job-placement').scrollIntoViewIfNeeded();
- await page.screenshot({path:'/tmp/jobs-all-machines-mobile.png'});
+ await page.screenshot({path:'out/jobs-all-machines-mobile.png'});
  await page.getByRole('button',{name:'Run now',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#job-history')?.textContent.includes('All machines'));
  await page.getByRole('button',{name:'Refresh run history',exact:true}).click();
@@ -75,7 +75,7 @@ async (page) => {
  await page.setViewportSize({width:390,height:950});
  await page.locator('#job-machine-choices').scrollIntoViewIfNeeded();
  check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Selected machines fit mobile');
- await page.screenshot({path:'/tmp/jobs-selected-machines-mobile.png'});
+ await page.screenshot({path:'out/jobs-selected-machines-mobile.png'});
  await page.getByRole('button',{name:'Run now',exact:true}).click();
  await page.getByRole('button',{name:'Refresh run history',exact:true}).click();
  await page.waitForFunction(()=>document.querySelector('#job-history')?.textContent.includes('0 of 2 machines finished'));
