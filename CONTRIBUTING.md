@@ -13,3 +13,8 @@ For browser checks, build the CLI with `cargo build --locked -p hey-boss --bin h
 Run `cargo run --locked -p hey-boss --example web-fixture -- artifact-diagrams`
 and open the printed URL. Use `--help` in place of the scenario to list fixtures.
 Ctrl+C stops the server and removes its test data.
+The `local-http` fixture prints its private `root`. Replace `root/hey-boss` to
+exercise a server restart; `root/ready.json` records the PID, port URL and start count.
+
+Run `cargo test --locked -p hey-boss --test web_client -- --ignored` to check the
+shipped client in headless Chrome. Set `CHROME_BIN` if Chrome is installed elsewhere.
