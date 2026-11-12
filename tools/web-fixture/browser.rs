@@ -388,7 +388,7 @@ fn retained_attempt_viewer_opens_the_live_issue() {
     if let Some(binary) = std::env::var_os("HEY_BOSS_TEST_BINARY") {
         command.arg(binary);
     }
-    let (_server, url) = start_web(command);
+    let (mut server, url) = start_web(command);
     let mut p = Page::open("about:blank");
     p.command(
         "Emulation.setDeviceMetricsOverride",
@@ -401,4 +401,23 @@ fn retained_attempt_viewer_opens_the_live_issue() {
         .unwrap();
     p.wait("document.querySelector('.attempt-notice details').innerText.includes('validation-with-a-long-descriptive-name-for-layout-testing.log') && document.documentElement.scrollWidth<=innerWidth");
     assert_eq!(p.eval("model.detail.issue.assignee===null && model.detail.issue.attempt_hold.owner==='codex:attempt-qa'").unwrap(),true);
+    // The fixture owns its own web child, which may take five seconds to stop.
+    // Wait for both it and the database owner before this outer guard expires.
+    drop(p);
+    assert_eq!(
+        unsafe { libc::kill(server.0.id() as i32, libc::SIGTERM) },
+        0
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = server.0.try_wait().unwrap() {
+            assert!(status.success(), "fixture shutdown: {status}");
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "fixture failed to stop"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
 }
