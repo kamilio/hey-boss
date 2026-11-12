@@ -3,6 +3,8 @@
 mod managed_worker;
 #[path = "support/projects.rs"]
 mod projects;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use serde_json::Value;
 use std::{
     fs,
@@ -43,10 +45,7 @@ impl Fixture {
             .env_remove("HEY_BOSS_ISSUE_HOST")
             .env_remove("HEY_BOSS_ISSUE_PROJECT")
             .env_remove("HEY_BOSS_FLEET_SUPERVISED")
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-worker.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"));
         c
     }

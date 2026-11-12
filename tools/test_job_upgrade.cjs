@@ -2,7 +2,7 @@
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const {spawn, spawnSync} = require('node:child_process');
+const {spawn, spawnSync, execFileSync} = require('node:child_process');
 const {DatabaseSync} = require('node:sqlite');
 const {createHash} = require('node:crypto');
 const assert = require('node:assert/strict');
@@ -20,7 +20,7 @@ for (const name of [checkout, state, path.join(root, 'home')]) fs.mkdirSync(name
 fs.writeFileSync(path.join(root, 'inventory.json'), '{"ssh_hosts":[]}');
 fs.writeFileSync(path.join(root, 'desired.json'), '{"machines":{}}');
 const database = path.join(root, 'issues.db');
-const env = {...process.env, HOME:path.join(root,'home'), CODEX_HOME:path.join(root,'codex'),
+const env = {...process.env, GIT_CEILING_DIRECTORIES:root, HOME:path.join(root,'home'), CODEX_HOME:path.join(root,'codex'),
   HEY_BOSS_ISSUE_DB:database, HEY_BOSS_FLEET_STATE:state,
   HEY_BOSS_FLEET_CONFIG:path.join(root,'inventory.json'), HEY_BOSS_FLEET_DESIRED:path.join(root,'desired.json'),
   HEY_BOSS_INBOX_SOCKET:path.join(root,'inbox.sock'), HEY_BOSS_AGENT_ID:'human:fixture',
@@ -31,7 +31,7 @@ const env = {...process.env, HOME:path.join(root,'home'), CODEX_HOME:path.join(r
   HEY_BOSS_TEST_CLI:binary,
 };
 if(withIssue){
-  const runtime=env.HEY_BOSS_CODEX, issue=path.resolve('tests/fixtures/codex-worker.mjs');
+  const runtime=env.HEY_BOSS_CODEX, issue=execFileSync('cargo',['run','--quiet','--locked','-p','hey-boss','--example','codex-worker','--','--print-path'],{encoding:'utf8'}).trim();
   env.HEY_BOSS_CODEX=path.join(root,'codex.sh');
   fs.writeFileSync(env.HEY_BOSS_CODEX,`#!/bin/sh\nif [ -n "$HEY_BOSS_JOB_RUN" ]; then exec '${runtime}' "$@"; else exec '${issue}' "$@"; fi\n`,{mode:0o755});
   fs.writeFileSync(path.join(checkout,'mode.txt'),'delay-release');
@@ -52,7 +52,7 @@ const start = (args, executable = binary) => {
 };
 const wait = async (check,timeout=20000) => {
   const until=Date.now()+timeout;
-  while(!check()) { assert.ok(Date.now()<until,'Timed out: '+children.map(c=>c.errors).join('\n'));await new Promise(r=>setTimeout(r,100)); }
+  while(!check()) { assert.ok(Date.now()<until,'Timed out: '+children.map(c=>c.output.slice(-2000)+c.errors).join('\n'));await new Promise(r=>setTimeout(r,100)); }
 };
 const stop = async child => {
   if(child.exitCode!==null||child.signalCode!==null)return;
@@ -62,7 +62,7 @@ async function main(){
   let supervisor=start(['fleet','supervisor']);
   await wait(()=>fs.existsSync(path.join(state,'fleet.sock')));
   command(['project','init','--project','Worker fixture','--yes','--prs','false','--worktree','false','--json']);
-  const worker=start([binary,'--name','Fixture worker','--concurrency','1','--no-worktree','--json'],path.join(__dirname,'../tests/fixtures/managed-worker.sh'));
+  const worker=start([binary,'--project','Worker fixture','--name','Fixture worker','--concurrency','1','--no-worktree','--json'],path.join(__dirname,'../tests/fixtures/managed-worker.sh'));
   db=new DatabaseSync(database);
   await wait(()=>db.prepare('SELECT count(*) n FROM local_job_workers').get().n===1);
   const workerId=db.prepare('SELECT worker_id FROM local_job_workers').get().worker_id;
@@ -79,7 +79,7 @@ async function main(){
   assert.equal(status.active,0);assert.equal(status.free,1);
   assert.equal(status.workers.find(w=>w.id===workerId).job_active,1);
   if(withIssue){
-    command(['issue','create','--title','Fixture issue','--json']);
+    command(['issue','create','--project','Worker fixture','--title','Fixture issue','--json']);
     await wait(()=>db.prepare('SELECT count(*) n FROM worker_runs WHERE claimed_at IS NOT NULL AND finished_at IS NULL').get().n===1).catch(error=>{
       throw new Error(error.message+' '+JSON.stringify(db.prepare('SELECT state,summary,last_event FROM worker_runs').all()));
     });

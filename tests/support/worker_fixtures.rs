@@ -23,6 +23,8 @@ pub fn binary(name: &str) -> PathBuf {
                 "-p",
                 "hey-boss",
                 "--example",
+                "codex-worker",
+                "--example",
                 "codex-drain",
                 "--example",
                 "codex-approvals",
