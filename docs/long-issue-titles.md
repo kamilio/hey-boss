@@ -21,7 +21,7 @@ Verification:
 
 - `cargo test --test issues overlong_issue_titles`
 - `cargo test --lib title_content`
-- `node tools/test_quick_issue.js`
+- After building the CLI, `cargo test --locked --example web-fixture browser::quick_issue -- --ignored`
 - Native Quick Add audit described in [native-quick-issue.md](native-quick-issue.md),
   including long-title request contents, retries, and light/dark window captures.
 - Build the CLI with `cargo build --locked -p hey-boss --bin hey-boss`, then run
