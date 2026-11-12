@@ -208,7 +208,7 @@ impl Store {
             None => {
                 let id = Identity::generate();
                 let bytes = Secret::new(crypto::encode(&id)?);
-                self.backend.put("identity", bytes.expose())?;
+                self.backend.create("identity", bytes.expose())?;
                 id
             }
         };
@@ -373,13 +373,7 @@ impl Store {
     }
     fn clear(&self, rev: &Revision) -> Result<Secret> {
         self.authorize(rev)?;
-        let key = format!("records/{}", rev.id()?);
-        if let Some(bytes) = self.backend.get(&key)? {
-            return Ok(bytes);
-        }
-        let bytes = self.identity()?.decrypt(&rev.body.ciphertext)?;
-        self.backend.put(&key, bytes.expose())?;
-        Ok(bytes)
+        self.identity()?.decrypt(&rev.body.ciphertext)
     }
     pub fn get(&mut self, name: &str) -> Result<Secret> {
         self.read(name).map(|(_, secret)| secret)

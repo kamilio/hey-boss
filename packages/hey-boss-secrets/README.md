@@ -6,7 +6,7 @@
 
 The installer runs `hey-boss secrets install`: a private machine identity goes in macOS Keychain or Linux pass. A Linux machine without a pass store gets its own passphrase-free GPG key. Existing stores and keys are preserved.
 
-macOS SSH logins can have a locked Keychain even when the desktop session is unlocked. Installation retries identity initialization in that user's existing desktop session through a temporary launchd job. Only setup arguments and an exit status cross that boundary; no credential files are created. If that session is also locked or absent, installation fails. Reads and writes run in the caller's session and still fail closed when its Keychain is unavailable.
+macOS SSH logins can have a locked Keychain even when the desktop session is unlocked. Installation retries identity initialization in that user's existing desktop session through a temporary launchd job. Only setup arguments and an exit status cross that boundary; no credential files are created. If that session is also locked or absent, installation fails. Rust decrypts each authorized record from its signed revision. The platform store holds only the machine identity for new data; older per-record cache entries are ignored and left intact. Reads and writes run in the caller's session and still fail closed when its Keychain is unavailable.
 
 `hey-boss secrets enroll HOST` exchanges signed public cards over an already trusted SSH host. It initializes the destination if needed. Enrollment establishes trust; it does **not** grant records. `hey-boss secrets grant NAME MACHINE_ID` grants read/write access to one record. Only that record's original owner can grant or revoke.
 

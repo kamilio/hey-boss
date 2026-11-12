@@ -14,7 +14,7 @@ use std::{
 pub trait Backend {
     fn name(&self) -> &'static str;
     fn get(&self, key: &str) -> Result<Option<Secret>>;
-    fn put(&self, key: &str, value: &[u8]) -> Result<()>;
+    fn create(&self, key: &str, value: &[u8]) -> Result<()>;
 }
 pub fn native(home: &Path) -> Box<dyn Backend> {
     #[cfg(target_os = "macos")]
@@ -199,7 +199,7 @@ impl Backend for Pass {
             .map_err(|_| Error::InvalidRecord)?;
         Ok(Some(Secret::new(data)))
     }
-    fn put(&self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         use base64::Engine;
         if value.len() > MAX_SECRET + 8192 {
             return Err(Error::TooLarge);
@@ -212,7 +212,7 @@ impl Backend for Pass {
             let encoded =
                 zeroize::Zeroizing::new(base64::engine::general_purpose::STANDARD.encode(value));
             // Write pass-compatible ciphertext directly so an existing pass Git
-            // repository cannot invoke hooks or commit temporary cache entries.
+            // repository cannot invoke hooks or commit the machine identity.
             let recipients = dest
                 .parent()
                 .unwrap()
@@ -253,7 +253,13 @@ impl Backend for Pass {
             file.set_permissions(std::fs::Permissions::from_mode(0o600))
                 .map_err(|_| Error::StorageFailure)?;
             file.sync_all().map_err(|_| Error::StorageFailure)?;
-            std::fs::rename(&staging, &dest).map_err(|_| Error::StorageFailure)?;
+            std::fs::hard_link(&staging, &dest).map_err(|e| {
+                if e.kind() == std::io::ErrorKind::AlreadyExists {
+                    Error::Conflict
+                } else {
+                    Error::StorageFailure
+                }
+            })?;
             std::fs::File::open(dest.parent().unwrap())
                 .and_then(|f| f.sync_all())
                 .map_err(|_| Error::StorageFailure)
@@ -290,7 +296,8 @@ impl Keychain {
         let reply: Reply =
             serde_json::from_slice(output.expose()).map_err(|_| Error::StoreUnavailable)?;
         match reply.status {
-            -25300 => Ok(None),
+            -25300 if value.is_none() => Ok(None),
+            -25299 if value.is_some() => Err(Error::Conflict),
             0 => match reply.data {
                 Some(data) => {
                     let data = zeroize::Zeroizing::new(data);
@@ -316,7 +323,7 @@ impl Backend for Keychain {
     fn get(&self, key: &str) -> Result<Option<Secret>> {
         Self::read_service("hey-boss.secrets", key)
     }
-    fn put(&self, key: &str, value: &[u8]) -> Result<()> {
+    fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         Self::call("hey-boss.secrets", key, Some(value)).map(|_| ())
     }
 }
@@ -365,4 +372,39 @@ pub fn prepare_native(home: &Path) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub fn prepare_native(_home: &Path) -> Result<()> {
     Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+#[test]
+#[ignore = "uses an unlocked macOS Keychain with a disposable synthetic identity"]
+fn keychain_identity_creation_never_replaces_an_existing_key() {
+    struct Fixture(String);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = Command::new("/usr/bin/security")
+                .args(["delete-generic-password", "-s", &self.0, "-a", "identity"])
+                .output();
+        }
+    }
+    let fixture = Fixture(format!(
+        "local.hey-boss.keychain-test.{}",
+        rand::random::<u128>()
+    ));
+    assert!(
+        Keychain::read_service(&fixture.0, "identity")
+            .unwrap()
+            .is_none()
+    );
+    Keychain::call(&fixture.0, "identity", Some(b"fixture\0key")).unwrap();
+    assert_eq!(
+        Keychain::call(&fixture.0, "identity", Some(b"replacement")).unwrap_err(),
+        Error::Conflict
+    );
+    assert_eq!(
+        Keychain::read_service(&fixture.0, "identity")
+            .unwrap()
+            .unwrap()
+            .expose(),
+        b"fixture\0key"
+    );
 }
