@@ -2,6 +2,8 @@
 mod projects;
 #[path = "support/environment.rs"]
 mod signing;
+#[path = "support/worker_fixtures.rs"]
+mod worker_fixtures;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -64,10 +66,7 @@ impl Fixture {
             .env("HEY_BOSS_FLEET_STATE", self.root.join("state"))
             .env("HEY_BOSS_FLEET_DESIRED", &self.desired)
             .env("HEY_BOSS_FLEET_BINARY", env!("CARGO_BIN_EXE_hey-boss"))
-            .env(
-                "HEY_BOSS_CODEX",
-                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/codex-drain.mjs"),
-            )
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-drain"))
             .env("HEY_BOSS_TEST_CLI", env!("CARGO_BIN_EXE_hey-boss"))
             .env("HEY_BOSS_INBOX_SOCKET", self.root.join("absent.sock"))
             .env_remove("HEY_BOSS_ISSUE_HOST")
