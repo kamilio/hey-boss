@@ -5,6 +5,15 @@ pub fn seed(f: &Fixture, s: Scenario, p: &str) -> Result<Value> {
     match s {
         LocalHttp | NativeArtifactEditor => return desktop::seed(f, s, p),
         Origin => return origin::seed(f, p),
+        Agents => agents::conversations(f)?,
+        AutoWorkers => agents::workers(f, p)?,
+        WorkerConfig => {
+            fs::write(
+                f.root.path().join("fleet.yaml"),
+                "# All worker instances\nmachines:\n  local:\n    workers:\n      - id: tools\n        intent: pause\n        config:\n          name: Tools\n          concurrency: 2\n",
+            )?;
+            issue(&["create", "--title", "Synthetic worker configuration check"])?;
+        }
         AgentsNavigation => {
             f.init("Atlas")?;
             f.init("Beacon")?;

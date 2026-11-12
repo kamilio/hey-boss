@@ -1,4 +1,4 @@
-// Start both worker fixture servers, then run with playwright-cli run-code --filename.
+// Start the Rust web-fixture example twice: auto-workers and worker-config.
 async page => {
   const checks=[],errors=[];
   const check=(condition,label)=>{if(!condition)throw Error(label);checks.push(label);};

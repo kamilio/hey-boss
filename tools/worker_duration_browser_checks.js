@@ -1,4 +1,4 @@
-// Run against tools/serve_auto_workers_fixture.mjs with playwright-cli run-code --filename.
+// Start the Rust web-fixture example with the auto-workers scenario.
 async page => {
   const checks=[];
   const check=(ok,label)=>{if(!ok)throw Error(label);checks.push(label);};
