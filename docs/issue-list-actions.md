@@ -16,7 +16,9 @@ Actions keep the current filters. If the changed issue leaves the list, focus
 returns to search. Failed changes show an error and leave the row available for
 retry. The same interface is shipped to desktop and paired mobile clients.
 
-Run `node tools/test_issue_list_actions.cjs` for state and mutation-scope checks.
+With Chrome installed, build the CLI with `cargo build --locked --bin hey-boss`
+and run `cargo test --locked --example web-fixture issue_list:: -- --ignored`
+to check filtering, menu actions, confirmations and retries.
 The browser suite, `tools/issues_list_actions_browser_checks.js`, runs with
 `playwright-cli run-code --filename` against an isolated issue web server. It
 creates synthetic issues and must never be pointed at the live issue database.

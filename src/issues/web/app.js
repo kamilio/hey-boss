@@ -750,11 +750,13 @@ function openListActions(trigger, point) {
   listActionMenu.style.top = `${Math.max(8, Math.min(top, innerHeight - menu.height - 8))}px`;
   $("button:not(:disabled)", listActionMenu).focus({preventScroll:true});
 }
+function listActionIsCurrent({sequence, project, host}) {
+  return model.sequence === sequence && model.project.id === project && (model.route.host || null) === host;
+}
 async function runListAction(action, context) {
   if (listActionBusy) return;
   listActionBusy = true;
-  const {issue, project, host, sequence, trigger} = context;
-  const current = () => model.sequence === sequence && model.project.id === project && (model.route.host || null) === host;
+  const {issue, project, host, trigger} = context;
   closeListActions(true);
   try {
     if (action === "view") { navigate({issue:issue.number}); return; }
@@ -765,14 +767,14 @@ async function runListAction(action, context) {
     }
     if (["draft", "undraft"].includes(action)) {
       const result = await mutate(action === "undraft" ? {action, number:issue.number, if_version:issue.version} : {action:"edit", number:issue.number, draft:true, title:null, body:null, add_labels:[], remove_labels:[], if_version:issue.version}, project, host);
-      if (current()) toast(action === "draft" ? "Issue moved to draft" : result.issue.state === "blocked" ? "Draft marked ready; unfinished blockers still pause pickup" : "Issue marked ready for agents");
+      if (listActionIsCurrent(context)) toast(action === "draft" ? "Issue moved to draft" : result.issue.state === "blocked" ? "Draft marked ready; unfinished blockers still pause pickup" : "Issue marked ready for agents");
     } else {
       // Share the detail view's ownership confirmations and protected mutations.
       await performAction(action, trigger, context);
     }
-    if (current()) {
+    if (listActionIsCurrent(context)) {
       const result = await api(listOperation(), project, null, host);
-      if (current()) {
+      if (listActionIsCurrent(context)) {
         const restoreFocus = document.activeElement === document.body || document.activeElement === trigger;
         trigger.disabled = false;
         if (restoreFocus && trigger.isConnected) trigger.focus({preventScroll:true});
@@ -781,7 +783,7 @@ async function runListAction(action, context) {
       await refreshProjects(project);
     }
   } catch (error) {
-    if (current()) toast(error.message, true);
+    if (listActionIsCurrent(context)) toast(error.message, true);
   } finally {
     listActionBusy = false;
     trigger.disabled = false;
@@ -1705,6 +1707,7 @@ async function performAction(action, button, context = null) {
   button.disabled = true;
   try {
     const result = await mutate(operation, project, host);
+    if (context && !listActionIsCurrent(context)) return;
     if (action === "block" && operation.comment && model.project.id === project && model.detail?.issue.number === i.number) {
       $("#comment-body").value = "";
       storage.remove(draftKey("comment", project, i.number));
