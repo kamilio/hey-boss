@@ -340,3 +340,162 @@ fn timeline_groups_preserve_order_and_escape_event_data() {
         assert!(!text.as_str().unwrap().contains("reservation:internal-id"));
     }
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn pagination_preserves_every_result_and_resets_only_changed_filters() {
+    let f = fixture();
+    f.init("Pages").unwrap();
+    let (_web, base) = web(&f, "Pages");
+    let mut page = Page::open(&format!(
+        "{base}/#project=named%3APages&view=issues&state=open&owner=all"
+    ));
+    page.wait("!!model.signature");
+    for value in [
+        "undefined",
+        "''",
+        "'0'",
+        "'-2'",
+        "'1.5'",
+        "'Infinity'",
+        "'NaN'",
+        "'9007199254740992'",
+        "'3'",
+    ] {
+        assert_eq!(
+            page.eval(&format!("HeyBossPagination.number({value})"))
+                .unwrap(),
+            if value == "'3'" { 3 } else { 1 }
+        );
+    }
+    for total in [0_usize, 1, 999, 1000, 1001, 2000, 2005] {
+        let pages = total.div_ceil(1000).max(1);
+        let items = format!("Array.from({{length:{total}}},(_,i)=>i)");
+        for current in 1..=pages {
+            let result = page
+                .eval(&format!("HeyBossPagination.page({items},{current})"))
+                .unwrap();
+            assert_eq!(result["current"], current);
+            assert_eq!(result["pages"], pages);
+            assert_eq!(result["total"], total);
+            let expected: Vec<_> = ((current - 1) * 1000..(current * 1000).min(total)).collect();
+            assert_eq!(result["items"], json!(expected));
+        }
+        assert_eq!(
+            page.eval(&format!("HeyBossPagination.page({items},999).current"))
+                .unwrap(),
+            pages
+        );
+    }
+    assert_eq!(
+        page.eval("HeyBossPagination.page([2000,2001,2002,2003,2004],3).items[0]")
+            .unwrap(),
+        2000
+    );
+    // Keep the current route intact. Only construct the URL a detail link or filter would use.
+    let lookup = |page: &mut Page, key: &str, change: Value| {
+        page.eval(&format!(
+        "new URLSearchParams(routeHash({{...model.route,page:3,inbox_page:2,...{change}}}).slice(1)).get({})",json!(key)
+    )).unwrap()
+    };
+    for (key, change, expected) in [
+        ("page", json!({"issue":2001}), json!("3")),
+        ("inbox_page", json!({"notice":"notice-1001"}), json!("2")),
+        ("page", json!({"page":1}), Value::Null),
+        ("page", json!({"page":2}), json!("2")),
+    ] {
+        assert_eq!(lookup(&mut page, key, change), expected);
+    }
+    for (key, value) in [
+        ("project", "named:Other"),
+        ("host", "remote"),
+        ("state", "closed"),
+        ("search", "needle"),
+        ("owner", "mine"),
+        ("label", "bug"),
+        ("blocked", "hold"),
+        ("min_launches", "5"),
+        ("draft", "1"),
+        ("created_by", "human:boss"),
+        ("inbox_state", "archive"),
+        ("inbox_project", "Other"),
+        ("inbox_search", "needle"),
+    ] {
+        let (reset, keep, expected) = if key.starts_with("inbox_") {
+            ("inbox_page", "page", "3")
+        } else {
+            ("page", "inbox_page", "2")
+        };
+        assert_eq!(
+            lookup(&mut page, reset, json!({key:value})),
+            Value::Null,
+            "{key}"
+        );
+        assert_eq!(
+            lookup(&mut page, keep, json!({key:value})),
+            expected,
+            "{key}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn blocked_issue_views_distinguish_holds_from_dependency_chains() {
+    let f = fixture();
+    f.init("Blockers").unwrap();
+    let (_web, base) = web(&f, "Blockers");
+    let mut page = Page::open(&format!(
+        "{base}/#project=named%3ABlockers&view=issues&state=open&owner=all"
+    ));
+    page.wait("!!model.signature");
+    for (issue, kind, hold, deps) in [
+        (
+            json!({"state":"blocked","manual_blocked":true}),
+            "hold",
+            true,
+            false,
+        ),
+        (
+            json!({"state":"blocked","blocked_by":[{"number":1}]}),
+            "dependencies",
+            false,
+            true,
+        ),
+        (
+            json!({"state":"blocked","manual_blocked":true,"blocked_by":[{"number":1}]}),
+            "hold",
+            true,
+            true,
+        ),
+        (
+            json!({"state":"open","manual_blocked":true}),
+            "",
+            false,
+            false,
+        ),
+        (
+            json!({"state":"blocked","manual_blocked":true,"deleted_at":1}),
+            "",
+            false,
+            false,
+        ),
+    ] {
+        let actual=page.eval(&format!("[IssueBlockers.kind({issue}), ...['hold','dependencies',''].map(filter=>IssueBlockers.matches({issue},filter))]")).unwrap();
+        assert_eq!(actual, json!([kind, hold, deps, true]));
+    }
+    for (state, disabled) in [("closed", false), ("blocked", true)] {
+        let issue = json!({"state":state,"blocked_by":[{"number":1}]});
+        assert_eq!(page.eval(&format!("new DOMParser().parseFromString(issueStateActions({issue}),'text/html').querySelector('[data-action=reopen]').disabled")).unwrap(),disabled);
+    }
+    let chain = json!({"number":2,"title":"API layer","state":"open","blocked_by":[],"blocker_links":[{"number":1,"title":"Storage layer","state":"ready","satisfied":true,"pull_requests":[{"url":"https://github.com/example/repo/pull/101"}]}],"blocking":[{"number":3,"title":"Web UI","state":"blocked","actively_blocked":true,"unblocks_on_release":true}]});
+    let html = page.eval(&format!("IssueBlockers.card({chain})")).unwrap();
+    for expected in [
+        "dep-chain-graph",
+        "PR #101",
+        "Unblocks on Ready/Close",
+        "data-create-dependent=\"2\"",
+    ] {
+        assert!(html.as_str().unwrap().contains(expected), "{expected}");
+    }
+}

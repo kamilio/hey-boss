@@ -25,8 +25,8 @@ the old binary. Build `1fd82d4a2a05d238` (commit `6b3b8c7`) passed:
   visually reviewed; waiting notices fit without horizontal overflow.
 
 Run `cargo test --test explicit_dependencies` and
-`node tools/test_issue_blocked_types.cjs` for the focused regressions. Start
-`cargo run --example web-fixture -- issue-reopen [binary]` after building the CLI.
+`cargo test --example web-fixture blocked_issue_views -- --ignored` after building the CLI. Start
+`cargo run --example web-fixture -- issue-reopen [binary]`.
 Open the printed URL (port 59661) and run `tools/issues_reopen_browser_checks.js`
 through Playwright CLI. Stop the fixture with SIGINT/SIGTERM to
 remove its temporary database and stop its child processes. Remove generated
