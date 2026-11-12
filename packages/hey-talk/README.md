@@ -128,7 +128,7 @@ Named text captures and **Hyper+M** share the same readers:
 
 Note and history attachments are bounded at 256 KiB. Requesting both text and an image keeps whichever succeeds and explains what is missing.
 
-Press **Hyper+M** or choose **Catch Up and Talk** in a T3 thread, Slack conversation, or Obsidian note. You’ll hear the usual Catch Up recap. After the last sentence finishes, the conversation pill starts listening. Your first follow-up includes the recap you heard. Pausing delays listening; stopping the recap leaves the microphone off. **Catch Up** and controller **B** still play the recap on its own.
+Press **B** on the controller, use **Hyper+M**, or choose **Catch Up** in a T3 thread, Slack conversation, or Obsidian note. You’ll hear the usual Catch Up recap. After the last sentence finishes, the conversation pill starts listening. Your first follow-up includes the recap you heard. Pausing delays listening; stopping the recap leaves the microphone off.
 Inspect exactly what was sent with `hey-talk last --json | jq -r '.app_context'`;
 `history --json` also includes it. `null` means no context was attached.
 Context is saved locally with the original and final transcript, with the same
@@ -194,7 +194,7 @@ hey-talk speech                          # State and allowed apps
 hey-talk speech on                       # Or off
 hey-talk speech add com.example.Reader
 hey-talk speech remove com.example.Reader
-hey-talk speech catch-up                  # Hear a recap of the focused conversation or Obsidian note
+hey-talk speech catch-up                  # Hear the recap, then talk about it
 hey-talk speech target --json             # Explicitly inspect selected/hovered text
 hey-talk speech play                      # Same play/pause behavior as Hyper+S
 hey-talk speech pause

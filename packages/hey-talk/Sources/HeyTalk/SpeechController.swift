@@ -32,17 +32,16 @@ final class SpeechController {
     var onAllowedChanged: ((Bool) -> Void)?
     var onNotice: ((String) -> Void)?
     private var recapSource: CatchUpSource?
-    private var conversationalRecap = false
     private var preparing: Task<Void, Never>?
     var active: Bool { preparing != nil || playback.active }
 
-    @MainActor func catchUp(onPlayed: ((String) -> Void)? = nil) async throws {
+    @MainActor func catchUp(onPlayed: @escaping (String) -> Void) async throws {
         guard !sleeping else { throw TalkError("Unlock this Mac before reading aloud.") }
         revision &+= 1
         let ticket = revision
         let source = try await CatchUpSource.current()
         guard ticket == revision else { return }
-        if source.sameLocation(as: recapSource), conversationalRecap == (onPlayed != nil) {
+        if source.sameLocation(as: recapSource) {
             if playback.active { playback.togglePause() } else { stop() }
             return
         }
@@ -50,7 +49,6 @@ final class SpeechController {
         stop()
         release?.cancel(); engine.warm()
         recapSource = source
-        conversationalRecap = onPlayed != nil
         preparing = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
