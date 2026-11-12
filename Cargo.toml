@@ -60,8 +60,13 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
+regex = "1"
 tempfile = "3"
 uuid = { version = "1", features = ["v4"] }
+
+[[example]]
+name = "import-markdown-suite"
+path = "tools/poe-markdown-tests/import.rs"
 
 [[example]]
 name = "export-markdown-corpus"
