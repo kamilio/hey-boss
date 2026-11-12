@@ -1,5 +1,5 @@
 use super::*;
-use crate::markdown_attachments::{CSV, IMPORT, PROJECT, remove_sources, svg, write_sources};
+use crate::markdown_attachments::{remove_sources, svg, write_sources, CSV, IMPORT, PROJECT};
 fn cli(f: &Fixture, args: &[&str]) -> Value {
     run(f.command(&[args, &["--project", PROJECT, "--json"]].concat())).unwrap()
 }
@@ -48,13 +48,11 @@ fn installed_artifact_actions_and_guarded_deletion() {
     assert_eq!(created["artifact"]["version"], 1);
     cli(&f, &["artifact", "archive", id, "--if-version", "1"]);
     let list = || cli(&f, &["artifact", "list", "--archived"]);
-    assert!(
-        list()["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a["id"] == id && a["archived"] == true)
-    );
+    assert!(list()["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["id"] == id && a["archived"] == true));
     cli(&f, &["artifact", "restore", id, "--if-version", "2"]);
     assert_eq!(cli(&f, &["artifact", "view", id])["artifact"]["version"], 3);
     rejected(
@@ -75,13 +73,11 @@ fn installed_artifact_actions_and_guarded_deletion() {
     assert_eq!(deleted["deleted"], id);
     assert_eq!(cli(&f, &args), deleted);
     rejected(&f, &["artifact", "view", id], "Artifact not found");
-    assert!(
-        !list()["artifacts"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|a| a["id"] == id)
-    );
+    assert!(!list()["artifacts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|a| a["id"] == id));
 }
 
 #[test]
@@ -164,16 +160,13 @@ fn installed_markdown_import_keeps_files_after_source_removal() {
         .unwrap()
         .to_str()
         .unwrap();
-    assert!(
-        csp.split(';')
-            .any(|s| s.trim_start().starts_with("img-src ") && s.contains("blob:"))
-    );
-    assert!(
-        get("attachments.js")
-            .text()
-            .unwrap()
-            .contains("function hydrate")
-    );
+    assert!(csp
+        .split(';')
+        .any(|s| s.trim_start().starts_with("img-src ") && s.contains("blob:")));
+    assert!(get("attachments.js")
+        .text()
+        .unwrap()
+        .contains("function hydrate"));
 }
 
 #[test]
@@ -349,4 +342,103 @@ fn validation_leaves_artifact_draft_editable() {
     assert_eq!(p.eval("!document.querySelector('#artifact-load-latest') && !field.disabled && !field.readOnly && field.value==='Keep this correction draft.'").unwrap(),true);
     p.eval("field.value+=' Corrected.';field.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#artifact-editor').requestSubmit()").unwrap();
     p.wait("document.querySelector('#artifact-reading')?.innerText.includes('Keep this correction draft. Corrected.')===true");
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn retrying_the_library_and_saving_an_import_with_the_keyboard() {
+    let f = installed_fixture();
+    let project = "Library recovery";
+    f.init(project).unwrap();
+    run(f.issue(project, &["create", "--title", "Referring task"])).unwrap();
+    run(f.command(&[
+        "artifact",
+        "create",
+        "--project",
+        project,
+        "--title",
+        "Existing note",
+        "--body",
+        "Prior decision.",
+        "--json",
+    ]))
+    .unwrap();
+    let (_web, base) = web(&f, project);
+    let library = format!("{base}/artifacts#project=named%3ALibrary+recovery");
+    let mut p = Page::open("about:blank");
+    p.command(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":390,"height":844,"deviceScaleFactor":1,"mobile":false}),
+    )
+    .unwrap();
+    p.command("Page.enable", json!({})).unwrap();
+    p.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"window.el=s=>document.querySelector(s);const send=window.fetch.bind(window);window.fetch=(url,opts)=>url==='/api/action' && !sessionStorage.getItem('online') && JSON.parse(opts.body)?.operation?.operation?.command==='list'?Promise.resolve(Response.json({error:'Connection unavailable'},{status:503})):send(url,opts)"})).unwrap();
+    p.command("Page.navigate", json!({"url":library})).unwrap();
+    p.wait("el('#artifact-error p')?.innerText==='Connection unavailable'");
+    p.eval("sessionStorage.setItem('online','1');el('#artifact-error button').click()")
+        .unwrap();
+    p.wait("!!el('.artifact-row-link') && el('#artifact-error').hidden");
+    assert_eq!(p.eval("location.href").unwrap(), library);
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{library}&new=1&issue=1")}),
+    )
+    .unwrap();
+    p.wait("el('#artifact-cancel')?.checkVisibility()");
+    p.eval("el('#artifact-cancel').click()").unwrap();
+    p.wait("location.pathname==='/' && new URLSearchParams(location.hash.slice(1)).get('issue')==='1' && model.project?.name==='Library recovery'");
+    p.command("Page.navigate", json!({"url":format!("{library}&new=1")}))
+        .unwrap();
+    p.wait("el('#artifact-title')?.checkVisibility()");
+    p.eval("el('#artifact-title').value='Imported verification'")
+        .unwrap();
+    let source = "# Imported notes\n\n**Keep this** when exporting.\n";
+    let input = f.root.path().join("verification.md");
+    fs::write(&input, source).unwrap();
+    let node = p.command("DOM.getDocument", json!({})).unwrap()["root"]["nodeId"].clone();
+    let input_node = p
+        .command(
+            "DOM.querySelector",
+            json!({"nodeId":node,"selector":"#artifact-import"}),
+        )
+        .unwrap()["nodeId"]
+        .clone();
+    p.command(
+        "DOM.setFileInputFiles",
+        json!({"nodeId":input_node,"files":[input]}),
+    )
+    .unwrap();
+    p.wait(&format!("el('#artifact-body').value==={}", json!(source)));
+    p.eval("el('#artifact-body').focus()").unwrap();
+    for event in ["keyDown", "keyUp"] {
+        p.command("Input.dispatchKeyEvent",json!({"type":event,"key":"s","code":"KeyS","windowsVirtualKeyCode":83,"modifiers":if cfg!(target_os="macos"){4}else{2}})).unwrap();
+    }
+    p.wait("el('#artifact-reading strong')?.innerText==='Keep this'");
+    let downloads = f.root.path().join("downloads");
+    fs::create_dir(&downloads).unwrap();
+    p.command(
+        "Browser.setDownloadBehavior",
+        json!({"behavior":"allow","downloadPath":downloads}),
+    )
+    .unwrap();
+    p.eval("el('.artifact-menu summary').click();el('#artifact-export').click()")
+        .unwrap();
+    let file = downloads.join("Imported verification.md");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !file.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "export missing: {:?}",
+            fs::read_dir(&downloads).unwrap().collect::<Vec<_>>()
+        );
+        thread::sleep(Duration::from_millis(30));
+    }
+    assert_eq!(fs::read_to_string(file).unwrap(), source);
+    p.eval("el('.artifact-menu summary').click();el('#artifact-archive').click()")
+        .unwrap();
+    p.wait("el('#artifact-archive')?.innerText==='Restore' || el('#artifact-archive')?.textContent.trim()==='Restore'");
+    p.eval("[...document.links].find(a=>a.innerText.trim()==='All artifacts' && a.checkVisibility()).click()").unwrap();
+    p.wait("el('#artifact-archived')?.checkVisibility() && !el('#artifact-archived').disabled");
+    p.eval("el('#artifact-archived').click()").unwrap();
+    p.wait("el('.artifact-row')?.innerText.includes('Imported verification') && el('.artifact-card-label').innerText.toLowerCase().includes('archived')");
 }
