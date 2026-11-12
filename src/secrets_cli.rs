@@ -104,10 +104,11 @@ fn execute(options: &Options) -> Result<()> {
             json(serde_json::json!({"installed":true}))
         }
         Action::Init { label } => {
+            backend::prepare_native(&hey_boss::secrets::home()?)?;
             let label = label
                 .clone()
                 .unwrap_or_else(|| std::env::var("HOSTNAME").unwrap_or_else(|_| "local".into()));
-            json(hey_boss::secrets::initialize(&mut store, &label)?)
+            json(store.initialize(&label)?)
         }
         Action::Identity => json(store.enrollment()?),
         Action::Trust { file } => {
@@ -205,5 +206,10 @@ fn execute(options: &Options) -> Result<()> {
     }
 }
 pub fn run(options: &Options) -> std::io::Result<()> {
-    execute(options).map_err(std::io::Error::other)
+    execute(options).inspect_err(|_err| {
+        #[cfg(target_os = "macos")]
+        if *_err == Error::StoreUnavailable && matches!(options.action, Action::Install | Action::Init { .. }) {
+            eprintln!("Unlock the login Keychain and retry. For a pre-Rust enrollment, see packages/hey-boss-secrets/README.md#older-macs.");
+        }
+    }).map_err(std::io::Error::other)
 }

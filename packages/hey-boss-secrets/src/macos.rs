@@ -4,6 +4,7 @@ use super::*;
 use std::{fs, io::ErrorKind, os::unix::fs::DirBuilderExt};
 
 const READER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/keychain-reader"));
+#[cfg(test)]
 const SERVICE: &str = "hey-boss.secrets";
 
 pub struct Keychain(PathBuf);
@@ -67,9 +68,9 @@ impl Keychain {
             .map_err(|_| Error::StorageFailure)?;
         self.reader()?.ok_or(Error::StoreUnavailable)
     }
-    fn call(reader: &Path, op: &str, key: &str, input: &[u8]) -> Result<(i32, Secret)> {
+    fn call(reader: &Path, args: &[&str], input: &[u8]) -> Result<(i32, Secret)> {
         let mut cmd = Command::new(reader);
-        cmd.env_clear().args([op, key]);
+        cmd.env_clear().args(args);
         let reply = command(cmd, input)?;
         let (status, value) = reply
             .expose()
@@ -78,84 +79,24 @@ impl Keychain {
         Ok((i32::from_be_bytes(*status), Secret::new(value.to_vec())))
     }
 
-    fn native_read(&self, key: &str) -> Result<Option<Secret>> {
-        let Some(reader) = self.reader()? else {
-            return Ok(None);
-        };
-        match Self::call(&reader, "read", key, &[])? {
+    fn read(reader: &Path, args: &[&str]) -> Result<Option<Secret>> {
+        match Self::call(reader, args, &[])? {
             (0, bytes) => Ok(Some(bytes)),
             (-25300, _) => Ok(None),
             _ => Err(Error::StoreUnavailable),
         }
     }
 
-    fn imported(&self) -> Self {
-        Self(self.0.join("imported"))
-    }
-
-    pub fn migrate_identity(home: &Path, card: &crate::Enrollment) -> Result<()> {
-        Self::new(home).migrate("identity", "identity.native-v1", card)
-    }
-
-    fn migrate(&self, key: &str, dest: &str, card: &crate::Enrollment) -> Result<()> {
-        card.validate()?;
-        let verify = |raw: &Secret| -> Result<()> {
-            let id: crate::crypto::Identity =
-                serde_json::from_slice(raw.expose()).map_err(|_| Error::InvalidRecord)?;
-            if id.enrollment(&card.machine.label)? != *card {
-                return Err(Error::InvalidRecord);
-            }
-            Ok(())
-        };
-        let reader = self.reader()?.ok_or(Error::StoreUnavailable)?;
-        let imported = self.imported();
-        if let Some(raw) = imported.native_read(dest)? {
-            return verify(&raw);
-        }
-        match Self::call(&reader, "read", key, &[])? {
-            (0, raw) => return verify(&raw),
-            (-25293 | -25308, _) => (),
-            _ => return Err(Error::StoreUnavailable),
-        }
-        let raw = Self::read_service(SERVICE, key)?.ok_or(Error::NotInitialized)?;
-        verify(&raw)?;
-        match imported.create(dest, raw.expose()) {
-            Err(Error::Conflict) => match imported.native_read(dest)? {
-                Some(copy) if copy.expose() == raw.expose() => Ok(()),
-                _ => Err(Error::Conflict),
-            },
-            result => result,
-        }
-    }
-
-    /// Legacy identities and explicitly requested imports keep their original trusted accessor.
+    /// Explicit external imports have their own retained reader and no write operation.
     pub fn read_service(service: &str, account: &str) -> Result<Option<Secret>> {
-        use base64::{Engine, engine::general_purpose::STANDARD};
-        let input =
-            serde_json::to_vec(&serde_json::json!({"service": service, "account": account}))
-                .map_err(|_| Error::InvalidInput)?;
-        let mut cmd = Command::new("/usr/bin/osascript");
-        cmd.args(["-l", "JavaScript", "-e", include_str!("keychain.js")]);
-        let output = command(cmd, &input)?;
-        #[derive(serde::Deserialize)]
-        struct Reply {
-            status: i32,
-            data: Option<String>,
+        if service.is_empty() || account.is_empty() || service == "hey-boss.secrets" {
+            return Err(Error::InvalidInput);
         }
-        let reply: Reply =
-            serde_json::from_slice(output.expose()).map_err(|_| Error::StoreUnavailable)?;
-        match reply.status {
-            -25300 => Ok(None),
-            0 => {
-                let data = zeroize::Zeroizing::new(reply.data.ok_or(Error::InvalidRecord)?);
-                Ok(Some(Secret::new(
-                    STANDARD
-                        .decode(data.as_bytes())
-                        .map_err(|_| Error::InvalidRecord)?,
-                )))
-            }
-            _ => Err(Error::StoreUnavailable),
-        }
+        let home = std::env::home_dir().ok_or(Error::StoreUnavailable)?;
+        let path = Self::new(&home);
+        path.prepare()?;
+        let reader = Self(path.0.join("external")).install()?;
+        Self::read(&reader, &["import", service, account])
     }
 }
 impl Backend for Keychain {
@@ -163,22 +104,15 @@ impl Backend for Keychain {
         "keychain"
     }
     fn get(&self, key: &str) -> Result<Option<Secret>> {
+        // A missing helper does not mean an absent Keychain item.
+        let reader = self.reader()?.ok_or(Error::StoreUnavailable)?;
         if key == "identity"
-            && let Some(raw) = self.imported().native_read("identity.native-v1")?
+            && let Some(imported) = Self(self.0.join("imported")).reader()?
+            && let Some(raw) = Self::read(&imported, &["read", "identity.native-v1"])?
         {
             return Ok(Some(raw));
         }
-        if let Some(reader) = self.reader()? {
-            match Self::call(&reader, "read", key, &[])? {
-                (0, bytes) => return Ok(Some(bytes)),
-                (-25300, _) => return Ok(None),
-                // An old client may have enrolled first. Only its original
-                // authorized process may read that item, still without prompting.
-                (-25293 | -25308, _) => (),
-                _ => return Err(Error::StoreUnavailable),
-            }
-        }
-        Self::read_service(SERVICE, key)
+        Self::read(&reader, &["read", key])
     }
     fn create(&self, key: &str, value: &[u8]) -> Result<()> {
         let reader = self.install()?;
@@ -191,8 +125,8 @@ impl Backend for Keychain {
         {
             return Err(Error::StoreUnavailable);
         }
-        match Self::call(&reader, "create", key, value)?.0 {
-            0 => match Self::call(&reader, "read", key, &[])? {
+        match Self::call(&reader, &["create", key], value)?.0 {
+            0 => match Self::call(&reader, &["read", key], &[])? {
                 (0, bytes) if bytes.expose() == value => Ok(()),
                 _ => Err(Error::StoreUnavailable),
             },
@@ -216,71 +150,38 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "uses an unlocked macOS Keychain with disposable synthetic items"]
-    fn migrates_only_the_enrolled_identity_and_preserves_the_original() {
-        let original = Item(format!("synthetic-old-{}", rand::random::<u128>()));
-        let destination = Item(format!("synthetic-copy-{}", rand::random::<u128>()));
+    #[ignore = "uses an unlocked macOS Keychain with a disposable public fixture"]
+    fn external_import_distinguishes_a_denied_item_from_a_missing_item() {
+        let item = format!("synthetic-import-{}", rand::random::<u128>());
         let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-        let vault = Keychain(temp.path().join("private"));
-        vault.prepare().unwrap();
-        let id = crate::crypto::Identity::generate();
-        let card = id.enrollment("fixture").unwrap();
-        let wrong = crate::crypto::Identity::generate()
-            .enrollment("fixture")
-            .unwrap();
-        let raw = Secret::new(crate::crypto::encode(&id).unwrap());
-        // Build the fixture with the actual previous writer and its original Keychain ACL.
-        use base64::Engine;
-        let writer = Command::new("git")
-            .args(["show", "b8304b4d:packages/hey-boss-secrets/src/keychain.js"])
+        let reader = Keychain(temp.path().join("external")).install().unwrap();
+        let service = "hey-boss.synthetic-public-import";
+        let lookup = || Keychain::read(&reader, &["import", service, &item]);
+        assert!(lookup().unwrap().is_none());
+        // This disposable item contains only the four public bytes below.
+        let status = Command::new("/usr/bin/security")
+            .args([
+                "add-generic-password",
+                "-s",
+                service,
+                "-a",
+                &item,
+                "-X",
+                "4100ff0a",
+            ])
             .output()
             .unwrap();
-        assert!(writer.status.success());
-        let mut legacy = Command::new("/usr/bin/osascript");
-        legacy.args([
-            "-l",
-            "JavaScript",
-            "-e",
-            std::str::from_utf8(&writer.stdout).unwrap(),
-        ]);
-        let setup = serde_json::to_vec(&serde_json::json!({
-            "op": "put", "service": SERVICE, "account": original.0,
-            "data": base64::engine::general_purpose::STANDARD.encode(raw.expose()),
-        }))
-        .unwrap();
-        let status = command(legacy, &setup).unwrap();
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(status.expose()).unwrap()["status"],
-            0
-        );
-        let migrate = |card| vault.migrate(&original.0, &destination.0, card);
-        assert_eq!(migrate(&wrong), Err(Error::InvalidRecord));
+        assert!(status.status.success());
+        let read = lookup();
         assert!(
-            vault
-                .imported()
-                .native_read(&destination.0)
+            Command::new("/usr/bin/security")
+                .args(["delete-generic-password", "-s", service, "-a", &item])
+                .output()
                 .unwrap()
-                .is_none()
+                .status
+                .success()
         );
-        migrate(&card).unwrap();
-        migrate(&card).unwrap();
-        assert_eq!(migrate(&wrong), Err(Error::InvalidRecord));
-        assert_eq!(
-            vault
-                .imported()
-                .native_read(&destination.0)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            raw.expose()
-        );
-        assert_eq!(
-            Keychain::read_service(SERVICE, &original.0)
-                .unwrap()
-                .unwrap()
-                .expose(),
-            raw.expose()
-        );
+        assert_eq!(read.unwrap_err(), Error::StoreUnavailable);
     }
 
     #[test]
@@ -313,6 +214,8 @@ mod tests {
         let temp = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
         let dir = temp.path().join("private");
         let vault = Keychain(dir.clone());
+        assert_eq!(vault.get(&item.0).unwrap_err(), Error::StoreUnavailable);
+        vault.prepare().unwrap();
         assert!(vault.get(&item.0).unwrap().is_none());
         vault.create(&item.0, b"fixture\0key\xff").unwrap();
         assert_eq!(vault.create(&item.0, b"replacement"), Err(Error::Conflict));
@@ -320,10 +223,10 @@ mod tests {
             Keychain(dir).get(&item.0).unwrap().unwrap().expose(),
             b"fixture\0key\xff"
         );
-        // A different host process is not authorized to read the new item.
+        // The provisioning API must never import the vault’s own private keys.
         assert_eq!(
             Keychain::read_service(SERVICE, &item.0).unwrap_err(),
-            Error::StoreUnavailable
+            Error::InvalidInput
         );
     }
 }

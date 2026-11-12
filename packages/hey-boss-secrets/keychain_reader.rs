@@ -34,20 +34,25 @@ unsafe extern "C" {
 
 fn main() -> io::Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
-    let [op, account] = args.as_slice() else {
-        std::process::exit(2)
+    let (op, service, account) = match args.as_slice() {
+        [op, account] if op == "read" || op == "create" => {
+            (op.as_str(), "hey-boss.secrets", account)
+        }
+        [op, service, account] if op == "import" && service != "hey-boss.secrets" => {
+            ("read", service.as_str(), account)
+        }
+        _ => std::process::exit(2),
     };
     if io::stdout().is_terminal() || (op == "create" && io::stdin().is_terminal()) {
         std::process::exit(2);
     }
-    let service = "hey-boss.secrets";
     let mut out = io::stdout().lock();
     // Never unlock a keychain or ask the user to grant this process access.
     let status = unsafe { SecKeychainSetUserInteractionAllowed(0) };
     if status != 0 {
         return out.write_all(&status.to_be_bytes());
     }
-    match op.as_str() {
+    match op {
         "read" => {
             let mut size = 0;
             let mut data = ptr::null_mut();
