@@ -216,6 +216,11 @@ pub struct State {
     pub awaiting_prompt_ack: bool,
 }
 
+enum PiCommand {
+    Idle,
+    RunningAgent,
+}
+
 pub struct AgentSession {
     provider: Provider,
     codex_execution: crate::issues::worker::ExecutionSettings,
@@ -241,6 +246,7 @@ pub struct AgentSession {
     tasks: BTreeSet<String>,
     refreshing_pi: bool,
     pi_streaming: bool,
+    pi_command: Option<PiCommand>,
 }
 impl AgentSession {
     pub fn launch(launch: Launch) -> io::Result<Self> {
@@ -394,6 +400,7 @@ impl AgentSession {
             tasks: BTreeSet::new(),
             refreshing_pi: false,
             pi_streaming: false,
+            pi_command: None,
         };
         match client.provider {
             Provider::Codex => {
@@ -502,13 +509,43 @@ impl AgentSession {
                 self.send(&json!({"type":"user","session_id":self.session.as_ref().map(|s|s.id.as_str()).unwrap_or(""),"message":{"role":"user","content":text},"parent_tool_use_id":null}))?;
             }
             Provider::Pi => {
+                // A registered extension can handle a command without starting
+                // the model. Templates and unknown slash names are ordinary prompts.
+                let mut command = None;
+                if let Some(slash) = text.strip_prefix('/') {
+                    let name = slash.split(' ').next().unwrap_or_default();
+                    let catalog = self.rpc("get_commands", json!({}))?;
+                    if catalog["commands"].as_array().is_some_and(|commands| {
+                        commands
+                            .iter()
+                            .any(|c| c["source"] == "extension" && c["name"] == name)
+                    }) {
+                        command = Some(PiCommand::Idle);
+                    }
+                }
                 self.rpc("prompt", json!({"message":text}))?;
+                self.pi_command = command;
             }
         }
         self.turn = Some(turn.clone());
         self.events
             .push_back(Event::TurnStarted { id: turn.clone() });
+        if self.pi_command.is_some() && self.prompt_ack.is_none() {
+            self.normalize_pending()?;
+            self.pi_command_acknowledged()?;
+        }
         Ok(turn)
+    }
+    fn pi_command_acknowledged(&mut self) -> io::Result<()> {
+        if matches!(self.pi_command.take(), Some(PiCommand::Idle)) {
+            self.finish(
+                self.status.clone(),
+                self.output.clone(),
+                serde_json::from_str(&self.output).ok(),
+                Value::Null,
+            )?;
+        }
+        Ok(())
     }
     pub fn steer(&mut self, expected_turn: &str, text: &str) -> io::Result<SteeringDelivery> {
         self.ready()?;

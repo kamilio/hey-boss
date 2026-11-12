@@ -279,9 +279,10 @@ impl AgentSession {
             return match result {
                 Response::Accepted(_) => {
                     self.events.push_back(Event::Other(value));
-                    Ok(())
+                    self.pi_command_acknowledged()
                 }
                 Response::Rejected(error) => {
+                    self.pi_command = None;
                     self.finish(TurnStatus::Failed, error.to_string(), None, Value::Null)
                 }
                 Response::Invalid(error) => Err(error),
@@ -592,6 +593,16 @@ impl AgentSession {
     }
     fn pi(&mut self, value: Value) -> io::Result<()> {
         match value["type"].as_str() {
+            Some("extension_error") if self.pi_command.is_some() && value["event"] == "command" => {
+                // Pi acknowledges even when the command handler throws.
+                self.status = TurnStatus::Failed;
+                self.output = required(&value, "error")?;
+                self.events.push_back(Event::Other(value));
+            }
+            Some("agent_start") if self.pi_command.is_some() => {
+                self.pi_command = Some(PiCommand::RunningAgent);
+                self.events.push_back(Event::Other(value));
+            }
             Some("message_update") if value["assistantMessageEvent"]["type"] == "text_delta" => {
                 self.text_delta(
                     value["assistantMessageEvent"]["delta"]
@@ -635,6 +646,11 @@ impl AgentSession {
                 self.register(required(&value, "id")?, value, false, String::new())?
             }
             Some("agent_settled") => {
+                // A command may await a model run and then open another dialog.
+                if self.pi_command.is_some() {
+                    self.pi_command = Some(PiCommand::Idle);
+                    return Ok(());
+                }
                 // agent_end and turn_end can precede automatic retry, compaction,
                 // tool loops and queued instructions. Only settled is terminal.
                 self.finish(

@@ -661,6 +661,33 @@ fn pi_preflight_input_exposes_pending_ack_and_validates_the_late_response() {
 }
 
 #[test]
+fn pi_extension_ack_completes_only_commands_without_a_running_model() {
+    let mut session = launch(Provider::Pi, None);
+    for (prompt, expected) in [
+        ("/local with arguments", ""),
+        ("/model", "model reply"),
+        ("/template", "/template"),
+        ("/unknown", "/unknown"),
+    ] {
+        let turn = session.prompt(prompt, None).unwrap();
+        let Event::TurnCompleted {
+            id, status, output, ..
+        } = until(&mut session, |e| matches!(e, Event::TurnCompleted { .. }))
+        else {
+            unreachable!()
+        };
+        assert_eq!(turn, id);
+        assert_eq!(status, TurnStatus::Completed);
+        assert_eq!(output, expected);
+    }
+    session.prompt("/local fail", None).unwrap();
+    assert!(matches!(
+        until(&mut session, |e| matches!(e, Event::TurnCompleted { .. })),
+        Event::TurnCompleted { status: TurnStatus::Failed, output, .. } if output == "handler failed"
+    ));
+}
+
+#[test]
 fn pi_interrupt_stops_owned_preflight_without_answering_input() {
     let mut session = launch(Provider::Pi, None);
     session.prompt("preflight input", None).unwrap();
