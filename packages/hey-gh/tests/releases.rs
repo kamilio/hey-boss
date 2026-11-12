@@ -25,7 +25,14 @@ fn now() -> chrono::DateTime<chrono::Utc> {
         .as_secs();
     chrono::DateTime::from_timestamp(seconds as i64, 0).unwrap()
 }
+// Keep synthetic runs recent so scanning daily windows doesn't exhaust the request
+// budget before the behavior under test. A run's timestamps stay fixed during the suite.
+fn fixture_day() -> chrono::NaiveDate {
+    static DAY: std::sync::OnceLock<chrono::NaiveDate> = std::sync::OnceLock::new();
+    *DAY.get_or_init(|| now().date_naive().pred_opt().unwrap())
+}
 #[derive(Clone, Default)]
+
 struct Mock {
     mode: String,
     calls: Arc<Mutex<Vec<String>>>,
@@ -100,10 +107,10 @@ fn project() -> Project {
     serde_json::from_value(json!({"repository":"o/r","branch":"main","target":"commit","gates":[{"name":"main tests","workflow":"ci.yml","purpose":"validation","jobs":[{"name":"test","steps":["Run tests"]}]}]})).unwrap()
 }
 fn run(id: u64, sha: &str, conclusion: &str) -> Value {
-    json!({"id":id,"run_attempt":1,"head_sha":sha,"head_branch":"main","repository":{"full_name":"o/r"},"path":".github/workflows/ci.yml","event":"push","status":"completed","conclusion":conclusion,"created_at":format!("2026-10-04T0{id}:00:00Z"),"updated_at":format!("2026-10-04T0{id}:10:00Z")})
+    json!({"id":id,"run_attempt":1,"head_sha":sha,"head_branch":"main","repository":{"full_name":"o/r"},"path":".github/workflows/ci.yml","event":"push","status":"completed","conclusion":conclusion,"created_at":format!("{}T0{id}:00:00Z",fixture_day()),"updated_at":format!("{}T0{id}:10:00Z",fixture_day())})
 }
 fn job(id: u64, sha: &str, conclusion: &str) -> Value {
-    json!({"id":id+10,"run_id":id,"run_attempt":1,"head_sha":sha,"name":"test","status":"completed","conclusion":conclusion,"completed_at":format!("2026-10-04T0{id}:09:00Z"),"steps":[{"name":"Run tests","status":"completed","conclusion":conclusion}]})
+    json!({"id":id+10,"run_id":id,"run_attempt":1,"head_sha":sha,"name":"test","status":"completed","conclusion":conclusion,"completed_at":format!("{}T0{id}:09:00Z",fixture_day()),"steps":[{"name":"Run tests","status":"completed","conclusion":conclusion}]})
 }
 async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Response {
     let path = uri.path();
@@ -113,7 +120,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         tokio::time::sleep(Duration::from_secs(21)).await;
     }
     let result = if path.starts_with("/repos/o/r/commits/") {
-        json!({"sha":path.rsplit('/').next().unwrap(),"commit":{"committer":{"date":if mode.starts_with("archive_") {now().format("%Y-%m-%dT00:00:00Z").to_string()} else {"2026-10-04T00:00:00Z".to_owned()}}}})
+        json!({"sha":path.rsplit('/').next().unwrap(),"commit":{"committer":{"date":if mode.starts_with("archive_") {now().format("%Y-%m-%dT00:00:00Z").to_string()} else {format!("{}T00:00:00Z",fixture_day())}}}})
     } else if path == "/repos/o/r/branches/main" {
         let count = mock
             .calls
@@ -259,19 +266,6 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         if mode == "archive_many" {
             rows.extend([run(4, D, "cancelled"), run(5, E, "cancelled")]);
         }
-        if mode.starts_with("archive_") {
-            for row in &mut rows {
-                let yesterday = (now() - chrono::Duration::days(1))
-                    .format("%Y-%m-%d")
-                    .to_string();
-                row["created_at"] = json!(
-                    row["created_at"]
-                        .as_str()
-                        .unwrap()
-                        .replace("2026-10-04", &yesterday)
-                );
-            }
-        }
         if mode == "past_attempt" {
             rows[0]["run_attempt"] = json!(2);
         }
@@ -295,7 +289,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             };
             if mode == "publication_progress" && rechecking {
                 rows[0]["conclusion"] = json!("failure");
-                rows[0]["updated_at"] = json!("2026-10-04T04:00:00Z");
+                rows[0]["updated_at"] = json!(format!("{}T04:00:00Z", fixture_day()));
             }
             if mode == "new_run" && rechecking {
                 let mut new = run(4, C, "success");
@@ -360,7 +354,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
             )];
             // The later run overlaps this candidate confirmation, so its
             // collection must finish before certifying the gate.
-            jobs[0]["completed_at"] = json!("2026-10-04T04:09:00Z");
+            jobs[0]["completed_at"] = json!(format!("{}T04:09:00Z", fixture_day()));
         }
         if mode == "past_attempt" && id == 3 {
             let attempt = path.split('/').nth(8).unwrap().parse::<u64>().unwrap();
@@ -390,7 +384,7 @@ async fn handler(State(mock): State<Mock>, OriginalUri(uri): OriginalUri) -> Res
         }
         r
     } else if path == "/repos/o/r/pulls/10" {
-        json!({"number":10,"state":if mode=="merged_pr" {"closed"} else {"open"},"merged":mode=="merged_pr","merge_commit_sha":A,"merged_at":"2026-10-04T00:00:00Z","head":{"sha":D},"base":{"ref":"main","repo":{"full_name":"o/r"}}})
+        json!({"number":10,"state":if mode=="merged_pr" {"closed"} else {"open"},"merged":mode=="merged_pr","merge_commit_sha":A,"merged_at":format!("{}T00:00:00Z",fixture_day()),"head":{"sha":D},"base":{"ref":"main","repo":{"full_name":"o/r"}}})
     } else {
         return (
             StatusCode::NOT_FOUND,
@@ -537,7 +531,7 @@ async fn follows_cancelled_and_skipped_runs_to_a_containing_successor() {
         assert_eq!(c.coverage, "successor");
         assert_eq!(
             c.verdict.completed_at.as_deref(),
-            Some("2026-10-04T03:09:00Z")
+            Some(format!("{}T03:09:00Z", fixture_day()).as_str())
         );
     }
     assert_eq!(batch.reports[0].gates[0].runs.len(), 3);
