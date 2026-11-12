@@ -284,3 +284,38 @@ fn child_creation_and_link_recover_from_conflicts_and_lost_replies() {
     p.wait("!document.querySelector('#subtask-picker-dialog').open && model.detail?.subtasks?.length===3 && document.querySelector('#subtask-list').innerText.includes('Updated picker revision')");
     assert_eq!(p.eval("window.name").unwrap(), "");
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn assigned_subtask_opens_with_its_own_assignment_card() {
+    let f = installed_fixture();
+    f.init(PROJECT).unwrap();
+    let issue = |args: &[&str]| run(f.issue(PROJECT, args)).unwrap();
+    for title in ["Parent", "Owned child", "Unassigned child"] {
+        issue(&["create", "--title", title]);
+    }
+    for child in ["2", "3"] {
+        issue(&["subtask", "add", "1", child]);
+    }
+    issue(&["assign", "2", "boss"]);
+    let (_web, base) = web(&f, PROJECT);
+    let mut p = Page::open("about:blank");
+    p.command(
+        "Page.navigate",
+        json!({"url":format!("{base}/#project=named%3ASubtasks&state=all")}),
+    )
+    .unwrap();
+    p.wait("!!document.querySelector('.issue-title[data-issue=\"1\"]')");
+    click(&mut p, ".issue-title[data-issue=\"1\"]");
+    p.wait("document.querySelectorAll('#subtask-list .subtask-title').length===2");
+    p.eval("document.querySelector('#subtask-list [data-assignment-kind=boss]').focus()")
+        .unwrap();
+    p.wait("document.querySelector('#subtask-list .assignment-card')?.matches(':popover-open')");
+    assert_eq!(
+        p.eval("document.querySelectorAll('#subtask-list .assignment-card').length")
+            .unwrap(),
+        1
+    );
+    click(&mut p, ".subtask-title[data-issue=\"3\"]");
+    p.wait("document.querySelector('.detail-top h1')?.textContent.includes('Unassigned child')");
+}

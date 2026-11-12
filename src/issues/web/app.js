@@ -398,7 +398,7 @@ function traceLinkForOrigin(origin, number, fallbackActor) {
   }
   return null;
 }
-function listAssignment(issue) {
+function listAssignment(issue, prefix = '') {
   let a = IssueAssignments.owner(issue);
   const remote = issue.state === 'open' && !issue.deleted_at && ['unassigned', 'machine'].includes(a.kind) ? issue.remote_attempts?.find(run => run.machine === a.machine) || issue.remote_attempts?.[0] : null;
   if (remote) a = {kind:'agent', actor:remote.actor, machine:remote.machine, machine_name:remote.host};
@@ -413,7 +413,7 @@ function listAssignment(issue) {
   const href = routeHash({...model.route, issue:null, owner});
   const symbol = a.kind === 'boss' ? 'hat' : a.kind === 'machine' ? 'monitor' : a.kind === 'github' ? 'pull-request' : a.kind === 'unassigned' ? 'user'
     : actor?.startsWith('claude:') ? 'spark' : actor?.startsWith('codex:') ? 'codex' : 'code';
-  const id = 'assignment-card-' + issue.number;
+  const id = prefix + 'assignment-card-' + issue.number;
   const attrs = 'class="assignment-badge" data-assignment-kind="' + esc(a.kind) + '" data-assignment-card="' + id + '" aria-controls="' + id + '" aria-expanded="false" aria-haspopup="dialog" aria-keyshortcuts="ArrowDown"';
   const badge = '<span class="assignment-avatar" data-assignment-icon="' + symbol + '">' + icon(symbol) + '</span>';
   const trigger = remote ? '<button type="button" ' + attrs + ' aria-label="' + esc(description.detail) + '">' + badge + '</button>'
@@ -508,28 +508,28 @@ window.addEventListener('pagehide', () => closeAssignmentCard());
 function assignmentContains(target) {
   return target instanceof Node && assignmentCardContext && (assignmentCardContext.trigger.contains(target) || assignmentCardContext.card.contains(target));
 }
-const assignmentList = $('#issue-list');
-assignmentList.addEventListener('pointerover', event => {
+const assignmentViews = document.getElementById("main");
+assignmentViews.addEventListener('pointerover', event => {
   if (event.pointerType !== 'mouse') return;
   const trigger = event.target.closest('[data-assignment-card]');
   if (trigger) openAssignmentCard(trigger);
   if (assignmentContains(event.target)) clearTimeout(assignmentCardTimer);
 });
-assignmentList.addEventListener('pointerout', event => {
+assignmentViews.addEventListener('pointerout', event => {
   if (event.pointerType === 'mouse' && assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) {
     assignmentCardTimer = setTimeout(() => {
       if (!assignmentContains(document.activeElement)) closeAssignmentCard();
     }, 180);
   }
 });
-assignmentList.addEventListener('focusin', event => {
+assignmentViews.addEventListener('focusin', event => {
   const trigger = event.target.closest('[data-assignment-card]');
   if (trigger && !restoringAssignmentFocus) openAssignmentCard(trigger);
 });
-assignmentList.addEventListener('focusout', event => {
+assignmentViews.addEventListener('focusout', event => {
   if (!assignmentPointerDown && assignmentContains(event.target) && !assignmentContains(event.relatedTarget)) closeAssignmentCard();
 });
-assignmentList.addEventListener('click', event => {
+assignmentViews.addEventListener('click', event => {
   const trigger = event.target.closest('[data-assignment-card]');
   if (trigger && (trigger.tagName === 'BUTTON' || event.detail > 0 && (assignmentPointerType === 'touch' || assignmentPointerType === 'pen' || matchMedia('(pointer: coarse)').matches))) {
     if (!event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
@@ -539,7 +539,7 @@ assignmentList.addEventListener('click', event => {
   }
   if (event.target.closest('.assignment-card-action')) closeAssignmentCard();
 });
-assignmentList.addEventListener('keydown', event => {
+assignmentViews.addEventListener('keydown', event => {
   const trigger = event.target.closest('[data-assignment-card]');
   if (event.key === 'ArrowDown' && trigger) {
     event.preventDefault();
