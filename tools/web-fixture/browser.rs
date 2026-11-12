@@ -289,3 +289,6 @@ mod proxy;
 
 #[path = "issue_links.rs"]
 mod issue_links;
+
+#[path = "navigation.rs"]
+mod navigation;
