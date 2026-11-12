@@ -94,3 +94,7 @@ path = "tests/fixtures/agent-runtime/main.rs"
 [[example]]
 name = "web-fixture"
 path = "tools/web-fixture/main.rs"
+
+[[example]]
+name = "signing-gh"
+path = "tests/fixtures/signing-gh.rs"
