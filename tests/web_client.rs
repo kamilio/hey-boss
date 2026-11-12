@@ -32,12 +32,16 @@ fn serve_client(server: Server, tx: mpsc::Sender<(String, Value)>, done: mpsc::R
         };
         let (body, kind) = match r.url() {
             "/" => (
-                "<meta charset=utf-8><script src='/routes.js'></script><script src='/components.js'></script><script src='/artifacts.js'></script>",
+                "<meta charset=utf-8><script src='/routes.js'></script><script src='/components.js'></script><script src='/assignments.js'></script><script src='/artifacts.js'></script>",
                 "text/html",
             ),
             "/routes.js" => (routes.as_str(), "text/javascript; charset=utf-8"),
             "/components.js" => (
                 include_str!("../src/issues/web/components.js"),
+                "text/javascript; charset=utf-8",
+            ),
+            "/assignments.js" => (
+                include_str!("../src/issues/web/assignments.js"),
                 "text/javascript; charset=utf-8",
             ),
             "/artifacts.js" => (
@@ -233,5 +237,64 @@ fn actor_labels_preserve_the_recorded_model() {
             "Codex · gpt-6-astra"
         );
         assert_eq!(page.eval(remember).unwrap(), false);
+    });
+}
+
+#[test]
+#[ignore = "requires Chrome"]
+fn assignment_runtime_uses_live_time_only_while_connected() {
+    with_client(|port, _| {
+        let mut page = Page::open(&format!("http://127.0.0.1:{port}/"));
+        let now = 2_000_000_i64;
+        let entry = json!({"online":true,"machine":{"state":"connected","heartbeat":now/1000},
+            "run":{"state":"running","started_at":now-125000,"finished_at":null}});
+        let mut runtime = |entry: &Value, at: i64| {
+            page.eval(&format!("IssueAssignments.runtime({entry}, {at})"))
+                .unwrap()
+        };
+        for (elapsed, clock, duration) in [
+            (125000, now, "2m 05s"),
+            (125000, now + 1000, "2m 06s"),
+            (3661000, now, "1h 01m"),
+            (90000000, now, "1d 01h"),
+        ] {
+            let mut active = entry.clone();
+            active["run"]["started_at"] = json!(now - elapsed);
+            let value = runtime(&active, clock);
+            assert_eq!(value["duration"], duration);
+            assert_eq!(value["live"], true);
+        }
+        let mut finished = entry.clone();
+        finished["run"]["finished_at"] = json!(now - 5000);
+        finished["run"]["state"] = json!("completed");
+        let result = runtime(&finished, now + 100000);
+        assert_eq!(result["duration"], "2m 00s");
+        assert_eq!(result["label"], "Completed");
+        assert_eq!(result["live"], false);
+
+        let mut offline = entry.clone();
+        offline["online"] = json!(false);
+        for result in [
+            runtime(&offline, now + 100000),
+            runtime(&entry, now + 16000),
+        ] {
+            assert_eq!(result["duration"], "2m 05s");
+            assert_eq!(result["label"], "Last seen");
+            assert_eq!(result["live"], false);
+        }
+        let mut missing_heartbeat = entry.clone();
+        missing_heartbeat["machine"] = json!({"state":"disconnected"});
+        assert_eq!(runtime(&missing_heartbeat, now)["duration"], "Unavailable");
+        let mut approval = entry.clone();
+        approval["run"]["state"] = json!("approval_required");
+        assert_eq!(runtime(&approval, now)["label"], "Needs approval");
+
+        // NaN, Infinity, and undefined are browser inputs that JSON cannot represent.
+        for start in ["null", "undefined", "NaN", "Infinity", "'123'", "2000001"] {
+            let expr = format!(
+                "IssueAssignments.runtime({{...{entry},run:{{started_at:{start}}}}},{now}).duration"
+            );
+            assert_eq!(page.eval(&expr).unwrap(), "Unavailable", "{start}");
+        }
     });
 }
