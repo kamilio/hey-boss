@@ -273,55 +273,5 @@ fn first_worker_uses_the_selected_checkout_and_capacity() {
 #[path = "issue_browser.rs"]
 mod issues;
 
-#[test]
-#[ignore = "requires Chrome and a built hey-boss CLI"]
-fn jobs_calendar_groups_states_and_navigates_civil_dates() {
-    let f = fixture();
-    f.init("Jobs UI QA").unwrap();
-    let (_web, base) = web(&f, "Jobs UI QA");
-    let mut page = Page::open(&format!("{base}/jobs"));
-    page.wait("typeof HeyBossCalendar !== 'undefined'");
-    for (call, expected) in [
-        (
-            "groupSummary({scheduled:21,succeeded:2,failed:1})",
-            json!({"state":"failed","text":"1 failed · 2 succeeded · 21 scheduled"}),
-        ),
-        (
-            "groupSummary({scheduled:24})",
-            json!({"state":"scheduled","text":"24 scheduled"}),
-        ),
-        (
-            "groupSummary({running:1,skipped:2})",
-            json!({"state":"running","text":"1 running · 2 skipped"}),
-        ),
-        (
-            "range('2026-12-31','month')",
-            json!({"start":"2026-11-30","days":35}),
-        ),
-        (
-            "range('2027-01-01','week')",
-            json!({"start":"2026-12-28","days":7}),
-        ),
-        (
-            "range('2026-03-08','agenda')",
-            json!({"start":"2026-03-02","days":7}),
-        ),
-        ("shift('2026-01-31','month',1)", json!("2026-02-01")),
-        ("shift('2026-12-01','month',1)", json!("2027-01-01")),
-        ("shift('2026-03-08','week',1)", json!("2026-03-15")),
-        (
-            "dayKey(Date.parse('2026-01-01T00:30:00Z'),'America/Chicago')",
-            json!("2025-12-31"),
-        ),
-        (
-            "dayKey(Date.parse('2026-01-01T00:30:00Z'),'Asia/Tokyo')",
-            json!("2026-01-01"),
-        ),
-    ] {
-        assert_eq!(
-            page.eval(&format!("HeyBossCalendar.{call}")).unwrap(),
-            expected,
-            "{call}"
-        );
-    }
-}
+#[path = "jobs_browser.rs"]
+mod jobs;
