@@ -111,27 +111,39 @@ impl Page {
             socket,
             _browser: browser,
         };
-        let ready = format!(
-            "location.href === {} && document.readyState === 'complete' && typeof HeyBossRoutes === 'object' && typeof HeyBossUI === 'object' && typeof HeyBossArtifacts === 'object'",
+        page.wait(&format!(
+            "location.href === {} && document.readyState === 'complete'",
             json!(url)
-        );
-        while page.eval(&ready).ok() != Some(json!(true)) {
-            assert!(
-                start.elapsed() < Duration::from_secs(30),
-                "client did not load"
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        ));
         page
     }
     pub fn eval(&mut self, expr: &str) -> Result<Value, String> {
+        let result = self.command(
+            "Runtime.evaluate",
+            json!({"expression":expr,"awaitPromise":true,"returnByValue":true}),
+        )?;
+        if let Some(e) = result.get("exceptionDetails") {
+            return Err(e.to_string());
+        }
+        Ok(result["result"]["value"].clone())
+    }
+    pub fn wait(&mut self, condition: &str) {
+        let start = Instant::now();
+        while self.eval(condition).ok() != Some(json!(true)) {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "timed out waiting for {condition}"
+            );
+            thread::sleep(Duration::from_millis(30));
+        }
+    }
+    pub fn command(&mut self, method: &str, params: Value) -> Result<Value, String> {
         // One command is outstanding at a time. Browser events have no request ID.
         self.socket
             .send(Message::Text(
-                json!({"id":1,"method":"Runtime.evaluate","params":{
-            "expression":expr,"awaitPromise":true,"returnByValue":true}})
-                .to_string()
-                .into(),
+                json!({"id":1,"method":method,"params":params})
+                    .to_string()
+                    .into(),
             ))
             .unwrap();
         loop {
@@ -146,11 +158,7 @@ impl Page {
             if let Some(e) = reply.get("error") {
                 return Err(e.to_string());
             }
-            let result = &reply["result"];
-            if let Some(e) = result.get("exceptionDetails") {
-                return Err(e.to_string());
-            }
-            return Ok(result["result"]["value"].clone());
+            return Ok(reply["result"].clone());
         }
     }
 }
