@@ -51,3 +51,19 @@
 @media (max-width: 600px) {
   #reviews-detail { padding: 0 14px 14px; }
 }
+.review-index-row { display: flex; align-items: center; }
+.review-index-row + .review-index-row { border-top: 1px solid var(--line); }
+.review-index-row .review-row { flex: 1; }
+.review-preview {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: anywhere; margin-top: 5px;
+  color: var(--muted); font-size: 13px; line-height: 1.45; font-weight: 400;
+}
+.review-preview:has(+ .review-preview), .review-preview + .review-preview { -webkit-line-clamp: 1; }
+.review-preview + .review-preview { margin-top: 2px; }
+.review-quick-actions { display: flex; align-items: center; gap: 6px; padding-right: 20px; }
+.review-quick-actions [aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); }
+@media (max-width: 700px) {
+  .review-index-row { display: block; }
+  .review-quick-actions { padding: 0 14px 14px 42px; flex-wrap: wrap; }
+}
