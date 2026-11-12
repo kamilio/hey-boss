@@ -297,3 +297,6 @@ fn skills_distribution_survives_conflicts_and_server_restart() {
 
 #[path = "skills_native.rs"]
 mod native;
+
+#[path = "skills_disable.rs"]
+mod disable;
