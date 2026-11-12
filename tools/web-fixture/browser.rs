@@ -286,3 +286,6 @@ mod skills;
 
 #[path = "proxy_browser.rs"]
 mod proxy;
+
+#[path = "issue_links.rs"]
+mod issue_links;
