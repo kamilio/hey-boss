@@ -12,7 +12,9 @@ use std::{
     thread,
     time::Duration,
 };
+mod agents;
 mod archive;
+
 mod controls;
 mod desktop;
 mod fleet;
@@ -26,6 +28,9 @@ enum Scenario {
     ScheduledJobs,
     LocalHttp,
     NativeArtifactEditor,
+    Agents,
+    AutoWorkers,
+    WorkerConfig,
     AgentsNavigation,
     AssignedAgent,
     Origin,
@@ -56,6 +61,9 @@ impl Scenario {
             Self::NativeArtifactEditor => ("Native editor QA", 0),
             Self::Origin => ("Origin QA", 59675),
             Self::AssignedAgent => ("Assignment QA", 59668),
+            Self::Agents => ("Atlas", 59641),
+            Self::WorkerConfig => ("Atlas", 59648),
+            Self::AutoWorkers => ("github.com/poe-platform/poe-code", 59688),
             Self::AgentsNavigation => ("Home", 59643),
             Self::ProjectSettings => ("Settings fixture", 59642),
             Self::QuietHours => ("Quiet hours QA", 59651),
@@ -174,6 +182,23 @@ fn run(mut c: Command) -> Result<Value> {
     }
     Ok(serde_json::from_slice(&o.stdout)?)
 }
+struct Service(std::process::Child);
+impl Drop for Service {
+    fn drop(&mut self) {
+        if self.0.try_wait().is_ok_and(|status| status.is_none()) {
+            unsafe { libc::kill(self.0.id() as i32, libc::SIGTERM) };
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while self.0.try_wait().is_ok_and(|status| status.is_none()) {
+                if std::time::Instant::now() >= deadline {
+                    let _ = self.0.kill();
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+            let _ = self.0.wait();
+        }
+    }
+}
 fn main() -> Result<()> {
     let args = Args::parse();
     let (project, port) = args.scenario.destination();
@@ -218,8 +243,13 @@ fn main() -> Result<()> {
     .transpose()?;
     let records = info["records"].clone();
     let mut sequence = 0;
-    let mut web = f
-        .command(&[
+    let mut supervisor = if matches!(args.scenario, Scenario::WorkerConfig) {
+        Some(agents::supervisor(&f)?)
+    } else {
+        None
+    };
+    let mut web = Service(
+        f.command(&[
             "issue",
             "--project",
             project,
@@ -231,8 +261,9 @@ fn main() -> Result<()> {
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .spawn()?;
-    let stdout = web.stdout.take().unwrap();
+        .spawn()?,
+    );
+    let stdout = web.0.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
@@ -241,9 +272,9 @@ fn main() -> Result<()> {
             }
         }
     });
-    let result = (|| -> Result<()> {
+    (|| -> Result<()> {
         let mut starts = 0;
-        let pid = web.id();
+        let pid = web.0.id();
         let mut report = |line: String| -> Result<()> {
             let ready: Value = serde_json::from_str(&line)?;
             let url = ready["url"]
@@ -287,25 +318,17 @@ fn main() -> Result<()> {
             if let Ok(line) = rx.try_recv() {
                 report(line?)?;
             }
-            if let Some(status) = web.try_wait()? {
+            if let Some(service) = supervisor.as_mut()
+                && let Some(status) = service.0.try_wait()?
+            {
+                return Err(format!("fixture supervisor exited: {status}").into());
+            }
+            if let Some(status) = web.0.try_wait()? {
                 return Err(format!("fixture server exited: {status}").into());
             }
             if signal.recv_timeout(Duration::from_millis(100)).is_ok() {
                 return Ok(());
             }
         }
-    })();
-    if web.try_wait()?.is_none() {
-        unsafe { libc::kill(web.id() as i32, libc::SIGTERM) };
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        while web.try_wait()?.is_none() {
-            if std::time::Instant::now() >= deadline {
-                web.kill()?;
-                web.wait()?;
-                break;
-            }
-            thread::sleep(Duration::from_millis(50));
-        }
-    }
-    result
+    })()
 }

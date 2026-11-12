@@ -12,7 +12,6 @@ async page => {
   await page.setViewportSize({width:1440,height:1000});
   page.once('dialog',dialog=>dialog.accept());
   await page.goto(base+'/workers?visual='+Date.now()+'#view=configuration');
-  await page.locator('.worker-scope-heading').first().click();
   await page.locator('[data-edit-worker="tools"]').click();
   await page.locator('#worker-editor').waitFor({state:'visible'});
   await page.waitForFunction(()=>!document.getElementById('worker-provider').disabled);
@@ -34,7 +33,7 @@ async page => {
   for(const theme of ['light','dark'])for(const width of [1440,768,390,320]){
     await page.emulateMedia({colorScheme:theme});await page.setViewportSize({width,height:width<500?844:1000});
     check(await fits(),`Provider editor fits ${width}px ${theme}`);
-    await page.screenshot({path:`/tmp/hb-provider-work/settings-${theme}-${width}.png`,fullPage:true});
+    await page.screenshot({path:`output/playwright/provider-workers/settings-${theme}-${width}.png`,fullPage:true});
   }
   await page.locator('#worker-editor-save').click();await page.locator('#worker-editor').waitFor({state:'hidden'});
   check((await page.request.get(base+'/api/fleet/configuration').then(r=>r.json())).document.machines.local.workers[0].config.provider==='pi','Pi saves without altering worker intent');
@@ -50,7 +49,7 @@ async page => {
     await page.locator('.chat-message.tool summary').click();
     check(await page.locator('.chat-message.tool pre').isVisible(),`${provider} tool details expand`);
     check(await fits(),`${provider} conversation fits mobile`);
-    await page.screenshot({path:`/tmp/hb-provider-work/conversation-${provider}-mobile.png`,fullPage:true});
+    await page.screenshot({path:`output/playwright/provider-workers/conversation-${provider}-mobile.png`,fullPage:true});
   }
   check(errors.length===0,'No JavaScript exceptions');
   return {passed:checks.length,checks};
