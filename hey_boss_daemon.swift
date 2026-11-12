@@ -7716,6 +7716,7 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
     private final class Paper: NSView { override var isFlipped: Bool { true } }
     private let paper = Paper()
     private var vector: WKWebView?
+    var loadOnDisplay: (() -> Void)?
     var didRenderVector: ((NSImage) -> Void)?
     private var drawing: WKNavigation?
     private var fit = false
@@ -7808,8 +7809,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     private(set) var media = ConversationMediaView()
-    private struct Visual: Codable { let id: UUID; let afterMessage: Int; let title: String; let kind: String }
+    private struct Visual: Codable, Equatable { let id: UUID; let afterMessage: Int; let title: String; let kind: String; var cardHeight: CGFloat? = nil }
     private var visuals: [Visual] = []
+    private var pendingVisuals: [ConversationMediaView] = []
+    private var visibilityQueued = false
     private var compactFrame: NSRect?
     lazy var caption = ConversationCaption()
     let historyList = NSTableView()
@@ -7851,7 +7854,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var rows: [ConversationText] = []
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
-    private struct ToolActivity: Codable {
+    private struct ToolActivity: Codable, Equatable {
         let id: String
         let afterMessage: Int
         let description: String
@@ -7861,13 +7864,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private var activities: [ToolActivity] = []
     private var toolPanels: [NSButton: NSScrollView] = [:]
-    struct Capture: Codable { let source: String; let text: String? }
-    private struct PlaybackInterruption: Codable {
+    struct Capture: Codable, Equatable { let source: String; let text: String? }
+    private struct PlaybackInterruption: Codable, Equatable {
         let spoken: String
         let unconfirmedUserTurn: String?
         let unfinishedReply: String?
     }
-    private struct Message: Codable {
+    private struct Message: Codable, Equatable {
         var text: String
         let speaker: String
         var capture: Capture?
@@ -7891,8 +7894,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         contextChip.title = capture.text == nil ? "No readable text from " + capture.source : capture.source
         contextChip.toolTip = "View captured context"
     } }
-    private struct Saved: Codable {
-        let messages: [Message]
+    private struct Saved: Codable, Equatable {
+        var messages: [Message]
         var pendingCapture: Capture?
         var draftText: String?
         let directory: URL?
@@ -7900,6 +7903,68 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var visuals: [Visual]?
         var activities: [ToolActivity]?
         var interruptedAfter: PlaybackInterruption?
+    }
+    // Each line replaces only the changed suffixes; composer state travels with the
+    // same record so an interrupted turn never restores mismatched text and tools.
+    private struct Page: Codable {
+        let messages, activities, visuals: Int
+        var added: Saved
+    }
+    private struct Checkpoint {
+        var saved: Saved
+        var end, size: UInt64
+    }
+    private var checkpoint: Checkpoint?
+    private func readChat(_ id: UUID) throws -> Checkpoint {
+        let legacy = chatURL(id), notebook = legacy.deletingPathExtension().appendingPathExtension("jsonl")
+        guard FileManager.default.fileExists(atPath: notebook.path) else {
+            return Checkpoint(saved: try JSONDecoder().decode(Saved.self, from: Data(contentsOf: legacy)), end: 0, size: 0)
+        }
+        let data = try Data(contentsOf: notebook, options: .mappedIfSafe)
+        var rows: [Message] = [], tools: [ToolActivity] = [], images: [Visual] = []
+        var last: Saved?, offset = 0
+        while let newline = data[offset...].firstIndex(of: 10) {
+            let page = try JSONDecoder().decode(Page.self, from: data[offset..<newline])
+            guard (0...rows.count).contains(page.messages), (0...tools.count).contains(page.activities),
+                  (0...images.count).contains(page.visuals) else { throw CocoaError(.fileReadCorruptFile) }
+            rows.replaceSubrange(page.messages..., with: page.added.messages)
+            tools.replaceSubrange(page.activities..., with: page.added.activities ?? [])
+            images.replaceSubrange(page.visuals..., with: page.added.visuals ?? [])
+            last = page.added; offset = newline + 1
+        }
+        guard var saved = last else {
+            // A crash on the first migrated entry leaves the legacy snapshot authoritative.
+            return Checkpoint(saved: try JSONDecoder().decode(Saved.self, from: Data(contentsOf: legacy)), end: 0, size: UInt64(data.count))
+        }
+        saved.messages = rows; saved.activities = tools; saved.visuals = images.isEmpty ? nil : images
+        return Checkpoint(saved: saved, end: UInt64(offset), size: UInt64(data.count))
+    }
+    private func recordChat(_ saved: Saved) throws {
+        let old = checkpoint.flatMap { $0.end > 0 ? $0.saved : nil }
+        if old == saved && checkpoint?.size == checkpoint?.end { return }
+        func prefix<T: Equatable>(_ a: [T], _ b: [T]) -> Int {
+            for i in 0..<min(a.count, b.count) where a[i] != b[i] { return i }
+            return min(a.count, b.count)
+        }
+        let r = prefix(old?.messages ?? [], saved.messages)
+        let t = prefix(old?.activities ?? [], saved.activities ?? [])
+        let v = prefix(old?.visuals ?? [], saved.visuals ?? [])
+        var added = saved
+        added.messages = Array(saved.messages.dropFirst(r))
+        added.activities = saved.activities.map { Array($0.dropFirst(t)) }
+        added.visuals = saved.visuals.map { Array($0.dropFirst(v)) }
+        var data = try JSONEncoder().encode(Page(messages: r, activities: t, visuals: v, added: added)); data.append(10)
+        let path = chatURL(library.selected).deletingPathExtension().appendingPathExtension("jsonl")
+        let fd = Darwin.open(path.path, O_RDWR | O_CREAT | O_APPEND | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        guard fd >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { throw CocoaError(.fileLocking) }
+        let end = checkpoint?.end ?? 0
+        guard try file.seekToEnd() == (checkpoint?.size ?? 0) else { throw CocoaError(.fileWriteFileExists) }
+        if (checkpoint?.size ?? 0) != end { try file.truncate(atOffset: end) }
+        do { try file.write(contentsOf: data); try file.synchronize() }
+        catch { try file.truncate(atOffset: end); checkpoint?.size = end; throw error }
+        checkpoint = Checkpoint(saved: saved, end: end + UInt64(data.count), size: end + UInt64(data.count))
     }
     private let saveURL: URL
     private var messages: [Message] = []
@@ -7960,6 +8025,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         turns.edgeInsets = NSEdgeInsets(top: 18, left: 0, bottom: 16, right: 0)
         turns.translatesAutoresizingMaskIntoConstraints = false
         scroll.documentView = turns
+        scroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(scheduleVisibleMedia), name: NSView.boundsDidChangeNotification, object: scroll.contentView)
         let wave = NSImageView(image: NSImage(systemSymbolName: "waveform", accessibilityDescription: nil)!)
         wave.symbolConfiguration = .init(pointSize: 29, weight: .medium); wave.contentTintColor = .controlAccentColor
         headline.font = .systemFont(ofSize: 21, weight: .semibold); headline.alignment = .center
@@ -8011,6 +8078,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func show() {
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if !rows.isEmpty { revealLatest() }
+        scheduleVisibleMedia()
         generateTitle()
     }
     func startFromPill() {
@@ -8134,7 +8202,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             defer { titleTask = nil }
             for chat in pending {
                 guard !Task.isCancelled else { return }
-                guard let data = try? Data(contentsOf: chatURL(chat.id)), let saved = try? JSONDecoder().decode(Saved.self, from: data) else { continue }
+                guard let saved = try? readChat(chat.id).saved else { continue }
                 let turns = saved.messages.filter { $0.speaker != "Conversation" }
                 guard turns.contains(where: { $0.speaker != "You" }) else { continue }
                 let content = turns.prefix(6).map { $0.speaker + ": " + $0.text.prefix(1000) }.joined(separator: "\n")
@@ -8158,12 +8226,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let id = library.chats[row].id
         guard id != library.selected else { return }
         do {
-            let saved = try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(id)))
+            let loaded = try readChat(id)
             stop("Ready")
             if restoreError == nil && !save() { refreshHistory(); return }
             restoreError = nil
             library.selected = id; clearTurns(); input.stringValue = ""
-            apply(saved); try writeLibrary(); refreshHistory()
+            checkpoint = loaded; apply(loaded.saved); try writeLibrary(); refreshHistory()
         } catch { refreshHistory(); status.isHidden = false; status.stringValue = "Couldn’t open that conversation: " + error.localizedDescription }
     }
     private var recordingsURL: URL { saveURL.deletingLastPathComponent().appendingPathComponent("Recordings") }
@@ -8208,7 +8276,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
-        visuals.removeAll(); media = ConversationMediaView()
+        checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
@@ -8617,7 +8685,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             self.reply = nil
             do {
                 if process == nil { try startSol() }
-                try write(["turn": question, "history": Array(conversationHistory.dropLast())])
+                var request: [String: Any] = ["turn": question]
+                if !FileManager.default.fileExists(atPath: agentStateURL.deletingPathExtension().appendingPathExtension("jsonl").path) {
+                    request["history"] = Array(conversationHistory.dropLast())
+                }
+                try write(request)
             } catch { generationFailed(error) }
         }
     }
@@ -8852,14 +8924,31 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var visualDirectory: URL {
         saveURL.deletingLastPathComponent().appending(path: "Media/" + library.selected.uuidString)
     }
-    private func appendVisual(_ visual: Visual, image: NSImage, bytes: Data, live: Bool) {
-        if visual.kind == "Mermaid" { image.size = NSSize(width: image.size.width * 1.4, height: image.size.height * 1.4) }
+    @objc private func scheduleVisibleMedia() {
+        guard !visibilityQueued, !pendingVisuals.isEmpty, window.isVisible else { return }
+        visibilityQueued = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.visibilityQueued = false
+            self.window.contentView?.layoutSubtreeIfNeeded()
+            let visible = self.scroll.documentVisibleRect
+            self.pendingVisuals.removeAll { card in
+                guard card.superview != nil else { return true }
+                guard self.window.isVisible, visible.intersects(card.convert(card.bounds, to: self.turns)) else { return false }
+                let load = card.loadOnDisplay; card.loadOnDisplay = nil; load?()
+                return true
+            }
+        }
+    }
+    private func appendVisual(_ visual: Visual, image: NSImage? = nil, bytes: Data? = nil) {
+        let live = image != nil
         media.close.isHidden = true
         let card = ConversationMediaView()
         media = card
         turns.addArrangedSubview(card)
         card.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
-        card.heightAnchor.constraint(equalToConstant: min(440, max(170, image.size.height + 94))).isActive = true
+        let height = card.heightAnchor.constraint(equalToConstant: visual.cardHeight ?? 340)
+        height.isActive = true
         card.close.isHidden = !live; card.close.target = self; card.close.action = #selector(hideMedia)
         if live {
             card.didRenderVector = { [weak self, weak card] vector in
@@ -8867,7 +8956,33 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.caption.media.picture.image = vector
             }
         }
-        card.display(image, title: visual.title, kind: visual.kind, svg: visual.kind == "Image" ? nil : bytes.base64EncodedString())
+        func display(_ card: ConversationMediaView, _ image: NSImage, _ svg: String?) {
+            if visual.kind == "Mermaid" { image.size = NSSize(width: image.size.width * 1.4, height: image.size.height * 1.4) }
+            height.constant = min(440, max(170, image.size.height + 94))
+            card.display(image, title: visual.title, kind: visual.kind, svg: svg)
+        }
+        if let image, let bytes {
+            display(card, image, visual.kind == "Image" ? nil : bytes.base64EncodedString())
+        } else {
+            card.title.stringValue = visual.title; card.kind.stringValue = visual.kind.uppercased()
+            card.isHidden = false
+            let url = visualDirectory.appendingPathComponent(visual.id.uuidString)
+            pendingVisuals.append(card)
+            scheduleVisibleMedia()
+            card.loadOnDisplay = { [weak card] in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let data = try? Data(contentsOf: url)
+                    let svg = visual.kind == "Image" ? nil : data?.base64EncodedString()
+                    onMain {
+                        guard let card, card.superview != nil else { return }
+                        guard let data, let image = NSImage(data: data) else {
+                            card.title.stringValue = "Image unavailable: " + visual.title; return
+                        }
+                        display(card, image, svg)
+                    }
+                }
+            }
+        }
     }
     private func showMedia(_ data: [String: Any]) throws {
         guard let encoded = data["data"] as? String else { hideMedia(); return }
@@ -8877,7 +8992,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             throw StorageError(description: "Couldn’t display this image. Use a supported image or diagram file.")
         }
         let title = data["title"] as? String ?? "Image", kind = data["kind"] as? String ?? "Image"
-        let visual = Visual(id: UUID(), afterMessage: messages.count, title: title, kind: kind)
+        let visual = Visual(id: UUID(), afterMessage: messages.count, title: title, kind: kind, cardHeight: min(440, max(170, image.size.height * (kind == "Mermaid" ? 1.4 : 1) + 94)))
         try FileManager.default.createDirectory(at: visualDirectory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let url = visualDirectory.appendingPathComponent(visual.id.uuidString)
         try bytes.write(to: url, options: .atomic)
@@ -8886,7 +9001,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             visuals.removeLast(); try? FileManager.default.removeItem(at: url)
             throw StorageError(description: "Couldn’t save this image in the chat.")
         }
-        appendVisual(visual, image: image, bytes: bytes, live: true)
+        appendVisual(visual, image: image, bytes: bytes)
         let original = compactFrame ?? window.frame; compactFrame = original
         let screen = (window.screen ?? NSScreen.main)?.visibleFrame ?? window.frame
         let side = split.splitViewItems.first?.isCollapsed == true ? 0 : split.splitViewItems.first?.viewController.view.frame.width ?? 0
@@ -9151,7 +9266,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
                 let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter)
-                try JSONEncoder().encode(saved).write(to: chatURL(library.selected), options: .atomic)
+                try recordChat(saved)
             }
             try writeLibrary(); return true
         } catch { status.isHidden = false; status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
@@ -9165,19 +9280,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return value
         }
         visuals = saved.visuals ?? []
+        let byMessage = Dictionary(grouping: visuals, by: \.afterMessage)
+        let toolsByMessage = Dictionary(grouping: activities, by: \.afterMessage)
         func restoreVisuals(after count: Int) {
-            for visual in visuals where visual.afterMessage == count {
-                let url = visualDirectory.appendingPathComponent(visual.id.uuidString)
-                if let bytes = try? Data(contentsOf: url), let image = NSImage(data: bytes) {
-                    appendVisual(visual, image: image, bytes: bytes, live: false)
-                } else { turns.addArrangedSubview(NSTextField(labelWithString: "Image unavailable: " + visual.title)) }
-            }
+            for visual in byMessage[count] ?? [] { appendVisual(visual) }
         }
         restoreVisuals(after: 0)
         for message in saved.messages {
             append(message.text, from: message.speaker, capture: message.capture)
             messages[messages.count - 1].interruptedAfter = message.interruptedAfter
-            for activity in activities where activity.afterMessage == messages.count { renderTool(activity) }
+            for activity in toolsByMessage[messages.count] ?? [] { renderTool(activity) }
             restoreVisuals(after: messages.count)
         }
         refreshScope()
@@ -9190,7 +9302,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if let index = try? JSONDecoder().decode(Library.self, from: data) {
                 library = index; refreshHistory()
                 if library.chats.contains(where: { $0.id == library.selected }) {
-                    apply(try JSONDecoder().decode(Saved.self, from: Data(contentsOf: chatURL(library.selected))))
+                    let loaded = try readChat(library.selected); checkpoint = loaded; apply(loaded.saved)
                 } else {
                     pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
                     refreshScope(); state(.idle, "Voice off")
