@@ -60,7 +60,7 @@ function expand(figure){
   dialog.innerHTML='<header><strong>Diagram</strong><div class="artifact-diagram-controls"><button class="button" type="button" data-out aria-label="Zoom out">−</button><output aria-label="Zoom level">100%</output><button class="button" type="button" data-in aria-label="Zoom in">+</button><button class="button" type="button" data-fit>Fit</button><button class="button" type="button" data-actual aria-label="Actual size">100%</button><button class="button" type="button" data-close aria-label="Close diagram">Close</button></div></header><div class="artifact-diagram-viewport" tabindex="0" role="region" aria-label="Diagram; scroll to explore"></div>';
   // Move, rather than clone, so SVG marker and title IDs remain unique.
   const viewport=dialog.querySelector('.artifact-diagram-viewport');viewport.append(original);
-  let scale=1,fitted=true;
+  let scale=1,fitted=false;
   const box=original.viewBox.baseVal;
   function zoom(next){
     scale=Math.max(.02,Math.min(4,next));original.style.width=(box.width*scale)+'px';original.style.height='auto';
@@ -84,7 +84,7 @@ function expand(figure){
     if(figure.isConnected){figure.querySelector('.artifact-diagram-stage').append(original);figure.querySelector('[data-expand]').focus();}
     dialog.remove();
   },{once:true});
-  document.body.append(dialog);dialog.showModal();fit();resize.observe(viewport);
+  document.body.append(dialog);dialog.showModal();zoom(1);resize.observe(viewport);
   removed.observe(document.body,{childList:true,subtree:true});
 }
 
