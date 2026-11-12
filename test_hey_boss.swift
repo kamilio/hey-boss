@@ -5340,14 +5340,34 @@ func auditConversation(_ root: String) {
     ui.caption.media.close.performClick(nil)
     precondition(!ui.caption.imagePanel.isVisible && ui.caption.isVisible)
     precondition(!ui.media.isHidden && ui.media.close.isHidden && ui.window.frame.size == original.size)
+    let index = try! JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("current.json"))) as! [String: Any]
+    let notebook = folder.appendingPathComponent((index["selected"] as! String) + ".jsonl")
+    let before = try! Data(contentsOf: notebook)
     ui.event(["ConversationMedia": fixtures[0]])
     ui.stop("Ready")
     precondition(!ui.media.isHidden && !ui.caption.imagePanel.isVisible && !ui.caption.isVisible)
+    let complete = try! Data(contentsOf: notebook)
+    precondition(!before.isEmpty && complete.starts(with: before) && complete.count > before.count)
+    precondition(!String(decoding: complete.dropFirst(before.count), as: UTF8.self).contains("Read my diagram"))
+    let broken = Data("{unfinished".utf8)
+    let handle = try! FileHandle(forWritingTo: notebook)
+    _ = try! handle.seekToEnd(); try! handle.write(contentsOf: broken); try! handle.close()
     let reopened = VoiceConversation(cli: ui.cli, saveURL: folder.appendingPathComponent("current.json"))
     let cards = reopened.turns.arrangedSubviews.compactMap { $0 as? ConversationMediaView }
-    precondition(cards.count == fixtures.count + 1 && cards.allSatisfy { $0.picture.image != nil && $0.close.isHidden })
+    precondition(cards.count == fixtures.count + 1 && cards.allSatisfy { $0.picture.image == nil && $0.close.isHidden })
     precondition(!reopened.caption.imagePanel.isVisible && reopened.rows.count == ui.rows.count)
+    reopened.show()
+    for card in cards.reversed() {
+        card.scrollToVisible(card.bounds)
+        let deadline = Date().addingTimeInterval(3)
+        while card.picture.image == nil && Date() < deadline { try! await Task.sleep(for: .milliseconds(20)) }
+        precondition(card.picture.image != nil, "Scrolling a saved image into view must load it")
+    }
+    reopened.input.stringValue = "Saved after recovery"
     reopened.window.close()
+    let repaired = try! Data(contentsOf: notebook)
+    precondition(repaired.starts(with: complete) && repaired.range(of: broken) == nil)
+    precondition(VoiceConversation(cli: ui.cli, saveURL: folder.appendingPathComponent("current.json")).input.stringValue == "Saved after recovery")
     ui.window.close()
     if ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_LIVE"] == "1" {
         let path = folder.appendingPathComponent("release.dot")
