@@ -16,3 +16,13 @@ libc = "0.2"
 [[bin]]
 name = "hey-boss-worker-tui"
 path = "src/main.rs"
+
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+terminal-pilot-rust = { git = "https://github.com/poe-platform/poe-code", branch = "main" }
+terminal-png-rust = { git = "https://github.com/poe-platform/poe-code", branch = "main" }
+tempfile = "3"
+
+[profile.dev.package.terminal-png-rust]
+opt-level = 2
+
+[workspace]
