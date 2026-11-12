@@ -103,6 +103,9 @@ func audit() {
         app.run(); return
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HEADPHONE_INTERRUPT"] { auditHeadphoneInterrupt(root); return }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_TURN_END"] {
+        auditTurnEnd(URL(fileURLWithPath: root)); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_INTERRUPTED_CHAT"] { auditInterruptedChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
@@ -4845,6 +4848,36 @@ func auditHeadphoneInterrupt(_ root: String) {
     let chats = try! fm.contentsOfDirectory(atPath: root.path), clips = try! fm.contentsOfDirectory(atPath: folder.path)
     precondition(chats.count == 5 && clips.count == 12 && chats.contains(active.uuidString))
     print("PASS: mute and pause are independent; unmuted speech interrupts playback; upgrades wait for the session")
+}
+
+@available(macOS 26, *)
+func auditTurnEnd(_ folder: URL) {
+    let audio = ReviewAudio(); audio.conversation = true
+    defer { audio.stop() }
+    let writer = try! audio.listen(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!)
+    var starts = 0, ends: [TimeInterval] = []
+    audio.event = { e in
+        switch e { case .began: starts += 1; case .ended: ends.append(ProcessInfo.processInfo.systemUptime); default: break }
+    }
+    let question = try! Data(contentsOf: folder.appendingPathComponent("question.pcm"))
+    let opener = try! Data(contentsOf: folder.appendingPathComponent("so.pcm"))
+    func feed(_ data: Data) {
+        var input = data
+        input.append(Data(count: (640 - input.count % 640) % 640))
+        let start = ProcessInfo.processInfo.systemUptime
+        for i in stride(from: 0, to: input.count, by: 640) {
+            try! writer.write(contentsOf: input[i..<i+640])
+            let next = start + Double(i + 640) / 32000
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: max(0, next - ProcessInfo.processInfo.systemUptime)))
+        }
+    }
+    feed(Data(count: 16000)); feed(opener); feed(Data(count: 32000))
+    precondition(starts == 1 && ends.isEmpty, "A short opener must keep the thinking pause")
+    feed(question); let stop = ProcessInfo.processInfo.systemUptime
+    feed(Data(count: 96000))
+    precondition(starts == 1 && ends.count == 1 && ends[0] - stop < 2.35,
+                 "A finished question must get a model-confirmed endpoint before the old silence timeout")
+    print("PASS local Smart Turn: kept the thinking pause and ended the complete question early")
 }
 
 @available(macOS 26, *)

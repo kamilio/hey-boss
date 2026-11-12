@@ -13,9 +13,12 @@ say -v Alex -o "$root/second.aiff" 'Which fruit did I mention earlier? Answer in
 for turn in first second; do
   ffmpeg -nostdin -loglevel error -i "$root/$turn.aiff" -ar 16000 -ac 1 -f s16le "$root/$turn.pcm"
 done
+say -v Samantha -o "$root/question.aiff" 'What is an AWS region?'
+ffmpeg -nostdin -loglevel error -i "$root/question.aiff" -ar 16000 -ac 1 -f s16le "$root/question.pcm"
 # The reported cutoff: a short opener, a thinking pause, then the actual question.
 say -v Samantha -o "$root/so.aiff" 'So'
 ffmpeg -nostdin -loglevel error -i "$root/so.aiff" -ar 16000 -ac 1 -f s16le "$root/so.pcm"
+HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_TURN_END="$root" "$2"
 dd if=/dev/zero bs=51200 count=1 2>/dev/null >> "$root/so.pcm"
 cat "$root/first.pcm" >> "$root/so.pcm"
 mv "$root/so.pcm" "$root/first.pcm"

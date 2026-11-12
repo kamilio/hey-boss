@@ -7195,6 +7195,9 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         self.worker = worker
         worker.executableURL = URL(fileURLWithPath: cli); worker.arguments = ["review-audio"] + (duplex ? ["--duplex"] : []) + (conversation ? ["--conversation"] : [])
         worker.standardInput = input; worker.standardOutput = output; worker.standardError = FileHandle.nullDevice
+        if conversation, let resources = Bundle.main.resourceURL {
+            worker.environment = ProcessInfo.processInfo.environment.merging(["HEY_BOSS_TURN_RESOURCES": resources.path]) { _, new in new }
+        }
         if conversation {
             let diagnostics = Pipe()
             worker.standardError = diagnostics

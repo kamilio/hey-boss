@@ -53,6 +53,8 @@ aec3 = "0.4.0"
 webrtc-vad = "0.4.0"
 silero-vad-crs = { version = "0.4.0", features = ["auto"] }
 tar = "0.4"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["load-dynamic", "api-18", "std"] }
+rustfft = "6"
 
 [profile.release]
 lto = true
