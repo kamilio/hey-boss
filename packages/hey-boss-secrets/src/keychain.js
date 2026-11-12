@@ -7,22 +7,11 @@ function run() {
   const input = $.NSFileHandle.fileHandleWithStandardInput.readDataToEndOfFile;
   const request = JSON.parse(ObjC.unwrap($.NSString.alloc.initWithDataEncoding(input, $.NSUTF8StringEncoding)));
   const query = $({ class: 'genp', svce: request.service, acct: request.account });
-  if (request.op === 'get') {
-    const dict = query.mutableCopy;
-    dict.setObjectForKey($(true), $('r_Data'));
-    const output = Ref();
-    const status = $.SecItemCopyMatching(dict, output);
-    if (status !== 0) return JSON.stringify({ status });
-    const data = ObjC.castRefToObject(output[0]);
-    return JSON.stringify({ status: 0, data: ObjC.unwrap(data.base64EncodedStringWithOptions(0)) });
-  }
-  if (request.op === 'put') {
-    const data = $.NSData.alloc.initWithBase64EncodedStringOptions($(request.data), 0);
-    if (!data) return JSON.stringify({ status: -50 });
-    const dict = query.mutableCopy;
-    dict.setObjectForKey(data, $('v_Data'));
-    const status = $.SecItemAdd(dict, null);
-    return JSON.stringify({ status });
-  }
-  return JSON.stringify({ status: -50 });
+  const dict = query.mutableCopy;
+  dict.setObjectForKey($(true), $('r_Data'));
+  const output = Ref();
+  const status = $.SecItemCopyMatching(dict, output);
+  if (status !== 0) return JSON.stringify({ status });
+  const data = ObjC.castRefToObject(output[0]);
+  return JSON.stringify({ status: 0, data: ObjC.unwrap(data.base64EncodedStringWithOptions(0)) });
 }
