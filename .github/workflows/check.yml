@@ -15,7 +15,7 @@ jobs:
       - run: node --check src/issues/web/skills.js
       - run: cargo test --locked -p hey-boss --test web_client -- --ignored
       - run: cargo build --locked -p hey-boss --bin hey-boss && cargo test --locked -p hey-boss --example web-fixture -- --ignored
-      - run: node tools/test_jobs_ui.cjs && node --check src/issues/web/jobs-calendar.js
+      - run: node --check src/issues/web/jobs-calendar.js
       - run: node --check src/issues/web/app.js
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings

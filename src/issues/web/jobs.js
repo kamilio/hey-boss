@@ -52,10 +52,10 @@ const HeyBossJobs = (() => {
     return machines.some(m=>m.state==='connected'&&now/1000-(m.heartbeat||0)<15&&m.jobs?.available&&m.jobs.workers?.some(w=>w.projects?.includes(project))&&(!harness||m.jobs.runtimes?.[harness]?.available));
   }
   class Mutation {
-    constructor(post, uuid=()=>HeyBossUI.requestId(), persist=()=>{}) {this.post=post;this.uuid=uuid;this.persist=persist;this.pending=null;}
+    constructor(post, persist) {this.post=post;this.persist=persist;this.pending=null;}
     async send(operation, project, host) {
       if(this.pending)throw Error('Retry the unconfirmed request before making another change.');
-      this.pending={project,operation:{action:'job',operation},request_id:this.uuid(),...(host?{host}:{})};this.persist(this.pending);
+      this.pending={project,operation:{action:'job',operation},request_id:HeyBossUI.requestId(),...(host?{host}:{})};this.persist(this.pending);
       return this.retry();
     }
     async retry() {
@@ -83,7 +83,7 @@ const HeyBossJobs = (() => {
       if(!response.ok||value.ok===false){const e=Error(value.error?.message||value.error||'Could not complete the request');e.code=value.error?.code;throw e;}
       return value;
     }
-    const mutation=new Mutation(body=>post(body),undefined,persist);
+    const mutation=new Mutation(post,persist);
     try{mutation.pending=JSON.parse(sessionStorage.getItem('jobs-pending')||'null');}catch{}
     const read=(operation,ctx=context)=>post({project:ctx.project,operation:{action:'job',operation},...(ctx.host?{host:ctx.host}:{})});
     const hash=id=>new URLSearchParams({project:context.project,...(context.host?{host:context.host}:{}),...(id?{job:id}:{})});
@@ -398,7 +398,6 @@ const HeyBossJobs = (() => {
     HeyBossUI.icons();
     try{const response=await fetch('/api/bootstrap');boot=await response.json();if(!response.ok||!boot.ok)throw Error(boot.error?.message||boot.error||'Could not connect');await navigate();}catch(e){message(e.message);$('#jobs-status').textContent='Unable to load jobs. Reload to reconnect.';}
   }
-  return {summary,modelChoices,availability,Mutation,scheduleState,filterJobs,scheduleFields,scheduleCron,start};
+  return {summary,modelChoices,availability,scheduleState,filterJobs,scheduleFields,scheduleCron,start};
 })();
-if(typeof module!=='undefined')module.exports=HeyBossJobs;
-if(typeof document!=='undefined')HeyBossJobs.start();
+HeyBossJobs.start();

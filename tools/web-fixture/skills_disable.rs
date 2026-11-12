@@ -38,6 +38,7 @@ fn disabled_skills_retry_offline_and_restore_complete_archives() {
     healthy(&api.idle());
 
     let mut page = Page::open("about:blank");
+    page.command("Page.enable", json!({})).unwrap();
     page.command("Page.addScriptToEvaluateOnNewDocument",json!({"source":"addEventListener('error',e=>sessionStorage.setItem('pageError',e.message));addEventListener('unhandledrejection',e=>sessionStorage.setItem('pageError',String(e.reason)))"})).unwrap();
     let open = |page: &mut Page, api: &Api| {
         let url = reqwest::Url::parse(&api.url)
