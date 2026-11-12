@@ -430,3 +430,16 @@ mod quiet_hours;
 
 #[path = "metadata_browser.rs"]
 mod metadata_browser;
+
+fn pointer_click(p: &mut Page, selector: &str) {
+    let selector = json!(selector);
+    p.wait(&format!("document.querySelector({selector})?.checkVisibility() && !document.querySelector({selector}).disabled"));
+    let center=p.eval(&format!("(()=>{{const el=document.querySelector({selector});el.scrollIntoView({{block:'center',behavior:'instant'}});const r=el.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]}})()")).unwrap();
+    for event in ["mousePressed", "mouseReleased"] {
+        p.command(
+            "Input.dispatchMouseEvent",
+            json!({"type":event,"button":"left","clickCount":1,"x":center[0],"y":center[1]}),
+        )
+        .unwrap();
+    }
+}

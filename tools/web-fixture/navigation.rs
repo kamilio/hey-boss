@@ -447,3 +447,133 @@ fn slow_issue_lists_leave_keyboard_navigation_and_drafts_responsive() {
     p.wait("model.detail?.issue.number===1");
     assert_eq!(p.eval("window.name").unwrap(), "");
 }
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn worker_aliases_preserve_the_selected_project_and_keyboard_navigation() {
+    let f = fixture();
+    let (project, _) = Scenario::AgentsNavigation.destination();
+    f.init(project).unwrap();
+    seed::seed(&f, Scenario::AgentsNavigation, project).unwrap();
+    let (_web, base) = web(&f, project);
+    let mut p = open();
+    go(&mut p, &format!("{base}/workers#project=named%3AAtlas"));
+    selected(&mut p, "/workers", "Atlas");
+    p.wait("document.querySelector('#worker-board')?.checkVisibility()");
+    assert_eq!(p.eval("!document.querySelector('.fleet-tabs') && !document.querySelector('.app-navigation #nav-workers') && document.querySelector('#nav-workers').getAttribute('href')==='/workers'").unwrap(),true);
+    pick(&mut p, "/workers", "Beacon");
+    p.wait("document.querySelector('#worker-board')?.checkVisibility()");
+    for width in [1280, 390, 320] {
+        p.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":844,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .unwrap();
+        for route in [
+            "/agents",
+            "/agents#view=conversations",
+            "/workers",
+            "/agents/session#project=named%3ABeacon&issue=42",
+        ] {
+            go(&mut p, &format!("{base}{route}"));
+            p.wait("document.querySelector('#project-name')?.textContent==='Beacon'");
+            if route.starts_with("/agents/session") {
+                p.wait("document.querySelector('#back')?.href.includes('issue=42')");
+            } else {
+                p.wait("document.querySelector('#worker-config')?.checkVisibility()");
+            }
+            assert_eq!(
+                p.eval("document.documentElement.scrollWidth<=innerWidth")
+                    .unwrap(),
+                true,
+                "{route} {width}"
+            );
+            let layout=p.eval(r#"Array.from(document.querySelectorAll('.app-navigation .navigation-inner > a')).filter(a=>a.checkVisibility()).map(a=>{
+                a.scrollIntoView({block:'nearest',inline:'nearest'}); const box=a.getBoundingClientRect();
+                const fits=[...a.childNodes].filter(n=>n.nodeType===Node.TEXT_NODE&&n.textContent.trim()).every(n=>{const r=document.createRange();r.selectNodeContents(n);const t=r.getBoundingClientRect();return t.left>=box.left&&t.right<=box.right});
+                return box.left>=0 && box.right<=innerWidth+1 && fits;
+            })"#).unwrap();
+            let links = layout.as_array().unwrap();
+            assert!(
+                !links.is_empty() && links.iter().all(|ok| ok == true),
+                "{route} {width}: {links:?}"
+            );
+            if width < 560 {
+                p.eval("document.querySelector('#navigation-more').focus()")
+                    .unwrap();
+                key(&mut p, "Enter", "Enter", 13, "\r");
+                p.wait("document.querySelector('#navigation-more-links').matches(':popover-open')");
+                key(&mut p, "Tab", "Tab", 9, "");
+                p.wait("(()=>{const a=document.querySelector('#nav-workers'),r=a.getBoundingClientRect();return a===document.activeElement && r.left>=0 && r.right<=innerWidth})()");
+                key(&mut p, "Escape", "Escape", 27, "");
+            }
+        }
+    }
+    assert_eq!(p.eval("window.name").unwrap(), "");
+}
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn worker_broadcast_keeps_drafts_and_reports_partial_or_empty_delivery() {
+    let f = fixture();
+    let (project, _) = Scenario::AgentsNavigation.destination();
+    f.init(project).unwrap();
+    seed::seed(&f, Scenario::AgentsNavigation, project).unwrap();
+    let (_web, base) = web(&f, project);
+    let mut p = open();
+    go(&mut p, &format!("{base}/workers"));
+    p.wait("document.querySelector('#broadcast-open')?.checkVisibility()");
+    p.eval("window.sent=[];const realFetch=window.fetch.bind(window);window.fetch=(url,opts)=>url==='/api/fleet/broadcast'?(sent.push(JSON.parse(opts.body)),Promise.resolve(Response.json(reply))):realFetch(url,opts)").unwrap();
+    for (width, theme, total, queued, offline) in [
+        (1280, "light", 3, 3, 0),
+        (390, "dark", 3, 1, 1),
+        (320, "light", 0, 0, 0),
+    ] {
+        p.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":800,"deviceScaleFactor":1,"mobile":false}),
+        )
+        .unwrap();
+        p.command(
+            "Emulation.setEmulatedMedia",
+            json!({"features":[{"name":"prefers-color-scheme","value":theme}]}),
+        )
+        .unwrap();
+        p.eval(&format!(
+            "window.reply={}",
+            json!({"ok":true,"total":total,"queued":queued,"offline":offline})
+        ))
+        .unwrap();
+        pointer_click(&mut p, "#broadcast-open");
+        p.wait("document.querySelector('#broadcast-dialog')?.open");
+        p.eval("document.querySelector('#broadcast-text').value='First line\\nSecond line'")
+            .unwrap();
+        assert_eq!(p.eval("(()=>{const d=document.querySelector('#broadcast-dialog');return d.scrollWidth<=d.clientWidth && d.getBoundingClientRect().right<=innerWidth})()").unwrap(),true);
+        key(&mut p, "Escape", "Escape", 27, "");
+        p.wait("document.activeElement===document.querySelector('#broadcast-open')");
+        pointer_click(&mut p, "#broadcast-open");
+        assert_eq!(
+            p.eval("document.querySelector('#broadcast-text').value")
+                .unwrap(),
+            "First line\nSecond line"
+        );
+        click(&mut p, "#broadcast-form [type=submit]");
+        let msg = if total == 0 {
+            "No active agents on connected machines.".into()
+        } else {
+            format!("Queued for {queued} of {total} active agents.")
+        };
+        p.wait(&format!(
+            "document.querySelector('#broadcast-status').innerText.includes({})",
+            json!(msg)
+        ));
+        if offline > 0 {
+            assert_eq!(p.eval("document.querySelector('#broadcast-status').innerText.includes('Offline machines: 1')").unwrap(),true);
+        }
+    }
+    assert_eq!(
+        p.eval("sent").unwrap(),
+        json!(vec![json!({"text":"First line\nSecond line"}); 3])
+    );
+    assert_eq!(p.eval("window.name").unwrap(), "");
+}
