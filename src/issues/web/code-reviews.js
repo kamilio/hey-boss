@@ -20,13 +20,7 @@
     a.rel = "noopener noreferrer";
     return a;
   };
-  const stage = {
-    draft: "Draft",
-    submitted: "Awaiting approval",
-    publishing: "Publication pending",
-    published: "Published",
-    outdated: "Outdated",
-  };
+  const stage = HeyBossUI.codeReviewStage;
   const verdict = {
     COMMENT: "Comment",
     APPROVE: "Approve",
@@ -78,8 +72,10 @@
       rows = v.reviews;
       const target = rows.find((x) => x.id == id);
       let detail = null;
-      if (target)
-        detail = (await action({ command: "view", id: target.id })).review;
+      if (id) {
+        detail = (await action({ command: "view", id: Number(id) })).review;
+        if (!target) rows = [detail, ...rows];
+      }
       if (seq !== serial) return;
       review = detail;
       editing = false;

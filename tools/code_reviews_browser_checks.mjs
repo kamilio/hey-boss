@@ -245,6 +245,26 @@ try {
   assert.deepEqual(requested, {project, id:latest.id, version:latest.version, digest:latest.digest});
   assert.equal(await page.locator("#reviews-detail").count(), 0);
   assert.equal(await approve.count(), 0);
+  const issueNumber = run([...issue, "create", "--title", "Check reminder labels"]).issue.number;
+  const issueUrl = info.url + "#" + new URLSearchParams({project, issue:issueNumber});
+  await page.goto(issueUrl);
+  const linked = page.locator("#issue-reviews");
+  await linked.getByRole("button", {name:"Attach review"}).click();
+  await linked.getByLabel("Review to attach").selectOption(String(approval.id));
+  await linked.getByRole("button", {name:"Attach",exact:true}).click();
+  const receipt = linked.getByRole("link",{name:"Published on GitHub"});
+  await receipt.waitFor();
+  assert.equal(await receipt.getAttribute("href"), "https://github.com/example/time/pull/72#review-1");
+  const savedLink = linked.getByRole("link",{name:/#72/});
+  assert.ok((await savedLink.getAttribute("href")).includes(String(approval.id)));
+  if (snap) {
+    await page.setViewportSize({width:1280,height:900});
+    await page.emulateMedia({colorScheme:"light"});
+    await linked.screenshot({path:join(snap,"issue-reviews.png")});
+  }
+  await linked.getByRole("button",{name:"Unlink review for PR #72"}).click();
+  await receipt.waitFor({state:"detached"});
+  assert.equal(op({command:"view",id:approval.id}).review.stage, "published");
   assert.deepEqual(errors, []);
   console.log(
     "Code Reviews: disabled, empty, approval, changes requested, both edits, diff anchors, stale publication and 8 visual variants passed.",
