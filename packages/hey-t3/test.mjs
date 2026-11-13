@@ -78,3 +78,39 @@ test('send requests active steering; queue never steers; both preserve the exact
   assert.equal(queue.text, text);
   assert.notEqual(send.messageId, queue.messageId);
 });
+
+test('start chooses a model on the target host without changing accounts silently', async () => {
+  const { selectModel } = await import('./hey-t3.mjs');
+  const model = {
+    slug: 'gpt-6.1-sol',
+    capabilities: {
+      optionDescriptors: [{ id: 'reasoningEffort', options: [{ id: 'medium' }, { id: 'high' }] }],
+    },
+  };
+  const providers = ['codex', 'work'].map((instanceId) => ({
+    instanceId,
+    enabled: true,
+    models: [model, { slug: 'other' }],
+  }));
+  const config = { providers, settings: {} };
+  const standard = {
+    instanceId: 'codex',
+    model: model.slug,
+    options: [{ id: 'reasoningEffort', value: 'medium' }],
+  };
+  assert.deepEqual(selectModel(config, {}, {}), standard);
+  const project = { defaultModelSelection: { ...standard, instanceId: 'work' } };
+  assert.equal(selectModel(config, project, { model: 'other' }).instanceId, 'work');
+  assert.equal(selectModel(config, project, { effort: 'high' }).options[0].value, 'high');
+  assert.throws(() => selectModel(config, {}, { model: 'missing' }), /model/i);
+  assert.throws(() => selectModel(config, {}, { model: 'other', effort: 'high' }), /effort/i);
+});
+
+test('server-generated thread IDs round trip without accepting path or query fragments', () => {
+  for (const thread of [`mcp:${id}`, `thread:project:${env}:${id}`]) {
+    assert.equal(target(`t3code://threads/${env}/${thread}`).id, thread);
+  }
+  for (const thread of ['..', '%2Fbad', '?x', '#fragment', '']) {
+    assert.throws(() => target(`t3code://threads/${env}/${thread}`));
+  }
+});
