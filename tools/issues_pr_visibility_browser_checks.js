@@ -42,6 +42,7 @@ async page => {
     await page.waitForFunction(enabled => model.detail?.prs_enabled === enabled, enabled);
   };
   await settings(true);
+  await page.locator('.pr-section summary').first().click();
   check(await page.locator('.pr-links').innerText() === 'No pull requests attached.', 'Enabling PRs restores the empty state');
   await page.getByText('Attach a pull request', {exact:true}).click();
   await page.locator('#pr-url').fill('https://github.com/example/repo/pull/123');
