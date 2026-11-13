@@ -2,6 +2,9 @@ use super::*;
 use crate::issues::code_reviews::Operation as Review;
 use reqwest::blocking::Client;
 use std::process::{Command, Stdio};
+#[cfg(target_os = "macos")]
+#[path = "code_reviews_macos.rs"]
+mod macos;
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Publish {
@@ -51,20 +54,26 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
         .env_remove("GITHUB_ENTERPRISE_TOKEN")
         .stdin(Stdio::null())
         .output()?;
-    if !token.status.success() {
-        let reason = String::from_utf8_lossy(&token.stderr);
-        return Err(Error::invalid(format!(
-            "Code Reviews could not read the personal github.com credential: {}",
-            if reason.trim().is_empty() {
-                "gh auth token failed; check gh auth status on the server"
-            } else {
-                reason.trim()
-            }
-        )));
-    }
-    let token = std::str::from_utf8(&token.stdout)
-        .map_err(|_| Error::invalid("Invalid GitHub credential"))?
-        .trim();
+    let token = if token.status.success() {
+        String::from_utf8(token.stdout).map_err(|_| Error::invalid("Invalid GitHub credential"))?
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            macos::desktop_token()?
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let reason = String::from_utf8_lossy(&token.stderr);
+            return Err(Error::invalid(format!(
+                "Code Reviews could not read the personal github.com credential: {}",
+                if reason.trim().is_empty() {
+                    "gh auth token failed; check gh auth status on the server"
+                } else {
+                    reason.trim()
+                }
+            )));
+        }
+    };
     publish_with(
         &op,
         repo,
@@ -72,7 +81,7 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
         version,
         &digest,
         "https://api.github.com",
-        token,
+        token.trim(),
     )
 }
 fn publish_with(
