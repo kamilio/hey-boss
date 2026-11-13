@@ -17,3 +17,5 @@ hey-t3 pin "$link"             # Also: unpin, settle
 Use `-` instead of the message to read from stdin. Both commands return a message ID and the observed delivery. T3 may queue a send if the active provider cannot steer. `pull` uses T3’s native transcript export (50 MiB server limit).
 
 A thread link identifies its environment. For remote threads, the CLI matches that ID against machines already connected in Hey Boss. It does not open a separate login or need its own host list. T3 credentials stay on the owning machine.
+
+Use `hey-t3 start PROJECT [MESSAGE]` to launch with the project's or environment's configured model. If neither has one, hey-t3 uses Codex GPT-6.1-Sol. Use `--model` to override it, or `--worktree BASE` to start in a worktree. Run `hey-t3 --help` for project lookup, search, queue promotion, stopping, and scheduling.
