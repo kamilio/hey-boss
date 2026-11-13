@@ -1,4 +1,3 @@
-import { renderGitLayoutControl } from "./git-layout.js";
 import { gitLineNumberDigits } from "./git-rows.js";
 import { renderGitFileToggle } from "./git-files.js";
 
@@ -42,13 +41,8 @@ function fileHtml(file, context = {}) {
   return `<article class="file" data-review-context="${escapeHtml(JSON.stringify(context))}" style="--git-line-number-digits:${gitLineNumberDigits(file)}"><header>${renderGitFileToggle()}<strong>${escapeHtml(file.status === "renamed" ? `${file.oldPath} → ${file.path}` : file.path)}</strong><span>+${file.additions} −${file.deletions}</span></header><div class="file-content">${content}</div></article>`;
 }
 
-function documentHtml(model) {
+export function renderGitFiles(model) {
   if (model.kind === "git-range") return model.commits.map((commit) => `<section class="commit"><h2>${escapeHtml(commit.commit.shortHash)} · ${escapeHtml(commit.commit.subject)}</h2>${commit.files.map((file) => fileHtml(file, { commit: commit.commit.hash })).join("")}</section>`).join("");
   if (model.kind === "git-worktree") return model.sections.map((section) => `<section><h2>${escapeHtml(section.label)}</h2>${section.files.map((file) => fileHtml(file, { section: section.label })).join("")}</section>`).join("");
   return (model.files ?? []).map((file) => fileHtml(file)).join("");
-}
-
-export function renderGitReviewHtml(model) {
-  const commit = model.commit; const heading = commit ? `${commit.shortHash} · ${commit.subject}` : model.title;
-  return `<header class="bar"><span class="mark" aria-hidden="true">GS</span><strong>Review</strong><span class="review-title">${escapeHtml(heading)}</span><span class="status" id="status" role="status" aria-live="polite"></span><span class="count" id="count"></span>${renderGitLayoutControl()}</header><main>${commit ? `<section class="summary"><h1>${escapeHtml(commit.subject)}</h1><p>${escapeHtml(commit.body)}</p><small>${escapeHtml(commit.author)} · ${escapeHtml(commit.authoredAt)}</small></section>` : ""}${documentHtml(model)}</main>`;
 }

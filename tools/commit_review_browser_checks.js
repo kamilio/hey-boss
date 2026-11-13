@@ -16,6 +16,9 @@ async page => {
   await page.getByRole('heading',{name:'Preserve whitespace when parsing',exact:true}).waitFor();
   check(await page.locator('#task-state').innerText() === 'Ready','Task is Ready inside review');
   check(await page.locator('.file').count() === 2,'Full stored patch rendered');
+  check(!(await page.locator('nav,.app-navigation').count()),'Review stays focused without the app menu');
+  check(!(await page.locator('#full-message').evaluate(el=>el.open)),'Commit body starts collapsed');
+  check(await page.locator('.file').first().evaluate(el=>el.getBoundingClientRect().top<innerHeight),'First changed file is visible on entry');
   await page.getByRole('button',{name:'Comment on src/parser.rs new line 3',exact:true}).first().click();
   await page.locator('.comment-form textarea').fill('Check the validation error before saving.');
   await page.locator('.comment-form').getByRole('button',{name:/Save comment|Add comment|Comment/,exact:false}).last().click();
