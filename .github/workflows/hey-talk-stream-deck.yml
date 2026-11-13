@@ -1,0 +1,25 @@
+name: Hey Talk Stream Deck
+on:
+  push:
+    paths: ['packages/hey-talk-stream-deck/**', 'packages/hey-talk/Sources/HeyTalk/*.swift', '.github/workflows/hey-talk-stream-deck.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: packages/hey-talk-stream-deck
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - run: npm ci && npm test && npm run pack
+      - run: swift test --filter DeckTests
+        working-directory: packages/hey-talk
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Hey-Talk-Stream-Deck
+          path: packages/hey-talk-stream-deck/dist/*.streamDeckPlugin
