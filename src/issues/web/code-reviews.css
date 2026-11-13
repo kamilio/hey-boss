@@ -73,3 +73,7 @@
 .review-row a.merge-title:hover { color: var(--accent); text-decoration: underline; }
 .review-row:has([aria-expanded="true"]) { background: var(--hover); }
 .review-discard { margin-left: auto; }
+.review-views { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 14px; background: var(--hover); border: 1px solid var(--line); border-radius: 9px; }
+.review-views button { padding: 6px 14px; font: inherit; color: var(--muted); background: transparent; border: none; border-radius: 6px; cursor: pointer; }
+.review-views button[aria-pressed="true"] { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px #0002; font-weight: 600; }
+#reviews-more { margin-top: 12px; }

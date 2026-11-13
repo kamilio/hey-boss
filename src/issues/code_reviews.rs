@@ -32,7 +32,11 @@ pub struct Comment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
-    List,
+    List {
+        archived: Option<bool>,
+        #[serde(default)]
+        offset: u32,
+    },
     View {
         id: i64,
     },
@@ -87,7 +91,10 @@ pub enum Operation {
 }
 impl Operation {
     pub fn writes(&self) -> bool {
-        !matches!(self, Self::List | Self::View { .. } | Self::ForPr { .. })
+        !matches!(
+            self,
+            Self::List { .. } | Self::View { .. } | Self::ForPr { .. }
+        )
     }
 }
 const SELECT: &str = "SELECT id,number,head,title,stage,verdict,body,version,updated_at,receipt,published_by FROM pr_code_reviews";
@@ -122,19 +129,29 @@ fn valid_text(s: &str) -> bool {
 pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) -> Result<Value> {
     if !matches!(op, Operation::Unlink { .. }) && !db.query_row("SELECT coalesce((SELECT code_reviews_enabled FROM project_settings WHERE project_id=?1),0)",[&p.id],|r|r.get::<_,bool>(0))?{return Err(Error::invalid("Code Reviews is disabled for this project"))}
     let id = match op {
-        Operation::List => {
+        Operation::List { archived, offset } => {
+            let filter = match archived {
+                Some(true) => "stage IN ('published','outdated','discarded')",
+                Some(false) => "stage IN ('draft','submitted','publishing')",
+                None => "stage!='discarded'",
+            };
+            let limit = if archived.is_some() { 50 } else { 200 };
             let sql = format!("SELECT r.*,
                 (SELECT count(*) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id),
                 (SELECT substr(body,1,240) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id ORDER BY ordinal,id LIMIT 1)
-                FROM ({SELECT} WHERE project_id=?1 AND stage!='discarded' ORDER BY updated_at DESC,id DESC LIMIT 200) r
+                FROM ({SELECT} WHERE project_id=?1 AND {filter} ORDER BY updated_at DESC,id DESC LIMIT ?2 OFFSET ?3) r
                 ORDER BY r.updated_at DESC,r.id DESC");
-            let reviews = db.query_collect(&sql, [&p.id], |r| {
+            let mut reviews = db.query_collect(&sql, params![p.id, limit + 1, offset], |r| {
                 let mut item = row(r)?;
                 item["comment_count"] = json!(r.get::<_, i64>(11)?);
                 item["first_comment"] = json!(r.get::<_, Option<String>>(12)?);
                 Ok::<_, rusqlite::Error>(item)
             })?;
-            return Ok(json!({"ok":true,"reviews":reviews}));
+            let more = reviews.len() > limit;
+            reviews.truncate(limit);
+            return Ok(
+                json!({"ok":true,"reviews":reviews,"next_offset":more.then_some(*offset as usize + limit)}),
+            );
         }
         Operation::ForPr { number } => {
             let ids=db.query_collect("SELECT id FROM pr_code_reviews WHERE project_id=?1 AND number=?2 AND stage!='discarded' ORDER BY updated_at DESC,id DESC",params![p.id,number],|r|r.get::<_,i64>(0))?;
