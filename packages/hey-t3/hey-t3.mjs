@@ -10,8 +10,9 @@ import { fileURLToPath } from 'node:url';
 
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 const usage = `hey-t3 list [ENVIRONMENT_ID]
-hey-t3 show|catch-up|pin|unpin|settle THREAD_LINK
+hey-t3 show|pull|catch-up|pin|unpin|settle THREAD_LINK
 hey-t3 rename THREAD_LINK TITLE
+hey-t3 send|queue THREAD_LINK MESSAGE (use - to read stdin)
 
 Reads and changes print JSON. Use the link field from hey-t3 list.
 Remote threads use machines already connected in Hey Boss.`;
@@ -38,9 +39,22 @@ export function recapPage(items, replies) {
   return null;
 }
 
-export function desiredCommand(op, t, title) {
+export function desiredCommand(op, t, text) {
   const c = { commandId: randomUUID(), threadId: t.id };
   switch (op) {
+    case 'send':
+    case 'queue':
+      return {
+        ...c,
+        type: 'message.dispatch',
+        messageId: randomUUID(),
+        text,
+        attachments: [],
+        createdBy: 'user',
+        creationSource: 'web',
+        ...(op === 'send' ? { deliveryIntent: 'steer' } : {}),
+        dispatchMode: { type: op === 'send' ? 'start_immediately' : 'queue_after_active' },
+      };
     case 'pin':
       return t.pinnedAt ? null : { ...c, type: 'thread.pin' };
     case 'unpin':
@@ -48,13 +62,13 @@ export function desiredCommand(op, t, title) {
     case 'settle':
       return !t.pinnedAt && t.settledOverride === 'settled' ? null : { ...c, type: 'thread.settle' };
     case 'rename':
-      return t.title === title ? null : { ...c, type: 'thread.metadata.update', title };
+      return t.title === text ? null : { ...c, type: 'thread.metadata.update', title: text };
     default:
       throw Error('Invalid thread action.');
   }
 }
 
-async function onHost({ op, environment, id, title, guarded }, lines) {
+async function onHost({ op, environment, id, text, guarded }, lines) {
   const actual = localID();
   if (actual !== environment) throw Error('The connected machine no longer serves this T3 environment.');
   const { origin, serverVersion } = JSON.parse(
@@ -69,7 +83,12 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
       redirect: 'error',
       signal: AbortSignal.timeout(30000),
     });
-    if (!r.ok) throw Error(`T3 returned HTTP ${r.status}.`);
+    if (!r.ok) {
+      const detail = await r.json().catch(() => ({}));
+      if (detail.reason === 'thread_transcript_too_large')
+        throw Error('This transcript exceeds T3’s 50 MiB export limit. Use show for the conversation text.');
+      throw Error(`T3 returned HTTP ${r.status}.`);
+    }
     return r.json();
   };
   if ((await get('/.well-known/t3/environment')).environmentId !== environment)
@@ -79,7 +98,7 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
     if (!/^[0-9][a-zA-Z0-9.+-]*$/.test(serverVersion)) throw Error('Invalid T3 version.');
     cli = join(home, 'runtime/versions', serverVersion, 't3');
   }
-  const write = ['pin', 'unpin', 'settle', 'rename'].includes(op);
+  const write = ['pin', 'unpin', 'settle', 'rename', 'send', 'queue'].includes(op);
   const args = ['auth', 'session', 'issue', '--scope', 'orchestration:read'];
   if (write) args.push('--scope', 'orchestration:operate');
   const token = execFileSync(cli, [...args, '--ttl', '1m', '--label', 'hey-t3', '--token-only'], {
@@ -100,8 +119,14 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
     if (page.projection?.thread?.id !== id) throw Error('T3 returned a different thread.');
     return page;
   };
-  const page = await bounded(write),
+  if (op === 'pull') {
+    const transcript = await get(path + '/transcript', headers);
+    if (transcript.threadId !== id) throw Error('T3 returned a different thread.');
+    return transcript;
+  }
+  const page = op === 'show' ? await get(path, headers) : await bounded(write),
     thread = page.projection.thread;
+  if (thread.id !== id) throw Error('T3 returned a different thread.');
   if (op === 'show')
     return {
       ...thread,
@@ -135,7 +160,7 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
       cursor = prior.nextCursor;
     }
   }
-  const command = desiredCommand(op, thread, title);
+  const command = desiredCommand(op, thread, text);
   if (!command) return thread;
   const ws = new WebSocket(new URL('/ws?orchestrationProtocol=2', base), { headers });
   try {
@@ -175,8 +200,25 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
   } finally {
     ws.close();
   }
+
+  if (command.type === 'message.dispatch') {
+    const receipt = { threadId: id, messageId: command.messageId };
+    // Dispatch was acknowledged. A missing readback must not invite a duplicate send.
+    const projection = await bounded(false)
+      .then((page) => page.projection)
+      .catch(() => null);
+    if (!projection) return { ...receipt, delivery: 'accepted' };
+    const item = projection.visibleTurnItems.find(({ item }) => item.messageId === command.messageId)?.item;
+    const run = projection.runs.find((run) => run.userMessageId === command.messageId);
+    const delivery =
+      { turn_start: 'started', steer: 'steered', promoted_queued_to_steer: 'steered', queued_turn: 'queued' }[
+        item?.inputIntent
+      ] ?? (run?.status === 'queued' ? 'queued' : 'accepted');
+    return { ...receipt, delivery };
+  }
   const after = (await bounded(true)).projection.thread;
-  if (desiredCommand(op, after, title)) throw Error('T3 did not apply the requested change.');
+
+  if (desiredCommand(op, after, text)) throw Error('T3 did not apply the requested change.');
   return after;
 }
 
@@ -229,16 +271,19 @@ async function main(args) {
   }
   const guarded = args[0] === '--check-focus';
   if (guarded) args.shift();
-  const [op, arg, title] = args;
+  const [op, arg, value] = args;
   if (!(
     (op === 'list' && args.length <= 2) ||
-    (op === 'rename' && args.length === 3 && title.trim()) ||
-    (['show', 'catch-up', 'pin', 'unpin', 'settle'].includes(op) && args.length === 2)
+    (['send', 'queue', 'rename'].includes(op) && args.length === 3) ||
+    (['show', 'pull', 'catch-up', 'pin', 'unpin', 'settle'].includes(op) && args.length === 2)
   ))
     throw Error(usage);
   const { environment, id } = op === 'list' ? { environment: (arg ?? localID()).toLowerCase() } : target(arg);
   if (!uuid.test(environment)) throw Error('Invalid environment ID.');
-  const input = { op, environment, id, title, guarded };
+  const text = ['send', 'queue'].includes(op) && value === '-' ? readFileSync(0, 'utf8') : value;
+  if (text !== undefined && !text.trim()) throw Error('Message or title cannot be empty.');
+  const input = { op, environment, id, text, guarded };
+
   const stdinLines = () => createInterface({ input: process.stdin })[Symbol.asyncIterator]();
   if (existsSync(idFile) && environment === localID()) {
     console.log(JSON.stringify(await onHost(input, guarded ? stdinLines() : null)));
@@ -246,7 +291,7 @@ async function main(args) {
   }
   const socket = await connection(environment);
   // Run the same source on the owning host. Only fixed program text enters
-  // the remote shell; the link, title and focus acknowledgement travel on stdin.
+  // the remote shell; thread data and the focus acknowledgement travel on stdin.
   const source = readFileSync(fileURLToPath(import.meta.url), 'utf8').replaceAll("'", "'\\''");
   const entry = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" exec node --input-type=module -e '${source}' -- --worker`;
   const child = spawn('/usr/bin/ssh', [...companionArgs(socket), entry], {

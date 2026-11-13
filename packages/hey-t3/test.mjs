@@ -63,3 +63,18 @@ test('an offline companion does not fall back to an old SSH registration', () =>
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test('send requests active steering; queue never steers; both preserve the exact message', () => {
+  const t = { id },
+    text = 'First line\n\nSecond line $()';
+  const send = desiredCommand('send', t, text),
+    queue = desiredCommand('queue', t, text);
+  assert.equal(send.type, 'message.dispatch');
+  assert.equal(send.deliveryIntent, 'steer');
+  assert.equal(send.dispatchMode.type, 'start_immediately');
+  assert.equal(queue.deliveryIntent, undefined);
+  assert.equal(queue.dispatchMode.type, 'queue_after_active');
+  assert.equal(send.text, text);
+  assert.equal(queue.text, text);
+  assert.notEqual(send.messageId, queue.messageId);
+});
