@@ -480,6 +480,8 @@ correct it and rerun `agent configure`. To remove these permissions, delete the
 managed `hey-boss.rules` file and remove only the hey-boss entries from Claude's
 `permissions.allow` array.
 
+For a local mode change, `hey-boss notif toast --title 'Sculpt numpad' --icon keyboard 'Shortcuts on'` shows a small glass label beneath the Hey Boss menu-bar icon. It disappears after two seconds; another toast replaces it. Toasts do not take focus or create Inbox history. Rust callers can use `Client::toast(title, message, icon)` on the local desktop client.
+
 Mac banners disappear after 12 seconds (alerts) or 20 seconds (updates), pausing while you read them. They stay unread and can be reopened from the menu-bar Inbox. Questions remain open; explicit `--autoclose` keeps its completion behavior. Three or more notifications form a collapsible project stack. The project × dismisses the stack. Read update/Open dismisses its card and keeps history. Questions support `--sync` and `--async`. Run `hey-boss --help` for concise usage guidance.
 
 The pinned **Close all** button dismisses notification cards across all projects and cancels active and queued questions. History and already-open readers are kept. Waiting clients (`ask --sync` or `wait`) receive `status: cancelled` without a result; cancellation is not an answer or approval. Items arriving after the click remain available. CLI responses, including cancellation, exit successfully when the request was handled; inspect `status` to distinguish `ok`, `pending`, and `cancelled`.

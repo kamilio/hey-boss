@@ -14,6 +14,29 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_TOAST"] == "1" {
+        let toast = StatusToast()
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.title = "T"
+        defer { NSStatusBar.system.removeStatusItem(item) }
+        toast.show("Sculpt numpad", "Shortcuts on", symbol: "keyboard", below: item.button)
+        let number = toast.window.windowNumber
+        precondition(toast.window.isVisible && !toast.window.isKeyWindow && toast.window.ignoresMouseEvents)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1))
+        if let button = item.button, let bar = button.window, let area = bar.screen?.visibleFrame {
+            let anchor = bar.convertToScreen(button.convert(button.bounds, to: nil))
+            precondition(abs(toast.window.frame.maxY - (min(anchor.minY, area.maxY) - 5)) < 2)
+            precondition(toast.window.frame.minX >= area.minX && toast.window.frame.maxX <= area.maxX)
+        }
+        toast.show("Sculpt numpad", "Number keys on", symbol: "keyboard", below: item.button)
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.2))
+        precondition(toast.window.isVisible && toast.window.windowNumber == number)
+        precondition(toast.label.stringValue == "Number keys on")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.2))
+        precondition(!toast.window.isVisible)
+        print("Toast replaced in place and expired without taking focus")
+        return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPEECH_HELPER"] == "1" { auditSpeechHelper(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CLIPBOARD"] == "1" { auditPromptClipboard(); return }
     if let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SKILL_EDITOR"] { auditSkillEditor(path); return }

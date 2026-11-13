@@ -5,6 +5,14 @@ use hey_boss::Request;
 
 #[derive(Subcommand)]
 pub(super) enum Action {
+    /// Show a two-second status beneath the Hey Boss menu-bar icon, without saving it to Inbox.
+    Toast {
+        #[arg(long)]
+        title: String,
+        #[arg(long, help = "SF Symbol name")]
+        icon: Option<String>,
+        message: String,
+    },
     #[command(
         about = "Show an image notification",
         after_help = "Snapshots a local PNG, JPEG, GIF, or WebP up to 4 MiB. Click View image to open it; history keeps the image after the source file is removed. Returns a Task ID immediately.\n\nExample:\n  hey-boss notif image --title 'Layout preview' screenshot.png 'Updated navigation'"
@@ -261,7 +269,7 @@ impl Action {
                     metadata.page,
                 )
             }
-            Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
+            Action::Toast { .. } | Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
             Action::Hide { .. } | Action::Status { .. } | Action::Wait { .. } => {
                 (None, None, None, None, None, false)
             }
@@ -289,7 +297,7 @@ impl Action {
             icon_path,
         };
         let output = match self {
-            Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
+            Action::Toast { .. } | Action::Secret(_) | Action::Inbox { .. } => unreachable!(),
             Action::Image {
                 file,
                 caption,

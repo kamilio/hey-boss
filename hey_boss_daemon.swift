@@ -1485,6 +1485,69 @@ func panel(_ title: String) -> Panel {
     return panel
 }
 
+/// One click-through glass panel for short-lived local status changes.
+final class StatusToast {
+    let window = panel("Status")
+    let heading = NSTextField(labelWithString: "")
+    let label = NSTextField(labelWithString: "")
+    private let icon = NSImageView()
+    private var expiry: Timer?
+
+    init() {
+        let surface = nativeBackdrop()
+        surface.wantsLayer = true
+        surface.layer?.cornerRadius = 26
+        surface.layer?.masksToBounds = true
+        #if compiler(>=6.2)
+        if #available(macOS 26, *), let glass = surface as? NSGlassEffectView { glass.cornerRadius = 26 }
+        #endif
+        let body = NSView()
+        surface.contentView = body
+        for field in [heading, label] {
+            field.alignment = .center; field.lineBreakMode = .byTruncatingTail
+            field.maximumNumberOfLines = 1
+            body.addSubview(field)
+        }
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+        label.font = .systemFont(ofSize: 12); label.textColor = .secondaryLabelColor
+        icon.contentTintColor = .systemTeal
+        icon.symbolConfiguration = .init(pointSize: 22, weight: .semibold)
+        body.addSubview(icon)
+        window.ignoresMouseEvents = true
+        window.contentView = surface
+    }
+
+    func show(_ title: String, _ message: String, symbol: String?, below button: NSStatusBarButton?) {
+        let anchor = button.flatMap { b in b.window?.convertToScreen(b.convert(b.bounds, to: nil)) }
+        guard let area = (button?.window?.screen ?? NSScreen.main)?.visibleFrame else { return }
+        expiry?.invalidate()
+        heading.stringValue = title; label.stringValue = message
+        icon.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
+            ?? NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: nil)
+        let width = min(max(220, max(heading.intrinsicContentSize.width, label.intrinsicContentSize.width) + 96), min(360, area.width - 16))
+        let center = anchor?.midX ?? area.maxX
+        let top = min(anchor?.minY ?? area.maxY, area.maxY) - 5
+        let frame = NSRect(x: min(max(area.minX + 8, (center - width / 2).rounded()), area.maxX - width - 8),
+                           y: top - 52, width: width, height: 52)
+        icon.frame = NSRect(x: 15, y: 12, width: 28, height: 28)
+        heading.frame = NSRect(x: 48, y: 26, width: width - 96, height: 17)
+        label.frame = NSRect(x: 48, y: 10, width: width - 96, height: 16)
+        let animate = !window.isVisible && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        window.setFrame(animate ? frame.offsetBy(dx: 0, dy: 6) : frame, display: false)
+        window.alphaValue = animate ? 0 : 1
+        window.orderFrontRegardless()
+        if animate {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.16
+                window.animator().alphaValue = 1
+                window.animator().setFrame(frame, display: true)
+            }
+        }
+        let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in self?.window.orderOut(nil) }
+        expiry = timer; RunLoop.main.add(timer, forMode: .common)
+    }
+}
+
 // Native block model adapted from poe-code's toolcraft-design Markdown renderer.
 // Keep one text storage for the document so selection crosses every block.
 struct NativeMarkdownNode: Decodable {
@@ -10921,6 +10984,7 @@ struct Daemon {
         app.delegate = ArtifactEditors.shared
         NativeArtifactEditor.installMenu()
         ArtifactEditors.shared.restoreDrafts()
+        let toast = StatusToast()
         let ui = Interface(present: true)
         let overview = AgentsOverview()
         _ = overview.quickIssueShortcut
@@ -10998,6 +11062,15 @@ struct Daemon {
                         }
                         #endif
                         reply.send(["status": "error", "error": "Voice chat requires macOS 26."])
+                    } else if request.command == "toast" {
+                        let lines = [request.title, request.question].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        guard lines.count == 2, lines.allSatisfy({ !$0.isEmpty && $0.count <= 160 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) else {
+                            reply.send(["status": "error", "error": "Toast title and message must each be one line of 1–160 characters"]); return
+                        }
+                        onMain {
+                            toast.show(lines[0], lines[1], symbol: request.icon, below: overview.statusItem?.button)
+                            reply.send(["task_id": "toast", "status": "ok"])
+                        }
                     } else if request.command == "secret" {
                         onMain { secrets.handle(request, reply) }
                     } else if request.command == "action" {
