@@ -546,6 +546,26 @@ fn run() -> std::io::Result<()> {
         }
         Command::Upgrade(options) => return upgrade_cli::run(options),
         Command::Fleet { action } => return hey_boss::fleet::run(action),
+        Command::Notif(notif_cli::Action::Toast {
+            title,
+            message,
+            icon,
+        }) => {
+            let executable = std::env::current_exe()?.canonicalize()?;
+            initialize(&executable)?;
+            if executable.with_file_name("hey-boss.companion").exists() {
+                return Err(std::io::Error::other(
+                    "Toasts require the local Mac desktop",
+                ));
+            }
+            let state = std::fs::read_to_string(executable.with_file_name("hey-boss.state"))?;
+            Client::new(std::path::Path::new(&state).join("daemon.sock")).toast(
+                title,
+                message,
+                icon.as_deref(),
+            )?;
+            return Ok(());
+        }
         Command::Notif(notif_cli::Action::Secret(options)) => return secret_cli::run(options),
         Command::Workers(options) => {
             if let Err(error) = workers_cli::run(options) {

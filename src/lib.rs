@@ -562,6 +562,16 @@ impl Client {
         self.start(request).wait()
     }
 
+    /// Display a transient status beneath the Mac menu-bar icon, without creating an Inbox item.
+    pub fn toast(&self, title: &str, message: &str, icon: Option<&str>) -> std::io::Result<()> {
+        let mut request = Request::action("toast", None);
+        request.title = Some(title.into());
+        request.question = Some(message.into());
+        request.icon = icon.map(str::to_owned);
+        self.try_send(&request)?;
+        Ok(())
+    }
+
     pub fn alert(&self, notification: Notification<'_>) -> Response {
         let mut request = Request::action("alert", None);
         request.project = Some(notification.project.into());
