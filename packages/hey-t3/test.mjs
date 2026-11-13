@@ -1,3 +1,7 @@
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { target, desiredCommand, recapPage } from './hey-t3.mjs';
@@ -39,4 +43,23 @@ test('recap pages stop at the last human, excluding tool output and internal mes
     { lastMessage: 'Question', replies: 'Checking.\n\nDone.' },
   );
   assert.throws(() => recapPage([row('user_message', 'Question', 'user')], []), /No replies/);
+});
+
+test('an offline companion does not fall back to an old SSH registration', () => {
+  const home = mkdtempSync(join(process.cwd(), '.hey-t3-test-'));
+  try {
+    const old = join(home, '.config/hey-t3/hosts');
+    mkdirSync(old, { recursive: true });
+    writeFileSync(join(old, env), '-invalid-old-host');
+    const r = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL('./hey-t3.mjs', import.meta.url)), 'show', `t3code://threads/${env}/${id}`],
+      { env: { ...process.env, HOME: home }, encoding: 'utf8' },
+    );
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /not connected in Hey Boss/);
+    assert.equal(r.stdout, '');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

@@ -1,20 +1,20 @@
 #!/usr/bin/env node
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const uuid = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
-const usage = `hey-t3 connect SSH_HOST
-hey-t3 list [ENVIRONMENT_ID]
+const usage = `hey-t3 list [ENVIRONMENT_ID]
 hey-t3 show|catch-up|pin|unpin|settle THREAD_LINK
 hey-t3 rename THREAD_LINK TITLE
 
 Reads and changes print JSON. Use the link field from hey-t3 list.
-connect remembers the host for an environment; no Desktop session is required.`;
+Remote threads use machines already connected in Hey Boss.`;
 const home = join(homedir(), '.t3');
 const idFile = join(home, 'userdata/environment-id');
 const localID = () => readFileSync(idFile, 'utf8').trim().toLowerCase();
@@ -56,9 +56,7 @@ export function desiredCommand(op, t, title) {
 
 async function onHost({ op, environment, id, title, guarded }, lines) {
   const actual = localID();
-  if (op === 'connect') return { environment: actual };
-  if (actual !== environment)
-    throw Error('The SSH host now serves a different T3 environment. Connect it again.');
+  if (actual !== environment) throw Error('The connected machine no longer serves this T3 environment.');
   const { origin, serverVersion } = JSON.parse(
     readFileSync(join(home, 'userdata/server-runtime.json'), 'utf8'),
   );
@@ -92,7 +90,8 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
   const headers = { authorization: 'Bearer ' + token, 'x-t3-orchestration-protocol': '2' };
   if (op === 'list') {
     const { threads } = await get('/api/orchestration/shell?omitIdleSubagents=1&omitOlderSettled=1', headers);
-    return threads.filter((t) => t.lineage?.relationshipToParent !== 'subagent')
+    return threads
+      .filter((t) => t.lineage?.relationshipToParent !== 'subagent')
       .map((t) => ({ ...t, link: `t3code://threads/${environment}/${t.id}` }));
   }
   const path = '/api/orchestration/threads/' + id;
@@ -181,6 +180,48 @@ async function onHost({ op, environment, id, title, guarded }, lines) {
   return after;
 }
 
+// OpenSSH normally falls back to a fresh login if a master disappears.
+// Use only the existing Hey Boss socket, even if it closes after discovery.
+function companionArgs(socket) {
+  return [
+    '-F',
+    '/dev/null',
+    '-T',
+    '-S',
+    socket,
+    '-o',
+    'BatchMode=yes',
+    '-o',
+    'ProxyCommand=/usr/bin/false',
+    'localhost',
+  ];
+}
+
+async function connection(environment) {
+  const dir = join(homedir(), '.local/share/hey-boss');
+  const sockets = existsSync(dir)
+    ? readdirSync(dir, { withFileTypes: true }).filter(
+        (entry) => entry.isSocket() && /^ssh-[a-f0-9]{16}\.sock$/.test(entry.name),
+      )
+    : [];
+  try {
+    return await Promise.any(
+      sockets.map(async ({ name }) => {
+        const path = join(dir, name);
+        const { stdout } = await promisify(execFile)(
+          '/usr/bin/ssh',
+          [...companionArgs(path), 'cat "$HOME/.t3/userdata/environment-id"'],
+          { encoding: 'utf8', timeout: 3000, maxBuffer: 8192 },
+        );
+        if (stdout.trim().split(/\r?\n/).at(-1)?.toLowerCase() !== environment) throw Error();
+        return path;
+      }),
+    );
+  } catch {
+    throw Error('This thread’s machine is not connected in Hey Boss, or T3 is unavailable on it.');
+  }
+}
+
 async function main(args) {
   if (!args.length || args[0] === '--help') {
     console.log(usage);
@@ -192,46 +233,26 @@ async function main(args) {
   if (!(
     (op === 'list' && args.length <= 2) ||
     (op === 'rename' && args.length === 3 && title.trim()) ||
-    (['connect', 'show', 'catch-up', 'pin', 'unpin', 'settle'].includes(op) && args.length === 2)
+    (['show', 'catch-up', 'pin', 'unpin', 'settle'].includes(op) && args.length === 2)
   ))
     throw Error(usage);
-  const dir = join(homedir(), '.config/hey-t3/hosts');
-  const { environment, id } =
-    op === 'connect' ? {} : op === 'list' ? { environment: (arg ?? localID()).toLowerCase() } : target(arg);
-  if (op !== 'connect' && !uuid.test(environment)) throw Error('Invalid environment ID.');
+  const { environment, id } = op === 'list' ? { environment: (arg ?? localID()).toLowerCase() } : target(arg);
+  if (!uuid.test(environment)) throw Error('Invalid environment ID.');
   const input = { op, environment, id, title, guarded };
   const stdinLines = () => createInterface({ input: process.stdin })[Symbol.asyncIterator]();
-  if (op !== 'connect' && existsSync(idFile) && environment === localID()) {
+  if (existsSync(idFile) && environment === localID()) {
     console.log(JSON.stringify(await onHost(input, guarded ? stdinLines() : null)));
     return;
   }
-  let host = arg;
-  if (op !== 'connect') {
-    if (!existsSync(join(dir, environment)))
-      throw Error('Unknown T3 environment. Run hey-t3 connect SSH_HOST first.');
-    host = readFileSync(join(dir, environment), 'utf8').trim();
-  }
-  if (!/^[a-zA-Z0-9_][a-zA-Z0-9_.@-]*$/.test(host)) throw Error('Expected an SSH host or alias.');
+  const socket = await connection(environment);
   // Run the same source on the owning host. Only fixed program text enters
   // the remote shell; the link, title and focus acknowledgement travel on stdin.
   const source = readFileSync(fileURLToPath(import.meta.url), 'utf8').replaceAll("'", "'\\''");
   const entry = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" exec node --input-type=module -e '${source}' -- --worker`;
-  const child = spawn(
-    '/usr/bin/ssh',
-    [
-      '-T',
-      '-o',
-      'BatchMode=yes',
-      '-o',
-      'StrictHostKeyChecking=yes',
-      '-o',
-      'ConnectTimeout=8',
-      '--',
-      host,
-      entry,
-    ],
-    { stdio: ['pipe', 'pipe', 'inherit'], timeout: 90000 },
-  );
+  const child = spawn('/usr/bin/ssh', [...companionArgs(socket), entry], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+    timeout: 90000,
+  });
   const done = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', resolve);
@@ -248,20 +269,12 @@ async function main(args) {
   }
   const status = await done;
   if (status !== 0) {
-    if (status === 255 || status === null) throw Error('SSH connection failed on ' + host + '.');
+    if (status === 255 || status === null)
+      throw Error('The Hey Boss connection to this thread’s machine closed.');
     process.exitCode = status;
     return; // The worker already printed the cause on stderr.
   }
-  const value = JSON.parse(result);
-  if (op === 'connect') {
-    if (!uuid.test(value.environment)) throw Error('Invalid remote environment ID.');
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const path = join(dir, value.environment),
-      tmp = path + '.' + process.pid;
-    writeFileSync(tmp, host + '\n', { mode: 0o600 });
-    renameSync(tmp, path);
-  }
-  console.log(JSON.stringify(value));
+  console.log(JSON.stringify(JSON.parse(result)));
 }
 
 if (
