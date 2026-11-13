@@ -618,4 +618,26 @@ fn review_queue_pins_edits_and_publication_to_the_submitted_revision() {
         call(json!({"command":"rejected_publication","id":id,"version":4}))["review"]["stage"],
         "submitted"
     );
+    let next = call(
+        json!({"command":"record","number":22,"head":"b".repeat(40),"title":"Fix the clock","comments":[],"verdict":"APPROVE","body":"lg"}),
+    );
+    assert_ne!(&next["review"]["id"], id);
+    assert_eq!(next["review"]["comments"], json!([]));
+    let old = call(json!({"command":"view","id":id}));
+    assert_eq!(old["review"]["stage"], "outdated");
+    assert_eq!(
+        call(json!({"command":"discard","id":id,"version":3}))["ok"],
+        false
+    );
+    assert_eq!(
+        call(json!({"command":"discard","id":id,"version":old["review"]["version"]}))["review"]["stage"],
+        "discarded"
+    );
+    assert_eq!(
+        call(json!({"command":"list"}))["reviews"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
