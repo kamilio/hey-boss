@@ -23,7 +23,7 @@ async page => {
   await action({action:'create',title:'Use the handed-off API',body:'Depends on the guarded source handoff.',labels:[]});
   await action({action:'set_blockers',number:2,blockers:[1],force:false});
   await detail(1);
-  let button=page.locator('.detail-heading-actions').getByRole('button',{name:'Move to Ready',exact:true});
+  let button=page.locator('#detail-view').getByRole('button',{name:'Move to Ready',exact:true});
   check(await button.isEnabled(),'Ready is available without a PR');
   await action({action:'add_pull_request',number:1,url:'https://github.com/example/repo/pull/683'});
   await page.reload();await button.waitFor();

@@ -156,7 +156,7 @@ fn legacy_job_issues_show_job_ownership_and_run_state() {
             let sidebar = sidebar.as_str().unwrap();
             assert!(
                 sidebar.contains("independently of worker slots")
-                    && !sidebar.contains("Ready for agents")
+                    && !sidebar.contains("Eligible for pickup")
                     && !sidebar.contains("Move to draft"),
                 "{sidebar}"
             );
