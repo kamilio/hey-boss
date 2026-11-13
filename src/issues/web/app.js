@@ -1136,9 +1136,7 @@ async function renderRoute() {
       if (cached && value.issue.version < cached.value.issue.version) return;
       detailCache.set(key, { value, at: Date.now() });
       if (!cached || Date.now() - cached.at >= 30000 || JSON.stringify(cached.value.issue) !== JSON.stringify(value.issue) || IssueSubtasks.signature(cached.value) !== IssueSubtasks.signature(value)) {
-        const input = $("#comment-body"), focus = input === document.activeElement ? {start:input.selectionStart,end:input.selectionEnd,direction:input.selectionDirection,top:input.getBoundingClientRect().top} : null;
-        saveComment();renderDetail(value);
-        if (focus) {const next=$("#comment-body");next?.focus({preventScroll:true});next?.setSelectionRange(focus.start,focus.end,focus.direction);if(next)window.scrollBy(0,next.getBoundingClientRect().top-focus.top);}
+        refreshDetail(value);
       }
     } catch (e) {
       if (sequence !== model.sequence) return;
@@ -1189,8 +1187,7 @@ async function refresh(quiet = true) {
     return;
   model.polling = true;
   const sequence = model.sequence,
-    project = model.project.id,
-    bossName = model.boss.name;
+    project = model.project.id;
   $("#refresh").classList.add("busy");
   try {
     const [projects, result] = await Promise.all([
@@ -1254,15 +1251,14 @@ async function refresh(quiet = true) {
           detailCache.delete(detailKey(project, result.issue.number));
         }
       }
-      if (model.detail && bossName !== model.boss.name) {
-        if (quiet) showUpdate();
-        else renderDetail(result);
-      } else if (
+      if (
         model.detail &&
-        (result.prs_enabled !== model.detail.prs_enabled || JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || JSON.stringify(result.issue.commits) !== JSON.stringify(model.detail.issue.commits) || result.issue.version !== model.detail.issue.version || result.comment_count !== model.detail.comment_count || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (result.boss?.name !== model.detail.boss?.name || result.prs_enabled !== model.detail.prs_enabled || JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || JSON.stringify(result.issue.commits) !== JSON.stringify(model.detail.issue.commits) || result.issue.version !== model.detail.issue.version || result.comment_count !== model.detail.comment_count || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
-        if (quiet) showUpdate();
-        else renderDetail(result);
+        // Let an open editor or pending submission finish before replacing its controls.
+        if (quiet && $("dialog[open], .issue-overflow[open], .pr-add[open], #issue-tag-picker, .artifact-attachment-picker, #issue-attachments[data-busy=true], #comment-body[readonly]")) return;
+        detailCache.set(detailKey(project, result.issue.number), {value:result, at:Date.now()});
+        refreshDetail(result);
       }
     } else {
       model.orderVersion = result.order_version;
@@ -1296,13 +1292,23 @@ function saveComment() {
       input.value,
     );
 }
-function showUpdate() {
-  detailCache.delete(detailKey(model.project.id,model.route.issue));
-  if ($("#update-banner")) return;
-  $("#detail-view").insertAdjacentHTML(
-    "afterbegin",
-    `<div class="update-banner" id="update-banner"><span>This issue was updated by another session.</span><button data-reload>Load changes</button></div>`,
-  );
+function refreshDetail(value) {
+  const input = $("#comment-body");
+  const focus = document.activeElement;
+  const previewing = input?.hidden;
+  const selection = input && [input, $("#comment-preview"), $("#comment-write")].includes(focus)
+    ? {id:focus.id, start:input.selectionStart, end:input.selectionEnd, direction:input.selectionDirection, top:focus.getBoundingClientRect().top} : null;
+  saveComment();
+  renderDetail(value);
+  const next = $("#comment-body");
+  if (!next) return;
+  if (previewing) preview("comment", true);
+  if (selection) {
+    const target = document.getElementById(selection.id);
+    target.focus({preventScroll:true});
+    next.setSelectionRange(selection.start, selection.end, selection.direction);
+    window.scrollBy(0, target.getBoundingClientRect().top - selection.top);
+  }
 }
 function agentLaunchCount(issue, showZero = false) {
   const count = issue.agent_launch_count || 0;

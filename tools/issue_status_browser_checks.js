@@ -63,7 +63,6 @@ async page => {
  await page.evaluate(async()=>{while(model.polling)await new Promise(r=>setTimeout(r,10));await refresh(false);});
  check(await page.locator('.issue-progress-card .progress-badge').first().textContent()==='In trouble','Later update refreshes immediately');
  check(await input.evaluate(el=>document.activeElement===el&&el.selectionStart===5&&el.selectionEnd===15),'Later update keeps focus and selection');
- check(await page.locator('#update-banner').count().then(async n=>!n||!await page.locator('#update-banner').isVisible()),'Status alone does not ask to reload the issue');
  await page.unroute('**/api/action');
  await goto(base+'&issue=1');await page.locator('.progress-history summary').waitFor();
  await page.route('**/api/action',route=>route.request().postDataJSON()?.operation.action==='status_history'?route.fulfill({status:503,json:{ok:false,error:{message:'Connection interrupted. Try again.'}}}):route.continue());

@@ -57,12 +57,8 @@ async page => {
     return route.continue();
   });
   await page.evaluate(() => refresh(true));
-  check(await page.locator('#update-banner').isVisible(), 'Stable-version final notes announce an update');
-  check(await page.getByRole('textbox',{name:'Your comment'}).inputValue() === 'Unsent review draft', 'Background update preserves the unsent draft');
-  await page.screenshot({path:'/tmp/hb-handoff-qa/stable-version-update.png',fullPage:true});
-  await page.evaluate(() => refresh(false));
   await page.waitForFunction(() => document.querySelector('#comments')?.textContent.includes('preserved the delivery handoff'));
-  check((await page.locator('#comments').innerText()).includes(note.body), 'Refresh renders the new final note');
+  check((await page.locator('#comments').innerText()).includes(note.body), 'Polling renders the new final note');
   check(await page.evaluate(version => model.detail.issue.version === version, delivery.issue.version), 'Final-note refresh retains the guarded revision');
   check(await page.getByRole('textbox',{name:'Your comment'}).inputValue() === 'Unsent review draft', 'Rendered update preserves the unsent draft');
   await page.screenshot({path:'/tmp/hb-handoff-qa/stable-version-refreshed.png',fullPage:true});

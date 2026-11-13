@@ -65,11 +65,8 @@ async (page) => {
   await page.evaluate(number => location.hash = "project=named%3AResilience%20QA&issue=" + number, number);
   await page.getByRole("textbox", { name: "Your comment", exact: true }).fill("Keep this draft through remote updates");
   await action({ action: "edit", number, title: "Updated in another session", body: null, add_labels: [], remove_labels: [], if_version: null });
-  await page.getByRole("button", { name: "Load changes", exact: true }).waitFor({ timeout: 12000 });
-  check(await page.locator("#comment-body").inputValue() === "Keep this draft through remote updates", "Polling announces concurrent updates without replacing a comment draft");
-  await page.getByRole("button", { name: "Load changes", exact: true }).click();
   await page.getByRole("heading", { name: "Updated in another session #" + number, exact: true }).waitFor();
-  check(await page.locator("#comment-body").inputValue() === "Keep this draft through remote updates", "Loading remote changes preserves the comment draft");
+  check(await page.locator("#comment-body").inputValue() === "Keep this draft through remote updates", "Polling applies remote changes and preserves the comment draft");
   await page.context().setOffline(true);
   await page.getByRole("button", { name: "Comment", exact: true }).click();
   await page.locator("#comment-error").waitFor();

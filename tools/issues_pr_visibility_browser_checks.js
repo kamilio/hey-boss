@@ -61,11 +61,8 @@ async page => {
     while (model.polling) await new Promise(resolve => setTimeout(resolve,20));
     await refresh(true);
   });
-  await page.locator('#update-banner').waitFor();
-  check(await page.locator('#comment-body').inputValue() === 'Unsent comment survives workflow updates.', 'Background workflow changes preserve the comment draft');
-  await page.getByRole('button', {name:'Load changes',exact:true}).click();
   await page.locator('[data-pr-purpose]').waitFor();
-  check(await page.locator('#comment-body').inputValue() === 'Unsent comment survives workflow updates.', 'Loading the workflow change restores the comment draft');
+  check(await page.locator('#comment-body').inputValue() === 'Unsent comment survives workflow updates.', 'Automatically applying the workflow change preserves the comment draft');
   await page.locator('#comment-body').fill('');
   await page.evaluate(async number => {await api({action:'delete',number,force:false});await renderRoute();}, number);
   check(await page.locator('.pr-links a').count() === 1 && await page.locator('#pr-form, [data-pr-purpose], [data-remove-pr]').count() === 0, 'Deleted issue keeps enabled PR history read-only');
