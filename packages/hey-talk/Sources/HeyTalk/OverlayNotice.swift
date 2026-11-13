@@ -56,12 +56,14 @@ final class OverlayNotice: NSView {
         self.dismiss = dismiss
         let label = NSTextField(wrappingLabelWithString: message)
         label.font = .systemFont(ofSize: compact ? 12 : 13, weight: compact ? .medium : .regular)
-        label.maximumNumberOfLines = compact ? 1 : 4
+        label.maximumNumberOfLines = compact ? 1 : 8
+        label.cell?.truncatesLastVisibleLine = true
+        label.toolTip = message
         label.sizeToFit()
         let width: CGFloat = compact ? ceil(label.frame.width) + 38 : 312
         let textWidth = compact ? label.frame.width : width - (retry == nil ? 58 : 84)
         label.preferredMaxLayoutWidth = textWidth
-        let textHeight = ceil(label.intrinsicContentSize.height)
+        let textHeight = ceil(label.cell!.cellSize(forBounds: NSRect(x: 0, y: 0, width: textWidth, height: .greatestFiniteMagnitude)).height)
         let actionsHeight: CGFloat = action == nil ? 0 : 40
         let height: CGFloat = compact ? 36 : textHeight + 28 + actionsHeight
         super.init(frame: NSRect(x: 0, y: 0, width: width, height: height))
