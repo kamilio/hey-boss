@@ -12,7 +12,7 @@ enum BrowserPage {
         }
     }
 
-    private static func url(_ element: AXUIElement, _ attribute: String) -> URL? {
+    static func url(_ element: AXUIElement, _ attribute: String) -> URL? {
         let value = SpeechAX.value(element, attribute)
         if let url = value as? URL { return url }
         return (value as? String).flatMap(URL.init(string:))
