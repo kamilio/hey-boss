@@ -6,8 +6,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
     private var down: CGPoint?
     private var session = UUID()
     private let queue = DispatchQueue(label: "hey-talk.selection", qos: .userInitiated)
-    private var panel: NSPanel?
-    private var dismiss: Timer?
+    private var terminalHintShown = false
     var enabled: Bool { monitor != nil }
 
     func menuItem() -> NSMenuItem {
@@ -30,16 +29,17 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
         }
         _ = validateMenuItem(sender)
         if !enabled && !AXIsProcessTrusted() {
-            show("Selection Capture is off", detail: "Allow Hey Talk in Accessibility, then turn capture on.", quote: nil)
+            toast("Selection Capture is off", "Allow Hey Talk in Accessibility, then turn capture on.")
         } else if enabled {
-            show("Selection Capture is on", detail: "Highlight text in your browser, cmux, T3, or Slack.", quote: nil)
+            toast("Selection Capture is on", "Highlight text in your browser, cmux, T3, or Slack.")
         }
     }
 
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil; session = UUID(); down = nil
-        dismiss?.invalidate(); panel?.orderOut(nil); panel = nil
+        terminalHintShown = false
+        send(["command": "selection_notice", "sync": false])
     }
 
     private func event(_ event: NSEvent) {
@@ -57,11 +57,20 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
               BrowserPage.isBrowser(app) || ["com.cmuxterm.app", "com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(app.bundleIdentifier) else { return }
         let id = session, time = Date(), hit = keyboard ? nil : point
         queue.async {
-            guard app.isActive, let capture = Self.read(app, at: hit) else { return }
+            guard app.isActive else { return }
+            let capture = Self.read(app, at: hit)
             DispatchQueue.main.async {
                 guard self.session == id, self.enabled else { return }
+                guard let capture else { return }
+                if capture.text.isEmpty {
+                    if !self.terminalHintShown {
+                        self.terminalHintShown = true
+                        self.toast("cmux", "Hold Shift while dragging to select terminal text.")
+                    }
+                    return
+                }
                 let stamp = time.formatted(date: .omitted, time: .standard)
-                self.show(app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), quote: capture.text)
+                self.send(Self.notice(app: app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), text: capture.text))
             }
         }
     }
@@ -90,7 +99,10 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             if let range = SpeechAX.value(item, "AXSelectedTextMarkerRange"),
                let s = SpeechAX.parameter(item, "AXStringForTextMarkerRange", range) as? String, !s.isEmpty { text = s; break }
         }
-        guard let text, !text.allSatisfy(\.isWhitespace) else { return nil }
+        guard let text, !text.allSatisfy(\.isWhitespace) else {
+            // A mouse-aware terminal program can own the drag; do not guess its quote from AXValue.
+            return app.bundleIdentifier == "com.cmuxterm.app" && chain.contains(where: { SpeechAX.string($0, "AXHelp") == "Terminal content area" }) ? ("", []) : nil
+        }
         var source = [SpeechAX.string(window, "AXTitle")]
         if let area = chain.last, SpeechAX.string(area, "AXRole") == "AXWebArea" {
             let raw = SpeechAX.value(area, "AXURL")
@@ -111,49 +123,19 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
         return (text, source.filter { !$0.isEmpty })
     }
 
-    private func show(_ title: String, detail: String, quote: String?) {
-        dismiss?.invalidate(); panel?.orderOut(nil)
-        let card = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        card.level = .floating; card.isFloatingPanel = true; card.hidesOnDeactivate = false
-        card.isOpaque = false; card.backgroundColor = .clear; card.hasShadow = true
-        card.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        let glass = NSVisualEffectView(); glass.material = .popover; glass.state = .active
-        glass.wantsLayer = true; glass.layer?.cornerRadius = 15; glass.layer?.masksToBounds = true
-        let width: CGFloat = 386, inset: CGFloat = 16, inner = width - 2 * inset
-        func label(_ s: String, font: NSFont, color: NSColor, lines: Int) -> NSTextField {
-            let l = NSTextField(wrappingLabelWithString: s)
-            l.font = font; l.textColor = color; l.maximumNumberOfLines = lines; l.cell?.truncatesLastVisibleLine = true
-            l.toolTip = s; l.preferredMaxLayoutWidth = inner
-            return l
-        }
-        let heading = label(title, font: .systemFont(ofSize: 13, weight: .semibold), color: TalkDesign.active, lines: 1)
-        let meta = label(detail, font: .systemFont(ofSize: 11), color: .secondaryLabelColor, lines: 3)
-        let metaH = ceil(meta.fittingSize.height)
-        var y = inset
-        if let quote {
-            let scroller = NSScrollView()
-            let body = NSTextView()
-            body.drawsBackground = false; body.isEditable = false; body.isSelectable = true
-            body.font = .systemFont(ofSize: 13); body.textContainerInset = .zero; body.textContainer?.lineFragmentPadding = 0
-            body.string = quote; body.frame.size.width = inner
-            body.textContainer?.containerSize = NSSize(width: inner, height: .greatestFiniteMagnitude)
-            body.layoutManager?.ensureLayout(for: body.textContainer!)
-            let h = ceil(body.layoutManager!.usedRect(for: body.textContainer!).height)
-            scroller.frame = NSRect(x: inset, y: y, width: inner, height: min(108, h))
-            scroller.drawsBackground = false; scroller.hasVerticalScroller = h > 108; scroller.autohidesScrollers = true
-            scroller.documentView = body; body.frame.size = NSSize(width: scroller.contentSize.width, height: h)
-            glass.addSubview(scroller); y += scroller.frame.height + 9
-        }
-        meta.frame = NSRect(x: inset, y: y, width: inner, height: metaH); glass.addSubview(meta); y += metaH + 4
-        heading.frame = NSRect(x: inset, y: y, width: inner, height: 18); glass.addSubview(heading)
-        let size = NSSize(width: width, height: y + 18 + inset)
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main else { return }
-        let visible = screen.visibleFrame
-        card.contentView = glass; card.setFrame(NSRect(x: visible.maxX - width - 14, y: visible.maxY - size.height - 12, width: width, height: size.height), display: true)
-        card.title = "Selection Capture"; card.orderFrontRegardless(); panel = card
-        dismiss = Timer.scheduledTimer(withTimeInterval: 6, repeats: true) { [weak self, weak card] timer in
-            guard let card, !card.frame.contains(NSEvent.mouseLocation) else { return }
-            timer.invalidate(); card.orderOut(nil); self?.panel = nil
-        }
+    static func notice(app: String, detail: String, text: String) -> [String: Any] {
+        let content = detail + "\n\n" + text
+        let longest = content.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0
+        let fence = String(repeating: "`", count: max(3, longest + 1))
+        return ["command": "selection_notice", "sync": false, "title": app,
+                "description": String(text.prefix(240)), "question": fence + "\n" + content + "\n" + fence]
+    }
+
+    private func toast(_ title: String, _ message: String) {
+        send(["command": "toast", "title": title, "question": message, "icon": "text.cursor", "sync": false])
+    }
+
+    private func send(_ request: [String: Any]) {
+        queue.async { _ = try? TalkService.requestDesktop(request) }
     }
 }

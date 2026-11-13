@@ -2885,6 +2885,18 @@ final class Interface {
         stack.hasShadow = false
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.layout() }
     }
+    // Use the regular card and reader, without writing debug selections to Inbox.
+    private var selectionNoticeID: String?
+    func showSelection(_ request: Request) {
+        if let id = selectionNoticeID { remove(id); selectionNoticeID = nil }
+        guard let title = request.title, let summary = request.description, let content = request.question else { return }
+        let id = UUID().uuidString
+        selectionNoticeID = id
+        let row = Record(taskID: id, kind: "update", question: content, project: "Selection Capture", title: title,
+                         description: summary, options: [], autoclose: 8, linkURL: nil, linkLabel: nil,
+                         createdAt: Date().timeIntervalSince1970, status: "pending", sourceHost: "This Mac", icon: "text.cursor")
+        add(row)
+    }
     func add(_ row: Record) {
         guard row.page == true || !notificationsMuted() else { return }
         guard pendingCompletions[row.taskID] == nil, !cards.contains(where: { $0.row.taskID == row.taskID }), !questions.contains(where: { $0.taskID == row.taskID }), current?.taskID != row.taskID else { return }
@@ -2901,7 +2913,7 @@ final class Interface {
             document.addSubview(card.view)
             scheduleArrivalLayout()
             let now = Date().timeIntervalSince1970
-            onPresented(row.taskID, now)
+            if row.taskID != selectionNoticeID { onPresented(row.taskID, now) }
             if let interval = notificationTimerInterval(autoclose: row.autoclose, expiry: row.expiresAt, now: now) {
                 card.timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] _ in self?.completeNotification(row.taskID, nil) }
             } else if row.autoclose != nil {
@@ -2954,6 +2966,7 @@ final class Interface {
         })
     }
     func stageCompletion(_ ids: [String]) -> [String] {
+        if let id = selectionNoticeID, ids.contains(id) { remove(id); selectionNoticeID = nil }
         let selected = Set(ids)
         var rows = cards.map(\.row) + questions
         if let current { rows.append(current) }
@@ -11080,6 +11093,8 @@ struct Daemon {
                         }
                         #endif
                         reply.send(["status": "error", "error": "Voice chat requires macOS 26."])
+                    } else if request.command == "selection_notice" {
+                        onMain { ui.showSelection(request); reply.send(["status": "ok"]) }
                     } else if request.command == "toast" {
                         let lines = [request.title, request.question].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                         guard lines.count == 2, lines.allSatisfy({ !$0.isEmpty && $0.count <= 160 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) else {

@@ -15,6 +15,17 @@ func audit() {
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_TOAST"] == "1" {
+        let ui = Interface(present: false)
+        let request = try! JSONDecoder().decode(Request.self, from: Data(#"{"command":"selection_notice","sync":false,"title":"cmux","description":"quote","question":"full selection"}"#.utf8))
+        ui.onPresented = { _, _ in preconditionFailure("Selection appeared in durable history") }
+        ui.onComplete = { _, _ in preconditionFailure("Selection completion went to durable storage") }
+        ui.onDismissMany = { _ in preconditionFailure("Selection dismissal went to durable storage") }
+        ui.showSelection(request); ui.showSelection(request)
+        precondition(ui.cards.count == 1 && ui.cards[0].row.question == "full selection")
+        ui.completeNotification(ui.cards[0].row.taskID, nil)
+        precondition(ui.cards.isEmpty && ui.pendingCompletions.isEmpty)
+        ui.showSelection(request); ui.closeAll.invoke()
+        precondition(ui.cards.isEmpty && ui.pendingCompletions.isEmpty)
         let toast = StatusToast()
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.title = "T"

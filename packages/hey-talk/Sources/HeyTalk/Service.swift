@@ -81,7 +81,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var inputUID: String? { UserDefaults.standard.string(forKey: "inputUID") }
 
     init(headless: Bool, capture: AudioCapture = AudioCapture(), history: DictationHistory = DictationHistory(),
-         chatRequest: @escaping ([String: Any]) throws -> [String: Any]? = TalkService.requestConversation) {
+         chatRequest: @escaping ([String: Any]) throws -> [String: Any]? = TalkService.requestDesktop) {
         self.capture = capture; self.history = history; self.chatRequest = chatRequest
         overlayEnabled = !headless; super.init()
     }
@@ -274,7 +274,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
         }
     }
-    private static func requestConversation(_ request: [String: Any]) throws -> [String: Any]? {
+    static func requestDesktop(_ request: [String: Any]) throws -> [String: Any]? {
         let job = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/local.hey-boss.plist")
         guard let sockets = NSDictionary(contentsOf: job)?["Sockets"] as? [String: [String: Any]],
               let path = sockets["Listener"]?["SockPathName"] as? String else {
