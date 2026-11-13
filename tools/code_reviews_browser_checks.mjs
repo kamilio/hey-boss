@@ -75,7 +75,7 @@ try {
   assert.equal(await page.locator("#nav-code-reviews").isVisible(), false);
   run([...issue, "settings", "set", "--code-reviews-enabled"]);
   await page.reload();
-  await page.getByText("No reviews yet.", { exact: false }).waitFor();
+  await page.getByText("No pending reviews.", { exact: true }).waitFor();
   const first = {
     command: "record",
     number: 71,
@@ -218,9 +218,15 @@ try {
   });
   assert.equal(op({ command: "view", id: saved.id }).review.stage, "outdated");
   assert.equal(await page.getByRole("button",{name:"Publish requested changes"}).count(), 0);
+  const archive = page.getByRole("button", {name:"Archive", exact:true});
+  const pending = page.getByRole("button", {name:"Pending", exact:true});
+  assert.equal(await archive.getAttribute("aria-pressed"), "true");
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button",{name:"Discard review"}).click();
   await page.getByText("Review discarded.", {exact:true}).waitFor();
+  await page.getByText("#71 · Discarded").waitFor();
+  await pending.click();
+  await page.getByText("#73 · Draft", {exact:false}).waitFor();
   assert.equal(await row.count(), 0);
   const approve = page.getByRole("button", { name: "Approve and publish" });
   const latest = op({ command:"edit", id:approval.id, version:approval.version,
@@ -245,6 +251,10 @@ try {
   assert.deepEqual(requested, {project, id:latest.id, version:latest.version, digest:latest.digest});
   assert.equal(await page.locator("#reviews-detail").count(), 0);
   assert.equal(await approve.count(), 0);
+  assert.equal(await page.getByText(latest.title,{exact:true}).count(), 0);
+  await archive.click();
+  await page.getByText(latest.title,{exact:true}).waitFor();
+  assert.equal(await draft.count(), 0);
   const issueNumber = run([...issue, "create", "--title", "Check reminder labels"]).issue.number;
   const issueUrl = info.url + "#" + new URLSearchParams({project, issue:issueNumber});
   await page.goto(issueUrl);
@@ -262,9 +272,31 @@ try {
     await page.emulateMedia({colorScheme:"light"});
     await linked.screenshot({path:join(snap,"issue-reviews.png")});
   }
+  await page.goto(await savedLink.evaluate(a => a.href));
+  await page.getByRole("link",{name:"View published review ↗"}).waitFor();
+  assert.equal(await archive.getAttribute("aria-pressed"), "true");
+  await page.goto(issueUrl);
   await linked.getByRole("button",{name:"Unlink review for PR #72"}).click();
   await receipt.waitFor({state:"detached"});
   assert.equal(op({command:"view",id:approval.id}).review.stage, "published");
+  // A long archive must not displace pending work or invalidate an old issue link.
+  const seed = spawnSync("sqlite3", [env.HEY_BOSS_ISSUE_DB], {encoding:"utf8", input:
+    `WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<205)
+     INSERT INTO pr_code_reviews(id,project_id,number,head,title,stage,verdict,body,version,created_at,updated_at)
+     SELECT -i,project_id,1000+i,head,'Archived review '||i,'discarded',verdict,'',1,created_at,updated_at+i FROM n,pr_code_reviews WHERE id=${approval.id};`});
+  assert.equal(seed.status, 0, seed.stderr);
+  await page.goto(url);
+  await draft.waitFor();
+  assert.equal(await page.locator(".review-index-row").count(), 1);
+  await archive.click();
+  await page.getByText("Archived review 205", {exact:true}).waitFor();
+  assert.equal(await page.locator(".review-index-row").count(), 50);
+  await page.getByRole("button", {name:"Show more reviews"}).click();
+  await page.getByText("Archived review 155", {exact:true}).waitFor();
+  assert.equal(await page.locator(".review-index-row").count(), 100);
+  await page.goto(url + "&review=" + approval.id);
+  await page.getByRole("link",{name:"View published review ↗"}).waitFor();
+  assert.equal(await archive.getAttribute("aria-pressed"), "true");
   assert.deepEqual(errors, []);
   console.log(
     "Code Reviews: disabled, empty, approval, changes requested, both edits, diff anchors, stale publication and 8 visual variants passed.",

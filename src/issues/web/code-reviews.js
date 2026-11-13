@@ -33,6 +33,8 @@
     serial = 0,
     busy = false,
     editing = false,
+    archived = false,
+    nextOffset = null,
     rows = [];
   const error = (m) => {
     const box = $("#reviews-error");
@@ -63,21 +65,27 @@
     },
   });
   const leave = () => !editing || confirm("Discard your unsaved edit?");
-  async function load(id) {
+  async function load(id, mode) {
     const seq = ++serial;
     error("");
     try {
-      const v = await action({ command: "list" });
+      const detail = id ? (await action({ command: "view", id: Number(id) })).review : null;
       if (seq !== serial) return;
-      rows = v.reviews;
-      const target = rows.find((x) => x.id == id);
-      let detail = null;
-      if (id) {
-        detail = (await action({ command: "view", id: Number(id) })).review;
-        if (!target) rows = [detail, ...rows];
+      const archive = detail ? ["published", "outdated", "discarded"].includes(detail.stage) : archived;
+      if (mode !== "expand" || archive !== archived) {
+        const append = mode === "more" && archived === archive;
+        const v = await action({ command: "list", archived: archive, offset: append ? nextOffset : 0 });
+        if (seq !== serial) return;
+        nextOffset = v.next_offset;
+        rows = append ? [...rows, ...v.reviews.filter(r => !rows.some(x => x.id === r.id))] : v.reviews;
       }
-      if (seq !== serial) return;
+      archived = archive;
+      if (detail && !rows.some(r => r.id === detail.id)) rows.unshift(detail);
       review = detail;
+      const hash = new URLSearchParams(location.hash.slice(1));
+      if (archived) hash.set("view", "archive");
+      else hash.delete("view");
+      history.replaceState(null, "", "#" + hash);
       editing = false;
       render();
     } catch (err) {
@@ -227,7 +235,10 @@
     pane.setAttribute("aria-label", "Selected review");
     list.replaceChildren();
     list.classList.toggle("merge-rows", rows.length > 0);
-    $("#reviews-count").textContent = rows.length;
+    $("#reviews-count").textContent = rows.length + (nextOffset != null ? "+" : "");
+    $("#reviews-pending").setAttribute("aria-pressed", String(!archived));
+    $("#reviews-archive").setAttribute("aria-pressed", String(archived));
+    $("#reviews-more").hidden = nextOffset == null;
     const repo = /^github\.com\/[\w.-]+\/[\w.-]+$/i.test(project) && project;
     for (const r of rows) {
       const selected = r.id === review?.id;
@@ -242,7 +253,7 @@
             review = null;
             editing = false;
             render();
-          } else await load(r.id);
+          } else await load(r.id, "expand");
           list.querySelector('[data-review-id="' + r.id + '"]')
             ?.focus({ preventScroll: true });
         }
@@ -286,7 +297,7 @@
     if (!review) {
       if (!rows.length)
         list.append(
-          e("p", "No reviews yet. Submitted PR reviews for this project will appear here.", "review-empty"),
+          e("p", archived ? "No archived reviews." : "No pending reviews.", "review-empty"),
         );
       return;
     }
@@ -396,6 +407,9 @@
     serial++;
     review = null;
     rows = [];
+    archived = new URLSearchParams(location.hash.slice(1)).get("view") === "archive";
+    nextOffset = null;
+    $("#reviews-status").textContent = "";
     editing = false;
     render();
     host =
@@ -414,6 +428,19 @@
     }
     await load(new URLSearchParams(location.hash.slice(1)).get("review"));
   }
+  for (const [id, archive] of [["#reviews-pending", false], ["#reviews-archive", true]]) {
+    $(id).onclick = () => {
+      if (busy || archived === archive || !leave()) return;
+      const hash = new URLSearchParams(location.hash.slice(1));
+      hash.delete("review");
+      if (archive) hash.set("view", "archive");
+      else hash.delete("view");
+      location.hash = hash;
+    };
+  }
+  $("#reviews-more").onclick = () => {
+    if (!busy && leave()) load(review?.id, "more");
+  };
   $("#reviews-refresh").onclick = () => {
     if (!busy && leave()) load(review?.id);
   };

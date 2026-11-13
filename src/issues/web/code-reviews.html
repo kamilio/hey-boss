@@ -23,8 +23,13 @@
         <h1>Code Reviews <span class="heading-count" id="reviews-count"></span></h1>
         <button id="reviews-refresh" class="button" type="button">Refresh</button>
       </header>
+      <div class="review-views" role="group" aria-label="Review queue">
+        <button id="reviews-pending" type="button" aria-pressed="true">Pending</button>
+        <button id="reviews-archive" type="button" aria-pressed="false">Archive</button>
+      </div>
       <div id="reviews-error" role="alert" hidden></div>
       <div id="reviews-list" aria-label="Review queue"></div>
+      <button type="button" id="reviews-more" class="button" hidden>Show more reviews</button>
       <p id="reviews-status" role="status" aria-live="polite"></p>
     </main>
   </body>
