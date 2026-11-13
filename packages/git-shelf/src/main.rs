@@ -144,6 +144,17 @@ fn run() -> Result<()> {
         Some(Action::List) | None => {
             let rows = entries()?;
             println!("Checkout: {}", checkout::tip()?);
+            let active = checkout::active(&checkout::head().unwrap_or_default())?;
+            if !active.is_empty() {
+                println!("Active:");
+                for e in active {
+                    println!(
+                        "{}  {}",
+                        &field(&e, "sha")?[..10],
+                        clean(field(&e, "title")?)
+                    );
+                }
+            }
             if !rows.is_empty() {
                 println!("Shelf:");
             }

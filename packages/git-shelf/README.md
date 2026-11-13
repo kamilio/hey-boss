@@ -8,9 +8,12 @@ build and verify the optional binary before installing it alongside the backend,
 and restore the previous binary if publication fails. Machines without that file
 skip the client. Remove the marker to stop updating it.
 
-Run `g` in a checkout to browse the project shelf. All its worktrees see the
-same commits. Enter opens the selected review; use the arrows to select a diff
-line and Ctrl+C to comment. Narrow terminals show one pane at a time.
+Run `g` or `g list` to see active commits in this checkout and saved commits
+shared by the project's worktrees. Active commits are listed oldest first,
+starting after the remote base. In the TUI, select an active commit and press
+Ctrl+S to shelve it. Newer commits are replayed in order; if that conflicts,
+the branch stays unchanged. Enter opens the selected diff. On a saved commit,
+use the arrows to select a line and Ctrl+C to comment.
 
 - `g stash-commit SHA --task 123`: save the current branch tip, attach the task, and remove
   the tip only after verifying that the stored patch reproduces its Git tree.
