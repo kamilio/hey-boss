@@ -5338,8 +5338,9 @@ func auditConversation(_ root: String) {
     let folder = URL(fileURLWithPath: root)
     try! Data(#"{"messages":[{"text":"Read my diagram","speaker":"You"}]}"#.utf8).write(to: folder.appendingPathComponent("current.json"))
     let ui = VoiceConversation(cli: ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL: folder.appendingPathComponent("current.json"))
-    // Only fixture windows are shareable for the screenshot audit.
-    ui.caption.sharingType = .readOnly; ui.caption.imagePanel.sharingType = .readOnly
+    for window in [ui.window as NSWindow, ui.caption, ui.caption.imagePanel] {
+        precondition(window.sharingType != .none, "Conversation windows must appear in screenshots")
+    }
     let fixtures = try! JSONSerialization.jsonObject(with: Data(contentsOf: folder.appendingPathComponent("media.json"))) as! [[String: Any]]
     let original = ui.window.frame
     ui.append("Can you show me how it works?", from: "You")
@@ -5376,6 +5377,11 @@ func auditConversation(_ root: String) {
         }
         await snapshot("media-" + String(i + 1))
         let caption = ui.caption, panel = caption.imagePanel
+        if item["kind"] as? String == "Mermaid" {
+            for view in [ui.media, caption.media] {
+                precondition(view.viewport.documentVisibleRect.contains(view.picture.frame), "Show the entire Mermaid diagram on first display")
+            }
+        }
         let text = ["Follow the request from your app to the API server.", "The agent shows the diagram before replying.", "This is the desktop app.", "Building takes the largest share of time.", "It starts with a seed.", "Each release moves through these stages."][i]
         let word = ["request", "diagram", "desktop", "largest", "seed", "stages"][i]
         caption.display(text, word: (text as NSString).range(of: word))
