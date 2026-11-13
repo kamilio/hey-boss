@@ -212,7 +212,10 @@
         await load(review?.id);
         $("#reviews-status").textContent = "Published to GitHub.";
       } catch (err) {
-        if (seq === serial) error(err.message);
+        if (seq === serial) {
+          await load(review?.id);
+          error(err.message);
+        }
       } finally {
         busy = false;
         publish.disabled = false;
@@ -229,6 +232,7 @@
     list.replaceChildren();
     list.classList.toggle("merge-rows", rows.length > 0);
     $("#reviews-count").textContent = rows.length;
+    const repo = /^github\.com\/[\w.-]+\/[\w.-]+$/i.test(project) && project;
     for (const r of rows) {
       const selected = r.id === review?.id;
       const b = btn("", async () => {
@@ -247,14 +251,17 @@
             ?.focus({ preventScroll: true });
         }
       });
-      b.className = "merge-row review-row";
+      b.className = "review-toggle";
+      b.setAttribute("aria-label", (selected ? "Collapse" : "Expand") + " review for PR #" + r.number);
       b.dataset.reviewId = r.id;
       b.setAttribute("aria-expanded", String(selected));
       const icon = e("span", undefined, "review-pr-icon");
       icon.innerHTML = HeyBossUI.icon("pull-request");
       const main = e("span", undefined, "merge-main");
+      const title = repo ? link(r.title, "https://" + repo + "/pull/" + r.number) : e("strong", r.title);
+      title.className = "merge-title";
       main.append(
-        e("strong", r.title, "merge-title"),
+        title,
         e("span", "#" + r.number + " · " + stage[r.stage], "merge-meta"),
       );
       const count = r.comments?.length ?? r.comment_count;
@@ -267,9 +274,11 @@
       }
       const arrow = e("span", undefined, "review-chevron");
       arrow.setAttribute("aria-hidden", "true");
-      b.append(icon, main, arrow);
+      b.append(arrow);
       const row = e("div", undefined, "review-index-row");
-      row.append(b);
+      const summary = e("div", undefined, "merge-row review-row");
+      summary.append(icon, main, b);
+      row.append(summary);
       if (!selected && r.stage === "submitted") {
         const publish = publishButton(r);
         publish.classList.add("small", "review-quick-publish");
@@ -286,10 +295,7 @@
       return;
     }
     const r = review;
-    const repo = project.match(/^github\.com\/([\w.-]+\/[\w.-]+)$/i)?.[1];
-    const url = repo
-      ? "https://github.com/" + repo + "/pull/" + r.number
-      : null;
+    const url = repo ? "https://" + repo + "/pull/" + r.number : null;
 
     const meta = e("div", undefined, "review-meta");
     meta.append(
@@ -366,6 +372,28 @@
       footer.append(
         e("p", "Check GitHub for the publication receipt before retrying."),
       );
+    if (r.stage === "outdated")
+      footer.append(e("small", "Review the new commit before publishing."));
+    if (["draft", "submitted", "outdated"].includes(r.stage)) {
+      const discard = btn("Discard review", async () => {
+        if (busy || !confirm("Discard this review? It will be removed from the queue without publishing.")) return;
+        busy = true;
+        const seq = serial;
+        try {
+          await action({ command: "discard", id: r.id, version: r.version });
+          if (seq !== serial) return;
+          const hash = new URLSearchParams(location.hash.slice(1));
+          hash.delete("review");
+          history.replaceState(null, "", "#" + hash);
+          await load();
+          $("#reviews-status").textContent = "Review discarded.";
+        } catch (err) {
+          if (seq === serial) error(err.message);
+        } finally { busy = false; }
+      });
+      discard.classList.add("review-discard");
+      footer.append(discard);
+    }
     pane.append(footer);
   }
   async function navigate() {

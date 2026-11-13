@@ -8,6 +8,10 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+struct InvalidReview(String);
+
 pub struct Target {
     pub repo: String,
     pub enabled: Vec<String>,
@@ -186,11 +190,16 @@ impl Target {
         let v: Value = serde_json::from_slice(&out.stdout)
             .map_err(|_| "Could not read local review database")?;
         if v["ok"] != true || !out.status.success() {
-            return Err(v["error"]["message"]
+            let reason = v["error"]["message"]
                 .as_str()
-                .unwrap_or("Local review write failed")
-                .to_owned()
-                .into());
+                .unwrap_or("Local review write failed");
+            if matches!(
+                v["error"]["code"].as_str(),
+                Some("invalid_input" | "conflict" | "not_found" | "identity_unavailable")
+            ) {
+                return Err(InvalidReview(reason.into()).into());
+            }
+            return Err(reason.to_owned().into());
         }
         Ok(v)
     }
@@ -234,18 +243,19 @@ impl Target {
             return Ok(None);
         }
         if !format!("{}/{}", parts[1], parts[2]).eq_ignore_ascii_case(&self.repo) {
-            return Err("Review repository changed during command".into());
+            return Err(InvalidReview("Review repository changed during command".into()).into());
         }
         let n = parts[4].parse::<u64>()?;
         if method == "GET" && parts[5] == "reviews" && parts.len() >= 7 {
             let id = parts[6].parse::<i64>()?;
             let local = self.store(&json!({"command":"for_pr","number":n}))?;
-            if let Some(r) = local["reviews"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|r| r["id"] == id && r["stage"] != "published")
-            {
+            if let Some(r) = local["reviews"].as_array().into_iter().flatten().find(|r| {
+                r["id"] == id
+                    && matches!(
+                        r["stage"].as_str(),
+                        Some("draft" | "submitted" | "publishing")
+                    )
+            }) {
                 return Ok(Some(if parts.len() == 7 {
                     review_json(r)
                 } else if parts.get(7) == Some(&"comments") {
@@ -258,7 +268,7 @@ impl Target {
                             .collect(),
                     )
                 } else {
-                    return Err("Unknown local review endpoint".into());
+                    return Err(InvalidReview("Unknown local review endpoint".into()).into());
                 }));
             }
         }
@@ -270,7 +280,7 @@ impl Target {
             let v = self.store(&json!({"command":"view","id":id}))?;
             let r = &v["review"];
             if r["number"] != n || r["stage"] != "draft" {
-                return Err("No matching pending review".into());
+                return Err(InvalidReview("No matching pending review".into()).into());
             }
             return self.rest(
                 "POST",
@@ -279,18 +289,21 @@ impl Target {
             );
         }
         if method != "POST" || parts.len() != 6 {
-            return Err("This review write is not supported by the local review store".into());
+            return Err(InvalidReview(
+                "This review write is not supported by the local review store".into(),
+            )
+            .into());
         }
         if parts[5] == "comments" && input["commit_id"].as_str().is_none() {
-            return Err("Inline review comments require commit_id".into());
+            return Err(InvalidReview("Inline review comments require commit_id".into()).into());
         }
         let pr = metadata(&self.repo, n)?;
-        if pr["state"] != "open" {
-            return Err("Pull request is closed".into());
-        }
         let head = pr["head"]["sha"].as_str().ok_or("Missing PR head")?;
         if input["commit_id"].as_str().is_some_and(|s| s != head) {
-            return Err("PR head changed; refresh the diff before writing comments".into());
+            return Err(InvalidReview(
+                "PR head changed; review the latest diff before submitting".into(),
+            )
+            .into());
         }
         let mut comments = if parts[5] == "comments" {
             vec![input.clone()]
@@ -321,17 +334,23 @@ impl Target {
                     .flatten()
                     .find(|f| f["filename"] == c["path"])
                     .and_then(|f| f["patch"].as_str())
-                    .ok_or("File has no reviewable diff")?;
+                    .ok_or_else(|| InvalidReview("File has no reviewable diff".into()))?;
                 c["snippet"] = json!(snippet(
                     patch,
-                    c["side"].as_str().ok_or("Invalid side")?,
-                    c["line"].as_u64().ok_or("Expected diff line")?
+                    c["side"]
+                        .as_str()
+                        .ok_or_else(|| InvalidReview("Invalid side".into()))?,
+                    c["line"]
+                        .as_u64()
+                        .ok_or_else(|| InvalidReview("Expected diff line".into()))?
                 )?);
-                let obj = c.as_object_mut().ok_or("Invalid inline comment")?;
+                let obj = c
+                    .as_object_mut()
+                    .ok_or_else(|| InvalidReview("Invalid inline comment".into()))?;
                 obj.remove("commit_id");
             }
             if metadata(&self.repo, n)?["head"]["sha"] != head {
-                return Err("PR changed while reading the diff".into());
+                return Err(InvalidReview("PR changed while reading the diff".into()).into());
             }
         }
         let r=self.store(&json!({"command":"record","number":n,"title":pr["title"],"head":head,"comments":comments,"verdict":if parts[5]=="reviews"{input["event"].clone()}else{Value::Null},"body":if parts[5]=="reviews"{input["body"].clone()}else{Value::Null}}))?;
@@ -398,7 +417,7 @@ fn snippet(patch: &str, side: &str, line: u64) -> Result<String> {
         old += left as u64;
         new += right as u64
     }
-    Err("Line is outside the PR diff".into())
+    Err(InvalidReview("Line is outside the PR diff".into()).into())
 }
 
 use axum::{
@@ -454,7 +473,16 @@ pub async fn relay(
         let i = input.clone();
         let decision = tokio::task::spawn_blocking(move || crate::review_graphql::handle(&t, &i))
             .await
-            .map_err(|_| "GraphQL review inspection failed")??;
+            .map_err(|_| "GraphQL review inspection failed")?;
+        let decision = match decision {
+            Ok(d) => d,
+            Err(reason) => {
+                return Ok(make_json(
+                    json!({"errors":[{"message":format!("Code Reviews: {reason}")}]}),
+                    200,
+                ));
+            }
+        };
         match decision {
             crate::review_graphql::Decision::Local(v) => return Ok(make_json(v, 200)),
             d => {
@@ -468,12 +496,23 @@ pub async fn relay(
         let t = target.clone();
         let p = path.clone();
         let v = tokio::task::spawn_blocking(move || {
-            t.rest(&method, &p, &input).map_err(|e| e.to_string())
+            t.rest(&method, &p, &input).map_err(|e| {
+                let status = if e.is::<InvalidReview>() { 422 } else { 502 };
+                (status, e.to_string())
+            })
         })
         .await
-        .map_err(|_| "Review storage failed")??
-        .ok_or("Unsupported review operation; nothing was sent to GitHub")?;
-        return Ok(make_json(v, 201));
+        .map_err(|_| "Review storage failed")?;
+        return Ok(match v {
+            Ok(Some(v)) => make_json(v, 201),
+            Ok(None) => make_json(
+                json!({"message":"Code Reviews: unsupported review operation; nothing was sent to GitHub"}),
+                422,
+            ),
+            Err((status, reason)) => {
+                make_json(json!({"message":format!("Code Reviews: {reason}")}), status)
+            }
+        });
     }
     let scheme = if socket_upstream { "http" } else { "https" };
     let url = format!(
@@ -565,7 +604,12 @@ pub async fn relay(
                     .as_array()
                     .into_iter()
                     .flatten()
-                    .filter(|r| r["stage"] != "published")
+                    .filter(|r| {
+                        matches!(
+                            r["stage"].as_str(),
+                            Some("draft" | "submitted" | "publishing")
+                        )
+                    })
                 {
                     if path == "/graphql" {
                         if let Some(nodes) = v

@@ -109,10 +109,12 @@ try {
   const indexRow = page.getByRole("button", { name: /#71/, expanded: false });
   await indexRow.waitFor();
   assert.equal(await page.locator("#reviews-detail").count(), 0);
-  assert.ok((await indexRow.textContent()).includes(first.body));
-  assert.ok((await indexRow.textContent()).includes(first.comments[0].body));
-  assert.ok((await indexRow.textContent()).includes("1 inline comment"));
+  assert.ok((await indexRow.locator("..").textContent()).includes(first.body));
+  assert.ok((await indexRow.locator("..").textContent()).includes(first.comments[0].body));
+  assert.ok((await indexRow.locator("..").textContent()).includes("1 inline comment"));
   const item = page.locator(".review-index-row").filter({ has: indexRow });
+  assert.equal(await item.getByRole("link", {name:first.title}).getAttribute("href"), "https://github.com/example/time/pull/71");
+  assert.equal(await item.getByRole("link", {name:first.title}).getAttribute("target"), "_blank");
   assert.deepEqual(await item.locator("button:not([aria-expanded])").allTextContents(), ["Publish requested changes"]);
   const draft = page.locator(".review-index-row").filter({hasText:"#73"});
   assert.ok((await draft.textContent()).includes(first.comments[0].body));
@@ -178,12 +180,10 @@ try {
       );
       assert.ok(
         await page
-          .locator("#reviews-list .review-row")
-          .first()
+          .locator("#reviews-list")
           .evaluate(
-            (el) =>
-              el.getBoundingClientRect().right <=
-              el.closest("#reviews-list").getBoundingClientRect().right + 1,
+            (list) => [...list.querySelectorAll(".review-row")].every(row =>
+              row.getBoundingClientRect().right <= list.getBoundingClientRect().right + 1),
           ),
         "Queue rows must fit inside the list",
       );
@@ -196,6 +196,7 @@ try {
   let requested = null;
   await page.route("**/api/code-reviews/publish", (r) => {
     requested = r.request().postDataJSON();
+    op({command:"mark_outdated", id:saved.id, version:edited.version});
     return r.fulfill({
       status: 409,
       json: {
@@ -215,8 +216,12 @@ try {
     version: edited.version,
     digest: edited.digest,
   });
-  assert.equal(op({ command: "view", id: saved.id }).review.stage, "submitted");
-  await row.click();
+  assert.equal(op({ command: "view", id: saved.id }).review.stage, "outdated");
+  assert.equal(await page.getByRole("button",{name:"Publish requested changes"}).count(), 0);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button",{name:"Discard review"}).click();
+  await page.getByText("Review discarded.", {exact:true}).waitFor();
+  assert.equal(await row.count(), 0);
   const approve = page.getByRole("button", { name: "Approve and publish" });
   const latest = op({ command:"edit", id:approval.id, version:approval.version,
     comment:null, body:"Updated approval text." }).review;

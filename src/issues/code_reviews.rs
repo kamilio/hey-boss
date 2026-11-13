@@ -52,6 +52,14 @@ pub enum Operation {
         comment: Option<i64>,
         body: String,
     },
+    Discard {
+        id: i64,
+        version: i64,
+    },
+    MarkOutdated {
+        id: i64,
+        version: i64,
+    },
     ClaimPublication {
         id: i64,
         version: i64,
@@ -106,7 +114,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             let sql = format!("SELECT r.*,
                 (SELECT count(*) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id),
                 (SELECT substr(body,1,240) FROM pr_code_comments WHERE project_id=?1 AND review_id=r.id ORDER BY ordinal,id LIMIT 1)
-                FROM ({SELECT} WHERE project_id=?1 ORDER BY updated_at DESC,id DESC LIMIT 200) r
+                FROM ({SELECT} WHERE project_id=?1 AND stage!='discarded' ORDER BY updated_at DESC,id DESC LIMIT 200) r
                 ORDER BY r.updated_at DESC,r.id DESC");
             let reviews = db.query_collect(&sql, [&p.id], |r| {
                 let mut item = row(r)?;
@@ -117,7 +125,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             return Ok(json!({"ok":true,"reviews":reviews}));
         }
         Operation::ForPr { number } => {
-            let ids=db.query_collect("SELECT id FROM pr_code_reviews WHERE project_id=?1 AND number=?2 ORDER BY updated_at DESC,id DESC",params![p.id,number],|r|r.get::<_,i64>(0))?;
+            let ids=db.query_collect("SELECT id FROM pr_code_reviews WHERE project_id=?1 AND number=?2 AND stage!='discarded' ORDER BY updated_at DESC,id DESC",params![p.id,number],|r|r.get::<_,i64>(0))?;
             return Ok(
                 json!({"ok":true,"reviews":ids.into_iter().map(|id|view(db,&p.id,id)).collect::<Result<Vec<_>>>()?}),
             );
@@ -156,6 +164,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                     return Err(Error::invalid("Invalid inline review comment"));
                 }
             }
+            db.execute("UPDATE pr_code_reviews SET stage='outdated',version=version+1,updated_at=?3 WHERE project_id=?1 AND number=?2 AND head!=?4 AND stage='submitted'",params![p.id,number,now,head])?;
             let previous:Option<(i64,String,String)>=db.query_row("SELECT id,head,stage FROM pr_code_reviews WHERE project_id=?1 AND number=?2 AND stage IN ('draft','publishing') ORDER BY updated_at DESC LIMIT 1",params![p.id,number],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
             let mut reuse = None;
             if let Some((id, sha, stage)) = previous {
@@ -227,6 +236,14 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             }
             if db.execute("UPDATE pr_code_reviews SET body=CASE WHEN ?5 IS NULL THEN ?4 ELSE body END,version=version+1,updated_at=?6 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage IN ('draft','submitted')",params![p.id,id,version,body,comment,now])?!=1{return Err(stale())}
             if let Some(c)=comment && db.execute("UPDATE pr_code_comments SET body=?4 WHERE project_id=?1 AND review_id=?2 AND id=?3",params![p.id,id,c,body])?!=1{return Err(Error::invalid("Comment not found"))}
+            *id
+        }
+        Operation::Discard { id, version } => {
+            if db.execute("UPDATE pr_code_reviews SET stage='discarded',version=version+1,updated_at=?4 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage IN ('draft','submitted','outdated')", params![p.id,id,version,now])? != 1 { return Err(stale()); }
+            *id
+        }
+        Operation::MarkOutdated { id, version } => {
+            if db.execute("UPDATE pr_code_reviews SET stage='outdated',version=version+1,updated_at=?4 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage='submitted'", params![p.id,id,version,now])? != 1 { return Err(stale()); }
             *id
         }
         Operation::ClaimPublication {

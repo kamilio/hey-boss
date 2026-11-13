@@ -66,3 +66,10 @@
   .review-index-row { display: block; }
   .review-quick-publish { margin: 0 14px 14px 42px; }
 }
+.review-toggle { display: grid; place-items: center; flex: none; width: 36px; height: 36px; padding: 0; background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
+.review-toggle .review-chevron { margin: 0; }
+.review-toggle:hover { background: var(--hover); }
+.review-row .merge-title { color: var(--text); text-decoration: none; }
+.review-row a.merge-title:hover { color: var(--accent); text-decoration: underline; }
+.review-row:has([aria-expanded="true"]) { background: var(--hover); }
+.review-discard { margin-left: auto; }

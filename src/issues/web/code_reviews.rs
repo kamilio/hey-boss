@@ -44,17 +44,23 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
     // Read the person's stored login; never use a worker's installation token.
     let token = Command::new("gh")
         .args(["auth", "token", "--hostname", "github.com"])
+        .env("HEY_GH_NATIVE_CALL", "1")
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN")
         .env_remove("GH_ENTERPRISE_TOKEN")
         .env_remove("GITHUB_ENTERPRISE_TOKEN")
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
         .output()?;
     if !token.status.success() {
-        return Err(Error::invalid(
-            "Sign in to GitHub with your personal account to publish",
-        ));
+        let reason = String::from_utf8_lossy(&token.stderr);
+        return Err(Error::invalid(format!(
+            "Code Reviews could not read the personal github.com credential: {}",
+            if reason.trim().is_empty() {
+                "gh auth token failed; check gh auth status on the server"
+            } else {
+                reason.trim()
+            }
+        )));
     }
     let token = std::str::from_utf8(&token.stdout)
         .map_err(|_| Error::invalid("Invalid GitHub credential"))?
@@ -96,13 +102,24 @@ fn publish_with(
         .build()
         .map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
     let get = |url: &str| -> Result<Value> {
-        client
+        let response = client
             .get(url)
             .bearer_auth(token)
             .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.json())
-            .map_err(|_| Error::invalid("Could not verify the PR with your personal GitHub login"))
+            .map_err(|_| Error::invalid("Could not reach GitHub to verify this review."))?;
+        let status = response.status();
+        let body = response.json::<Value>().map_err(|_| {
+            Error::invalid(format!(
+                "GitHub returned an unreadable response ({status})."
+            ))
+        })?;
+        if !status.is_success() {
+            return Err(Error::invalid(format!(
+                "GitHub could not verify this review ({status}): {}",
+                body["message"].as_str().unwrap_or("No reason provided")
+            )));
+        }
+        Ok(body)
     };
     let user = get(&format!("{api}/user"))?;
     if user["type"] != "User" {
@@ -112,9 +129,13 @@ fn publish_with(
     }
     let url = format!("{api}/repos/{repo}/pulls/{}", review["number"]);
     let pr = get(&url)?;
-    if pr["state"] != "open" || pr["head"]["sha"] != review["head"] {
+    let head = pr["head"]["sha"].as_str().ok_or_else(|| {
+        Error::invalid("GitHub did not return a PR head. Try again before publishing.")
+    })?;
+    if review["head"] != head {
+        op(Review::MarkOutdated { id, version })?;
         return Err(Error::conflict(
-            "The PR closed or its head changed. Review the latest revision before publishing.",
+            "The PR head changed. Nothing was published. Review the new commit before submitting again.",
         ));
     }
     if user["id"] == pr["user"]["id"] && review["verdict"] != "COMMENT" {
@@ -151,9 +172,11 @@ fn publish_with(
             id,
             version: version + 1,
         })?;
+        let status = response.status();
+        let body = response.json::<Value>().unwrap_or_default();
+        let reason = body["message"].as_str().unwrap_or("No reason provided");
         return Err(Error::invalid(format!(
-            "GitHub declined this review ({}). Your edits are saved.",
-            response.status()
+            "GitHub declined this review ({status}): {reason}. Your edits are saved."
         )));
     }
     let receipt = response
@@ -184,7 +207,8 @@ mod tests {
         for (state, own, head, status) in [
             ("open", false, "abc", 201),
             ("open", false, "new", 0),
-            ("closed", false, "abc", 0),
+            ("closed", false, "abc", 201),
+            ("closed", false, "new", 0),
             ("open", true, "abc", 0),
             ("open", false, "abc", 422),
             ("open", false, "abc", 500),
@@ -222,7 +246,11 @@ mod tests {
                                 json!({"commit_id":"abc","event":"REQUEST_CHANGES","body":"Edited summary","comments":[{"path":"a.rs","line":4,"side":"RIGHT","body":"Edited inline"}]})
                             );
                             code = status;
-                            json!({"html_url":"https://github.com/o/r/pull/7#pullrequestreview-11"})
+                            if status == 422 {
+                                json!({"message":"Review is not permitted"})
+                            } else {
+                                json!({"html_url":"https://github.com/o/r/pull/7#pullrequestreview-11"})
+                            }
                         }
                     };
                     req.respond(
@@ -236,6 +264,10 @@ mod tests {
                 Review::View { .. } => Ok(
                     json!({"review":{"stage":stage.get(),"digest":"fixture","version":2,"number":7,"head":"abc","verdict":"REQUEST_CHANGES","body":"Edited summary","comments":[{"anchor":{"path":"a.rs","line":4,"side":"RIGHT"},"body":"Edited inline"}]}}),
                 ),
+                Review::MarkOutdated { .. } => {
+                    stage.set("outdated");
+                    Ok(json!({}))
+                }
                 Review::ClaimPublication { .. } => {
                     assert_eq!(stage.replace("publishing"), "submitted");
                     Ok(json!({}))
@@ -261,9 +293,17 @@ mod tests {
                 match status {
                     201 => "published",
                     500 => "publishing",
+                    _ if head != "abc" => "outdated",
                     _ => "submitted",
                 }
             );
+            if status == 422 {
+                assert!(
+                    r.unwrap_err()
+                        .to_string()
+                        .contains("Review is not permitted")
+                );
+            }
             if status == 201 {
                 assert!(
                     publish_with(&call, "o/r", 9, 2, "fixture", &origin, "fixture-personal")

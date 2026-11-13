@@ -68,7 +68,7 @@ fn serve(server: &Server, traffic: &Mutex<Traffic>) {
                 }
             }
             p if p.ends_with("/pulls/7") => {
-                json!({"state":"open","title":"Timezone fix","head":{"sha":SHA}})
+                json!({"state":"closed","merged":true,"title":"Timezone fix","head":{"sha":SHA}})
             }
             _ => json!({}),
         };
@@ -293,27 +293,38 @@ fn main() {
         "mutation($input:SubmitPullRequestReviewInput!){submitPullRequestReview(input:$input){pullRequestReview{state}}}",
         json!({"pullRequestReviewId":draft["id"],"event":"APPROVE","body":"The boundary is covered."}),
     );
-    assert!(
-        !run(
-            &gh,
-            &[
-                "api",
-                comments,
-                "-f",
-                "path=time.rs",
-                "-F",
-                "line=300",
-                "-f",
-                &format!("commit_id={SHA}"),
-                "-f",
-                "body=Bad anchor"
-            ],
-            "",
-            "github.com"
-        )
-        .status
-        .success()
+    let rejected = run(
+        &gh,
+        &[
+            "api",
+            comments,
+            "-f",
+            "path=time.rs",
+            "-F",
+            "line=300",
+            "-f",
+            &format!("commit_id={SHA}"),
+            "-f",
+            "body=Bad anchor",
+        ],
+        "",
+        "github.com",
     );
+    assert!(!rejected.status.success());
+    let error = String::from_utf8_lossy(&rejected.stderr);
+    assert!(
+        error.contains("Code Reviews: Line is outside the PR diff") && error.contains("422"),
+        "{error}"
+    );
+    let stale = run(
+        &gh,
+        &["api", "graphql", "--input", "-"],
+        &json!({"query":"mutation($input:AddPullRequestReviewInput!){addPullRequestReview(input:$input){pullRequestReview{state}}}", "variables":{"input":{"pullRequestId":"PR_fixture","commitOID":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","event":"APPROVE"}}}).to_string(),
+        "github.com",
+    );
+    assert!(!stale.status.success());
+    let error = String::from_utf8_lossy(&stale.stderr);
+    assert!(error.contains("Code Reviews: PR head changed"), "{error}");
     let view = api(
         &["pr", "view", "7", "-R", REPO, "--json", "number,reviews"],
         "",
