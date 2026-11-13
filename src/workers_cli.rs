@@ -24,6 +24,11 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
+    /// Run one eligible issue in this checkout with Codex and show its live transcript.
+    Run {
+        #[arg(value_parser = clap::value_parser!(i64).range(1..), conflicts_with = "json")]
+        number: i64,
+    },
     /// Watch saved workers without starting or resuming them.
     Watch {
         /// Stop after this many snapshots; omit for the live terminal dashboard.
@@ -57,6 +62,9 @@ enum Action {
     Status,
 }
 pub fn run(options: &Options) -> issues::Result<()> {
+    if let Some(Action::Run { number }) = options.action {
+        return issues::worker::run_foreground(number);
+    }
     if let Some(Action::Add {
         provider,
         id,

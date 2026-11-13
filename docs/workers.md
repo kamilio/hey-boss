@@ -21,6 +21,12 @@ edits may reformat the file. Stopped workers are collapsed by default. The confi
 file path is shown below the workers; edit that file in your own editor for YAML changes.
 The local web app and paired web app edit the same supervisor file.
 
+From a project checkout, run `hey-boss workers run 42` to execute just issue #42
+with Codex in the current directory. The terminal shows the expanded prompt, agent
+messages, tool calls, command output and exit codes, then the recorded outcome.
+The usual pickup checks apply. Ctrl-C stops the attempt; closing or blocking the
+issue has the same effect as in a background run. Pipe to `tee` to keep a transcript.
+
 ## One configuration
 
 The supervisor owns `~/.hey-boss/fleet.yaml`. Machine keys are SSH host names;

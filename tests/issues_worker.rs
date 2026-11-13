@@ -3220,3 +3220,55 @@ esac
         "0123456789abcdef"
     );
 }
+
+#[test]
+fn foreground_runs_only_the_requested_issue_and_prints_the_exchange() {
+    let f = Fixture::new("completed");
+    f.setup(&[]);
+    f.cli(&[
+        "create",
+        "--title",
+        "Second dummy",
+        "--body",
+        "A distinctive command result",
+    ]);
+    fs::write(
+        f.root.join(".hey-boss"),
+        r#"{"id":"named:Worker fixture","name":"Worker fixture"}"#,
+    )
+    .unwrap();
+    let run = |number: &str| {
+        f.process(env!("CARGO_BIN_EXE_hey-boss"))
+            .current_dir(&f.root)
+            .env("HEY_BOSS_ISSUE_DB", &f.db)
+            .env("HEY_BOSS_TEST_CLI", f.notification_cli())
+            .env("HEY_BOSS_CODEX", worker_fixtures::binary("codex-worker"))
+            .args(["workers", "run", number])
+            .output()
+            .unwrap()
+    };
+    let output = run("2");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    let turn = f
+        .transcript()
+        .into_iter()
+        .find(|r| r["method"] == "turn/start")
+        .unwrap();
+    for expected in [
+        turn["params"]["input"][0]["text"].as_str().unwrap(),
+        "$ hey-boss issue view 2",
+        "A distinctive command result",
+        "exit 0",
+        "Implemented fixture. Meaningful checks passed.",
+    ] {
+        assert!(text.contains(expected), "{expected:?} missing from {text}");
+    }
+    assert!(!run("2").status.success());
+    assert_eq!(f.cli(&["view", "1"])["issue"]["agent_launch_count"], 0);
+    assert_eq!(f.cli(&["view", "2"])["issue"]["state"], "closed");
+}

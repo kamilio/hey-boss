@@ -1200,7 +1200,6 @@ pub(super) fn reserve(
     let owner_pid = std::process::id();
     let owner_start = crate::agents::process_identity(owner_pid)
         .ok_or_else(|| Error::new("worker_error", "Cannot identify worker process"))?;
-    let host = crate::issues::identity::host();
     let tx = store
         .db
         .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1226,79 +1225,17 @@ pub(super) fn reserve(
                 continue;
             }
             let config = prepared.config.clone();
-            let actor = Actor {
-                id: format!("reservation:{id}"),
-                kind: "worker".into(),
-                session_id: None,
-                machine: machine.into(),
-                host: host.clone(),
-                pid: None,
-                process_start: None,
-                cwd: config.cwd.clone().into(),
-                source: "unclaimed worker reservation".into(),
-                invocation: None,
-                creation_run: None,
-                model: None,
-            };
-            let mut issue = super::subtasks::worker_issue(&tx, &project.id, number)?;
-            // Every attempt gets a new agent session. Reuse only unfinished
-            // local checkout work; another machine or directory gets its own
-            // branch. Some(None) preserves pre-migration checkout names.
-            let previous_checkout: Option<Option<String>> = tx.query_row(
-                "SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs
-                 WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
-                  ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
-                 AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
-                params![project.id, number, machine, config.cwd], |r| r.get(0),
-            ).optional()?;
-            let worktree_attempt = previous_checkout.unwrap_or_else(|| Some(id.clone()));
-            if let Some(attempt) = worktree_attempt {
-                issue["_worktree_attempt"] = json!(attempt);
-            }
-            let job = Job {
-                session_ref: None,
-                id: id.clone(),
-                worker_id: worker_id.clone(),
-                project: project.clone(),
-                issue,
-                comments: vec![],
-                config,
-                actor,
-                owner_pid,
-                owner_start: owner_start.clone(),
-                machine: machine.into(),
-            };
-            tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000])?;
-            let (sort_order, created_at): (i64, i64) = tx.query_row(
-                "SELECT sort_order,created_at FROM issues WHERE project_id=?1 AND number=?2",
-                params![project.id, number],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            let selected_at = now();
-            tx.execute(
-                "INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3)",
-                params![
-                    job.actor.id,
-                    serde_json::to_string(&job.actor)?,
-                    selected_at
-                ],
-            )?;
-            event(
+            let job = insert_reservation(
                 &tx,
-                &project.id,
+                &project,
                 number,
-                &job.actor.id,
-                "worker_selected",
-                selected_at,
-                &json!({"worker_id":worker_id,"worker_name":settings.name,"run_id":id,
-                    "required_tags":settings.tags,"projects":settings.projects,
-                    "sort_order":sort_order,"issue_created_at":created_at,
-                    "rule":"First eligible issue in queue order with a valid checkout. Drafts, claims, reservations, dependencies and retry holds are excluded; all required tags must match.",
-                    "order_by":["sort_order","created_at","project_id","number"]}),
-            )?;
-            crate::issues::allocations::reconcile(
-                &tx,
-                &crate::issues::allocations::Clock::read()?,
+                machine,
+                Some(&worker_id),
+                &settings,
+                config,
+                &id,
+                owner_pid,
+                &owner_start,
             )?;
             tx.commit()?;
             return Ok(Some(job));
@@ -1306,7 +1243,138 @@ pub(super) fn reserve(
     }
     Ok(None)
 }
+fn insert_reservation(
+    tx: &Connection,
+    project: &Project,
+    number: i64,
+    machine: &str,
+    worker_id: Option<&str>,
+    settings: &Settings,
+    config: ProjectConfig,
+    id: &str,
+    owner_pid: u32,
+    owner_start: &str,
+) -> Result<Job> {
+    let actor = Actor {
+        id: format!("reservation:{id}"),
+        kind: "worker".into(),
+        session_id: None,
+        machine: machine.into(),
+        host: crate::issues::identity::host(),
+        pid: None,
+        process_start: None,
+        cwd: config.cwd.clone().into(),
+        source: "unclaimed worker reservation".into(),
+        invocation: None,
+        creation_run: None,
+        model: None,
+    };
+    let mut issue = super::subtasks::worker_issue(tx, &project.id, number)?;
+    // Every attempt gets a new agent session. Reuse only unfinished
+    // local checkout work; another machine or directory gets its own
+    // branch. Some(None) preserves pre-migration checkout names.
+    let previous_checkout: Option<Option<String>> = tx.query_row(
+        "SELECT json_extract(job,'$.issue._worktree_attempt') FROM worker_runs
+         WHERE id=(SELECT id FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND machine=?3 AND finished_at IS NOT NULL
+          ORDER BY finished_at DESC,started_at DESC,id DESC LIMIT 1)
+         AND state!='completed' AND json_extract(job,'$.config.cwd')=?4",
+        params![project.id, number, machine, config.cwd], |r| r.get(0),
+    ).optional()?;
+    let worktree_attempt = previous_checkout.unwrap_or_else(|| Some(id.to_owned()));
+    if let Some(attempt) = worktree_attempt {
+        issue["_worktree_attempt"] = json!(attempt);
+    }
+    let job = Job {
+        session_ref: None,
+        id: id.to_owned(),
+        worker_id: worker_id.unwrap_or_default().to_owned(),
+        project: project.clone(),
+        issue,
+        comments: vec![],
+        config,
+        actor,
+        owner_pid,
+        owner_start: owner_start.to_owned(),
+        machine: machine.into(),
+    };
+    tx.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,worker_id,reservation_expires) VALUES(?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?9,?10,?11)",params![id,project.id,number,serde_json::to_string(&job)?,job.actor.id,owner_pid,owner_start,machine,now(),worker_id,now()+settings.reservation_seconds as i64*1000])?;
+    let (sort_order, created_at): (i64, i64) = tx.query_row(
+        "SELECT sort_order,created_at FROM issues WHERE project_id=?1 AND number=?2",
+        params![project.id, number],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let selected_at = now();
+    tx.execute(
+        "INSERT INTO agents(id,metadata,last_seen) VALUES(?1,?2,?3)",
+        params![
+            job.actor.id,
+            serde_json::to_string(&job.actor)?,
+            selected_at
+        ],
+    )?;
+    event(
+        tx,
+        &project.id,
+        number,
+        &job.actor.id,
+        "worker_selected",
+        selected_at,
+        &json!({"worker_id":worker_id,"worker_name":settings.name,"run_id":id,
+            "required_tags":settings.tags,"projects":settings.projects,
+            "sort_order":sort_order,"issue_created_at":created_at,
+            "rule":if worker_id.is_none() {"Explicit foreground selection of an eligible issue."} else {"First eligible issue in queue order with a valid checkout. Drafts, claims, reservations, dependencies and retry holds are excluded; all required tags must match."},
+            "order_by":["sort_order","created_at","project_id","number"]}),
+    )?;
+    crate::issues::allocations::reconcile(tx, &crate::issues::allocations::Clock::read()?)?;
+
+    Ok(job)
+}
+
 impl Store {
+    pub(crate) fn reserve_foreground(
+        &mut self,
+        project: &Project,
+        number: i64,
+        machine: &str,
+        cwd: &Path,
+    ) -> Result<Job> {
+        let settings = Settings {
+            name: "Terminal".into(),
+            directory: cwd.to_string_lossy().into_owned(),
+            projects: vec![project.id.clone()],
+            ..Default::default()
+        };
+        let config = runtime(&self.db, &settings, project)?;
+        worker::validate_config(&config, project)?;
+        let owner_pid = std::process::id();
+        let owner_start = crate::agents::process_identity(owner_pid)
+            .ok_or_else(|| Error::new("worker_error", "Cannot identify worker process"))?;
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let eligible: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.project_id=?1 AND i.number=?2 AND {ELIGIBLE} {PICKUP_READY} AND NOT EXISTS(SELECT 1 FROM project_settings s WHERE s.project_id=p.id AND s.paused=1))"),params![project.id, number],|r|r.get(0))?;
+        if !eligible {
+            return Err(Error::conflict(format!(
+                "{} #{} is missing or not eligible for pickup on this machine",
+                project.name, number
+            )));
+        }
+        let job = insert_reservation(
+            &tx,
+            project,
+            number,
+            machine,
+            None,
+            &settings,
+            config,
+            &random_id()?,
+            owner_pid,
+            &owner_start,
+        )?;
+        tx.commit()?;
+        Ok(job)
+    }
+
     pub fn register_worker(
         &mut self,
         id: Option<&str>,

@@ -376,6 +376,18 @@ fn main() {
                         "named:Worker fixture"
                     );
                     let view = issue(&session, &["view", number]);
+                    if mode == "completed" {
+                        let item = json!({"type":"commandExecution","command":format!("hey-boss issue view {number}")});
+                        send(
+                            json!({"method":"item/started","params":{"threadId":session,"item":item}}),
+                        );
+                        let mut completed = item;
+                        completed["aggregatedOutput"] = json!(view.to_string());
+                        completed["exitCode"] = json!(0);
+                        send(
+                            json!({"method":"item/completed","params":{"threadId":session,"item":completed}}),
+                        );
+                    }
                     assert_eq!(view["issue"]["number"], number.parse::<u64>().unwrap());
                     if mode == "fresh-claim" {
                         assert_eq!(view["issue"]["assignee"], Value::Null);
