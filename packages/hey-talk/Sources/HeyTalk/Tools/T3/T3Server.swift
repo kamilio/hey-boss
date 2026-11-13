@@ -1,35 +1,55 @@
 import Foundation
 import TalkCore
 
-/// Uses T3's local CLI for short-lived authentication, then its protocol-2 API.
+/// Authenticates on the thread’s host, then uses its protocol-2 API.
 actor T3Server {
     static let shared = T3Server()
     private let home = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".t3")
-    private var credential: (token: String, expires: Date)?
+    private var credential: (environment: String, origin: URL, token: String, expires: Date)?
 
     private func request(_ path: String, environment: String) async throws -> URLRequest {
-        let localID = try String(contentsOf: home.appendingPathComponent("userdata/environment-id"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard environment == localID else { throw TalkError("This T3 thread is on another environment.") }
-        let runtime = try JSONSerialization.jsonObject(with: Data(contentsOf: home.appendingPathComponent("userdata/server-runtime.json"))) as? [String: Any]
-        guard let origin = runtime?["origin"] as? String, let base = URL(string: origin),
-              base.scheme == "http", ["localhost", "127.0.0.1", "::1"].contains(base.host ?? ""),
-              let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw TalkError("T3's local server is unavailable.") }
-        if credential == nil || credential!.expires <= Date() {
-            let binary = home.appendingPathComponent("bin/t3")
-            let token = try await Task.detached { try Self.issueToken(binary) }.value
-            credential = (token, Date().addingTimeInterval(240))
-        }
+        let (base, token) = try await connection(environment)
+        guard let url = URL(string: path, relativeTo: base)?.absoluteURL else { throw TalkError("Invalid T3 request.") }
         var request = URLRequest(url: url, timeoutInterval: 5)
-        request.setValue("Bearer " + credential!.token, forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer " + token, forHTTPHeaderField: "Authorization")
         request.setValue("2", forHTTPHeaderField: "x-t3-orchestration-protocol")
         return request
     }
 
-    private static func issueToken(_ binary: URL) throws -> String {
+    private func connection(_ environment: String) async throws -> (URL, String) {
+        let localID = try String(contentsOf: home.appendingPathComponent("userdata/environment-id"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let base: URL, binary: URL, arguments: [String]
+        let issue = ["auth", "session", "issue", "--scope", "orchestration:read", "--scope", "orchestration:operate", "--ttl", "5m", "--label", "HeyTalk", "--token-only"]
+        if environment == localID {
+            let runtime = try JSONSerialization.jsonObject(with: Data(contentsOf: home.appendingPathComponent("userdata/server-runtime.json"))) as? [String: Any]
+            guard let origin = runtime?["origin"] as? String, let url = URL(string: origin),
+                  url.scheme == "http", ["localhost", "127.0.0.1", "::1"].contains(url.host ?? "") else { throw TalkError("T3’s local server is unavailable.") }
+            base = url; binary = home.appendingPathComponent("bin/t3"); arguments = issue
+        } else {
+            var match: (T3Tunnel, String)?
+            for tunnel in T3Tunnel.connected() {
+                let probe = URLRequest(url: tunnel.origin.appendingPathComponent(".well-known/t3/environment"), timeoutInterval: 1)
+                guard let (data, response) = try? await URLSession.shared.data(for: probe), (response as? HTTPURLResponse)?.statusCode == 200,
+                      let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      info["environmentId"] as? String == environment, let version = info["serverVersion"] as? String,
+                      version.range(of: #"\A[0-9][A-Za-z0-9.+-]*\z"#, options: .regularExpression) != nil else { continue }
+                match = (tunnel, version); break
+            }
+            guard let (tunnel, version) = match else { throw TalkError("Reconnect this thread’s SSH environment in T3 and try again.") }
+            base = tunnel.origin; binary = URL(fileURLWithPath: "/usr/bin/ssh")
+            arguments = ["-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-p", String(tunnel.sshPort), "--", tunnel.host,
+                         "exec ~/.t3/runtime/versions/" + version + "/t3 " + issue.joined(separator: " ")]
+        }
+        if let credential, credential.environment == environment, credential.origin == base, credential.expires > Date() { return (base, credential.token) }
+        let token = try await Task.detached { try Self.issueToken(binary, arguments: arguments) }.value
+        credential = (environment, base, token, Date().addingTimeInterval(240))
+        return (base, token)
+    }
+
+    private static func issueToken(_ binary: URL, arguments: [String]) throws -> String {
         let process = Process(), output = Pipe()
         process.executableURL = binary
-        process.arguments = ["auth", "session", "issue", "--scope", "orchestration:read", "--scope", "orchestration:operate",
-                             "--ttl", "5m", "--label", "Hey Talk", "--token-only"]
+        process.arguments = arguments
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output; process.standardError = FileHandle.nullDevice
         try process.run()
@@ -41,11 +61,11 @@ actor T3Server {
                 }
             }
         }
-        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: timeout)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 12, execute: timeout)
         defer { timeout.cancel() }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        let token = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = String(decoding: data, as: UTF8.self).split(whereSeparator: \.isNewline).last.map(String.init) ?? ""
         guard process.terminationStatus == 0, !token.isEmpty, token.count < 16_384 else {
             throw TalkError("Couldn’t authenticate with T3. Open T3 to refresh its CLI.")
         }
