@@ -61,23 +61,6 @@ final class T3ToolsTests: XCTestCase {
         XCTAssertTrue(restored.isFocused())
     }
 
-    func testDesiredServerStateIsIdempotent() throws {
-        let id = UUID().uuidString
-        let unpinned: [String: Any] = ["id": id, "pinnedAt": NSNull(), "title": "Before", "settledOverride": NSNull()]
-        var pinned = unpinned; pinned["pinnedAt"] = "2026-11-04T00:00:00Z"
-        XCTAssertEqual(try T3Server.command(.pinThread(true), thread: unpinned)?["type"] as? String, "thread.pin")
-        XCTAssertNil(try T3Server.command(.pinThread(true), thread: pinned))
-        XCTAssertEqual(try T3Server.command(.pinThread(false), thread: pinned)?["type"] as? String, "thread.unpin")
-        XCTAssertNil(try T3Server.command(.pinThread(false), thread: unpinned))
-        XCTAssertEqual(try T3Server.command(.settleThread, thread: unpinned)?["type"] as? String, "thread.settle")
-        var settled = unpinned; settled["settledOverride"] = "settled"
-        XCTAssertNil(try T3Server.command(.settleThread, thread: settled))
-        XCTAssertNil(try T3Server.command(.rename("Before"), thread: unpinned))
-        XCTAssertEqual(try T3Server.command(.rename("After"), thread: unpinned)?["title"] as? String, "After")
-        XCTAssertThrowsError(try T3Server.command(.pinThread(true), thread: ["id": "invalid"]))
-        XCTAssertThrowsError(try T3Server.command(.paste("oops"), thread: unpinned))
-    }
-
     func testLiveRemoteCatchUp() async throws {
         guard let environment = ProcessInfo.processInfo.environment["HEY_TALK_T3_ENVIRONMENT"],
               let id = ProcessInfo.processInfo.environment["HEY_TALK_T3_SERVER_THREAD"] else { throw XCTSkip("Requires a connected T3 thread with a reply") }

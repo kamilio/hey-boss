@@ -42,5 +42,6 @@ fi
 mv "$stage" "$destination"
 rmdir "$staging_root"
 ln -sfn "$destination/Contents/MacOS/hey-talk" "$HOME/.local/bin/hey-talk"
+ln -sfn "$destination/Contents/Resources/hey-t3.mjs" "$HOME/.local/bin/hey-t3"
 ./install-login.sh
 printf 'Installed %s\nRun ~/.local/bin/hey-talk --help.\n' "$destination"
