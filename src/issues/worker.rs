@@ -564,7 +564,7 @@ impl Worker {
                         let stop = stopped.clone();
                         handles.push((
                             job.id.clone(),
-                            thread::spawn(move || execute_job(&path, job, stop)),
+                            thread::spawn(move || execute_job(&path, job, stop, false)),
                         ));
                         continue;
                     }
@@ -747,7 +747,11 @@ fn check_job(store: &Store, job: &Job, stop: &AtomicBool) -> Result<()> {
     Ok(())
 }
 
+#[path = "worker_terminal.rs"]
+mod terminal;
+
 struct Codex {
+    foreground: bool,
     process: crate::agent_process::Process,
     protection: (PathBuf, Job),
     pending: VecDeque<Value>,
@@ -758,7 +762,7 @@ struct Codex {
     infrastructure_outage: Option<String>,
 }
 impl Codex {
-    fn spawn(path: &Path, job: &Job) -> Result<Self> {
+    fn spawn(path: &Path, job: &Job, foreground: bool) -> Result<Self> {
         let binary = codex_binary()?;
         let mut paths = vec![
             binary.parent().unwrap().to_path_buf(),
@@ -794,6 +798,7 @@ impl Codex {
         let process = crate::agent_process::Process::spawn(&mut command)?;
         Ok(Self {
             process,
+            foreground,
             protection: (path.to_path_buf(), job.clone()),
             pending: VecDeque::new(),
             next_id: 0,
@@ -826,6 +831,13 @@ impl Codex {
         };
         self.next_id += 1;
         let id = self.next_id;
+        if self.foreground && matches!(method, "turn/start" | "turn/steer") {
+            for input in params["input"].as_array().into_iter().flatten() {
+                if let Some(text) = input["text"].as_str() {
+                    terminal::section("Prompt", text);
+                }
+            }
+        }
         self.send(json!({"id":id,"method":method,"params":params}))?;
         let mut deadline = Instant::now() + Duration::from_secs(45);
         loop {
@@ -1008,7 +1020,34 @@ impl Drop for Codex {
     }
 }
 
-fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
+pub fn run_foreground(number: i64) -> Result<()> {
+    let path = super::database_path()?;
+    let cwd = std::env::current_dir()?.canonicalize()?;
+    let machine = identity::machine()?;
+    let project = identity::project(&cwd, &machine)?;
+    let stop = Arc::new(AtomicBool::new(false));
+    install_signals(stop.clone())?;
+    let mut store = Store::open(&path)?;
+    let job = store.reserve_foreground(&project, number, &machine, &cwd)?;
+    terminal::section(
+        &format!("{} #{number} · Codex", project.name),
+        job.issue["title"].as_str().unwrap_or(""),
+    );
+    let id = job.id.clone();
+    execute_job(&path, job, stop, true);
+    let (state, summary): (String, String) = store.db.query_row(
+        "SELECT state,summary FROM worker_runs WHERE id=?1 AND finished_at IS NOT NULL",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if state != "completed" {
+        return Err(Error::new("worker_error", format!("{state}: {summary}")));
+    }
+    terminal::section("Completed", &summary);
+    Ok(())
+}
+
+fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>, foreground: bool) {
     let mut store = match retry_database_busy(|| Store::open(path)) {
         Ok(s) => s,
         Err(e) => {
@@ -1045,7 +1084,7 @@ fn execute_job(path: &Path, mut job: Job, stop: Arc<AtomicBool>) {
             }
         }
         if job.config.provider == crate::agent_runtime::Provider::Codex {
-            run_codex(path, &mut store, &mut job, &stop)
+            run_codex(path, &mut store, &mut job, &stop, foreground)
         } else {
             providers::run(path, &mut store, &mut job, &stop)
         }
@@ -1383,6 +1422,7 @@ fn run_codex(
     store: &mut Store,
     job: &mut Job,
     stop: &AtomicBool,
+    foreground: bool,
 ) -> Result<(String, String)> {
     validate_config(&job.config, &job.project)?;
     check_job(store, job, stop)?;
@@ -1390,7 +1430,7 @@ fn run_codex(
     let mut delay = Duration::from_secs(1);
     let mut c = loop {
         check_job(store, job, stop)?;
-        let mut c = Codex::spawn(path, job)?;
+        let mut c = Codex::spawn(path, job, foreground)?;
         store.worker_process(&job.id, c.process.pid())?;
         store.worker_event(
             &job.id,
@@ -1538,6 +1578,9 @@ fn run_thread(
         }
         if params["turnId"].as_str().is_some_and(|id| id != turn) {
             continue;
+        }
+        if c.foreground {
+            terminal::event(method, params);
         }
         if !claim_window_started
             && matches!(
