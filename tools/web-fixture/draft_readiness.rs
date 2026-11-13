@@ -255,5 +255,5 @@ fn draft_creation_and_readiness_follow_project_policy() {
     cli(&["unassign", "1"]);
     cli(&["close", "1"]);
     reload(&mut p);
-    assert_eq!(p.eval("!el('[data-draft-action=draft]') && el('.readiness-status')?.textContent==='Completed'").unwrap(),true);
+    assert_eq!(p.eval("!el('[data-draft-action=draft]') && el('.readiness-status')?.textContent==='Closed'").unwrap(),true);
 }

@@ -48,7 +48,7 @@ async page => {
   await page.waitForFunction(() => document.querySelector("#comment-body")?.value === "");
   check(await page.getByLabel("Your comment").inputValue() === "", "Saved explanation is cleared from composer");
   check(await page.locator("#comments .comment-body").last().innerText() === "The owner needs to restore deployment access.", "Explanation saved with block");
-  check((await page.locator(".readiness-status").innerText()).includes("pickup paused"), "Sidebar explains worker eligibility");
+  check(await page.locator(".readiness-status").innerText() === "Blocked", "Sidebar identifies the issue state");
   check(await page.getByRole("button", {name:"Assign to Boss",exact:true}).count() === 0, "Blocked issue cannot be claimed");
   for (const scheme of ["light", "dark"]) {
     await page.emulateMedia({colorScheme:scheme,reducedMotion:"reduce"});

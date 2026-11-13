@@ -1390,22 +1390,26 @@ function draftUnavailable(issue, enabled) {
 function renderReadiness(value) {
   const i = value.issue, a = value.allocation;
   if (i.deleted_at) return "";
+  const state = i.state === "open" && i.draft ? "Draft" : ({open:"Open", ready:"Ready", blocked:"Blocked", closed:"Closed"}[i.state] + (i.draft ? " · Draft" : ""));
+  const label = `<strong class="readiness-status">${esc(state)}</strong>`;
   if (i.job_run_id) {
     const result = /^Job (failed|cancelled|succeeded|running|pending)\b/.exec(i.status?.comment || "")?.[1];
     const status = result ? result[0].toUpperCase() + result.slice(1) : i.state === "closed" ? "Succeeded" : i.assignee && !i.assignee.startsWith("job:") ? "Running" : "Pending";
-    return `<div class="side-section issue-readiness"><h2 class="side-heading">Scheduled job</h2><strong class="readiness-status">${esc(status)}</strong><p>This execution runs independently of worker slots. Its result stays linked to the job’s history.</p>${readyAction(i)}</div>`;
+    return `<div class="side-section issue-readiness"><h2 class="side-heading">Issue state</h2>${label}<p>Scheduled job · ${esc(status)}</p><p>This execution runs independently of worker slots. Its result stays linked to the job’s history.</p>${readyAction(i)}</div>`;
   }
-  if (i.attempt_hold) return `<div class="side-section issue-readiness"><h2 class="side-heading">Worker pickup</h2><strong class="readiness-status">Attempt protected · pickup paused</strong><p>The original attempt must be reconciled on ${esc(i.attempt_hold.host)} before another agent can start.</p></div>`;
+  if (i.attempt_hold) return `<div class="side-section issue-readiness"><h2 class="side-heading">Issue state</h2>${label}<p>Attempt protected · pickup paused. The original attempt must be reconciled on ${esc(i.attempt_hold.host)} before another agent can start.</p></div>`;
 
   const expired = a?.reason === "allocation_expired";
   const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
   const reason = draftUnavailable(i, value.drafts_enabled);
-  const status = i.state === "ready" ? i.draft ? "Development handoff · draft retained" : "Ready" : i.state === "blocked" ? `${IssueBlockers.description(i)} · pickup paused` : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee || (i.assignment && i.assignment.kind !== "unassigned") ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Eligible for pickup";
-  const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
-  const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
-  const note = value.drafts_enabled === false && !i.draft && ["open", "blocked"].includes(i.state) ? "" : i.state === "ready" ? i.draft ? "No worker pickup for this source. Eligible dependents can start. CI, review, merge and production approval remain separate. Reopen to withdraw the handoff." : "Unassign to let a worker pick up this task. Move it out of Ready to request rework." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
-  return `<div class="side-section issue-readiness"><h2 class="side-heading">Issue state${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}<div class="state-actions">${readyAction(i)}${value.drafts_enabled === false || (i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}</div></div>`;
+  const readyHelp = "Ready issues remain eligible for agent pickup when unassigned.";
+  const note = i.state === "closed" ? "" : i.draft ? "Draft status pauses agent pickup, including after a Ready handoff." : i.state === "blocked" ? "Agent pickup is paused until the issue is unblocked." : readyHelp;
+  const draftHelp = value.drafts_enabled !== false && !i.draft && ["open", "blocked"].includes(i.state) ? "Moving to draft pauses agent pickup." : "";
+  const allocationHelp = expired ? "The worker reservation expired." : reserved ? "An unclaimed reservation expires after 15 minutes for startup, then at the worker’s claim deadline." : missing && !i.assignee && i.state === "open" ? "This replica has no allocation. Check the supervisor for a newer reservation." : "";
+  const info = [draftHelp, note, allocationHelp].filter(Boolean).join(" ");
+  const allocation = expired ? "Reservation expired" : reserved ? "Reserved" : missing && !i.assignee && i.state === "open" ? "Waiting for supervisor" : "";
+  return `<div class="side-section issue-readiness"><h2 class="side-heading">Issue state${info ? HeyBossUI.infoTip("readiness-help", "About issue state", info) : ""}</h2>${label}${allocation ? `<p>${esc(allocation)}</p>` : ""}<div class="state-actions">${readyAction(i)}${value.drafts_enabled === false || (i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${info ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}</div></div>`;
 }
 function issueStateActions(issue) {
   if (issue.attempt_hold) return "";
