@@ -754,10 +754,18 @@ dialog::backdrop {
   margin: 0;
   overflow-wrap: anywhere;
 }
-.detail-top h1 .detail-number {
-  color: var(--faint);
-  font-weight: 400;
-  margin-left: 8px;
+.issue-topline, .issue-path, .issue-tools, .issue-tool { display: flex; align-items: center; }
+.issue-topline { justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.issue-path { gap: 9px; font-size: 12px; color: var(--muted); }
+.issue-path .back-link { margin: 0; }
+.issue-tools { gap: 4px; }
+.issue-tool { gap: 5px; padding: 7px; border-radius: 6px; color: var(--muted); background: none; font-size: 12px; }
+.issue-tool:hover { color: var(--text); background: var(--hover); }
+.issue-tool svg { width: 15px; height: 15px; }
+@media (max-width: 640px) {
+  .issue-tools { gap: 0; }
+  .issue-tool { justify-content: center; min-width: 32px; height: 32px; }
+  .issue-tool span { display: none; }
 }
 .detail-heading-actions {
   display: flex;
@@ -2158,12 +2166,24 @@ details[open] > .activity-summary .activity-chevron { transform: rotate(90deg); 
 .commit-trace-row {
   margin-top: 4px;
 }
-#detail-view > .commit-section {
-  padding: 12px 16px;
-  margin-bottom: 20px;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  background: var(--surface);
+.issue-review {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 0;
+  margin: -10px 0 20px;
+  border-block: 1px solid var(--line);
+}
+.review-work { min-width: 0; }
+.review-label { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+.review-label svg, .review-work a svg { width: 14px; height: 14px; }
+.review-label code { font-size: 11px; }
+.review-work a { display: inline-block; margin-top: 4px; color: var(--accent); font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.review-work a svg { vertical-align: middle; margin-left: 5px; }
+.issue-review .button { flex: none; }
+@media (max-width: 640px) {
+  .issue-review { align-items: flex-start; flex-direction: column; gap: 10px; margin-top: 0; }
 }
 .commit-summary {
   display: flex;

@@ -83,7 +83,7 @@ async page => {
   await page.route('**/api/inbox',r=>r.fulfill({json:{ok:true,tasks:[],unread_count:0}}));
   await page.goto(base+'/#'+new URLSearchParams({project:scope.project,issue:scope.issue}));
   await page.waitForFunction(number=>model?.detail?.issue.number===number,Number(scope.issue));
-  const link=page.locator('.commit-target[href^="/commit-review?"]').first();
+  const link=page.locator('.issue-review a[href^="/commit-review?"]').first();
   check(await link.isVisible() && !(await link.getAttribute('target')),'Task opens the stored review inside the app, including PR-enabled projects');
   await link.click();
   await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
