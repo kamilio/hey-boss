@@ -7687,7 +7687,7 @@ final class ConversationCaption: NSPanel {
     lazy var imagePanel: NSPanel = {
         let panel = NSPanel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Reply image"; panel.level = level; panel.hidesOnDeactivate = false
-        panel.collectionBehavior = collectionBehavior; panel.sharingType = sharingType
+        panel.collectionBehavior = collectionBehavior
         panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
         panel.appearance = NSAppearance(named: .darkAqua); panel.contentView = media
         return panel
@@ -7705,7 +7705,6 @@ final class ConversationCaption: NSPanel {
         title = "Spoken reply"; level = .floating; hidesOnDeactivate = false
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         ignoresMouseEvents = true; isOpaque = false; backgroundColor = .clear
-        sharingType = .none
         let face = NSView(frame: NSRect(origin: .zero, size: frame.size))
         Self.style(face)
         line.font = font; line.alignment = .center; line.maximumNumberOfLines = 1
@@ -7875,7 +7874,7 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
         } else { vector?.stopLoading(); vector = nil; drawing = nil }
         self.title.stringValue = title; self.title.toolTip = title
         self.kind.stringValue = kind == "Image" ? "IMAGE" : kind.uppercased() + "  /  DIAGRAM"
-        isHidden = false; fit = kind == "Image"; updateZoom()
+        isHidden = false; fit = kind == "Image" || kind == "Mermaid"; updateZoom()
     }
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         guard webView === vector, navigation === drawing else { return }
