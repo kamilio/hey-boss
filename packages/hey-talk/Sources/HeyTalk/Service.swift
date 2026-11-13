@@ -16,6 +16,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var returnMenuItem: NSMenuItem?
     private var correctionMenuItem: NSMenuItem?
     private var overlayMenuItem: NSMenuItem?
+    private let selectionCapture = SelectionCapture()
     private let speech = SpeechController()
     private var speechWasActive = false
     private let history: DictationHistory
@@ -163,6 +164,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
+        menu.insertItem(selectionCapture.menuItem(), at: 4)
         menuItem?.menu = menu
         let autoItem = NSMenuItem(title: "Auto Mode · Hyper+V", action: #selector(toggleAutoMode), keyEquivalent: "")
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
@@ -216,7 +218,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if pausedConversation != nil { cancel(keepMicrophoneWarm: false) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); correction.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { selectionCapture.stop(); speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); correction.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -438,7 +440,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func showOverlay(_ show: Bool) {
         if overlay == nil {
-            let view = Overlay()
+            let view = Overlay(selectionCapture: selectionCapture)
             view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }

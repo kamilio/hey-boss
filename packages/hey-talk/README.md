@@ -8,6 +8,9 @@ to Hyper (Control + Command + Option + Shift). Click the pill to toggle recordin
 drag to move it, or press Esc to discard. Clicking the pill follows the same
 Auto Submit setting. CLI commands without `--submit` paste by default.
 
+**Selection Capture** (waveform menu or right-click the pill) previews highlights from your browser, cmux, T3, or Slack. Drag and release, double-click a word, or select with Shift+Arrow. Hover over the card to keep it visible and scroll longer quotes. Nothing is saved or added to chat; capture starts off each time Hey Talk opens.
+
+
 Brief focus changes are silent. If the original destination is still unfocused after 0.8 seconds, the pill shows **Waiting to paste**.
 Return to the original app to paste automatically. In T3, return to the starting
 thread **and focus the original field**. Esc or × copies the waiting transcript to the clipboard and cancels the automatic paste;
