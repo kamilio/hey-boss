@@ -8,6 +8,9 @@ if [ "$(basename "$resources")" = MacOS ]; then resources="$resources/../Resourc
 cargo run --quiet --manifest-path assets/conversation-native/Cargo.toml --example gallery -- "$resources" "$root"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_MEDIA="$root" "$2"
 HEY_BOSS_AUDIT_PILL_ESCAPE="$root/escape" "$2"
+say -v Samantha -o "$root/selection.aiff" 'Compare the apple. [[slnc 1600]] Now explain the orange.'
+ffmpeg -nostdin -loglevel error -i "$root/selection.aiff" -ar 16000 -ac 1 -f s16le "$root/selection.pcm"
+HEY_BOSS_AUDIT_SELECTION_CHAT="$root" "$2"
 say -v Samantha -o "$root/first.aiff" 'Which fruit is on this page? Answer in one word.'
 say -v Alex -o "$root/second.aiff" 'Which fruit did I mention earlier? Answer in one word.'
 for turn in first second; do
