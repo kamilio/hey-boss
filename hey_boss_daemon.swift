@@ -39,6 +39,9 @@ struct IssueReference: Codable, Equatable {
 
 struct Request: Codable {
     let command: String
+    let selection_chat: UUID?
+    let selection_time: Double?
+    let selection_text, selection_source: String?
     let pause_id: UUID?
     let issue: IssueReference?
     let question: String?
@@ -2887,12 +2890,12 @@ final class Interface {
     }
     // Use the regular card and reader, without writing debug selections to Inbox.
     private var selectionNoticeID: String?
-    func showSelection(_ request: Request) {
+    func showSelection(_ request: Request, number: Int? = nil) {
         if let id = selectionNoticeID { remove(id); selectionNoticeID = nil }
         guard let title = request.title, let summary = request.description, let content = request.question else { return }
         let id = UUID().uuidString
         selectionNoticeID = id
-        let row = Record(taskID: id, kind: "update", question: content, project: "Selection Capture", title: title,
+        let row = Record(taskID: id, kind: "update", question: content, project: "Selection Capture", title: number.map { "[\($0)] " + title } ?? title,
                          description: summary, options: [], autoclose: 8, linkURL: nil, linkLabel: nil,
                          createdAt: Date().timeIntervalSince1970, status: "pending", sourceHost: "This Mac", icon: "text.cursor")
         add(row)
@@ -7516,13 +7519,23 @@ struct SpokenComment: Codable {
 // Apple can finalize several phrases within one detected comment. A later
 // cumulative result replaces earlier audio; a disjoint one extends it.
 struct ReviewTranscript {
-    private var phrases: [(end: TimeInterval, text: String)] = []
+    private var phrases: [(end: TimeInterval, text: String, words: [(TimeInterval, Int)])] = []
+    var ends: [(TimeInterval, Int)] {
+        var offset = 0
+        return phrases.flatMap { phrase in
+            defer { offset += phrase.text.utf16.count + 1 }
+            return phrase.words.map { ($0.0, offset + $0.1) }
+        }
+    }
     var text: String { phrases.map(\.text).joined(separator: " ") }
-    mutating func accept(_ text: String, from start: TimeInterval, through end: TimeInterval) {
+    mutating func accept(_ text: String, from start: TimeInterval, through end: TimeInterval, segments: [SFTranscriptionSegment] = []) {
         let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !words.isEmpty else { return }
         phrases.removeAll { $0.end > start + 0.01 }
-        phrases.append((end, words))
+        let lead = (text as NSString).range(of: words).location
+        phrases.append((end, words, segments.map {
+            ($0.timestamp + $0.duration, min(words.utf16.count, max(0, NSMaxRange($0.substringRange) - lead)))
+        }))
     }
 }
 
@@ -7536,7 +7549,7 @@ func recordedBuffer(_ samples: Data, format: AVAudioFormat) throws -> AVAudioPCM
 }
 
 func recognizeTurn(_ buffer: AVAudioPCMBuffer, recognizer: SFSpeechRecognizer,
-                   completion: @escaping (Result<String, Error>) -> Void) -> SFSpeechRecognitionTask {
+                   completion: @escaping (Result<ReviewTranscript, Error>) -> Void) -> SFSpeechRecognitionTask {
     let request = SFSpeechAudioBufferRecognitionRequest()
     request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
     request.append(buffer); request.endAudio()
@@ -7544,21 +7557,21 @@ func recognizeTurn(_ buffer: AVAudioPCMBuffer, recognizer: SFSpeechRecognizer,
 }
 
 private func recognizeRequest(_ request: SFSpeechAudioBufferRecognitionRequest, recognizer: SFSpeechRecognizer,
-                              completion: @escaping (Result<String, Error>) -> Void) -> SFSpeechRecognitionTask {
+                              completion: @escaping (Result<ReviewTranscript, Error>) -> Void) -> SFSpeechRecognitionTask {
     var transcript = ReviewTranscript(), completed = false
     return recognizer.recognitionTask(with: request) { result, error in onMain {
         guard !completed else { return }
         if let result, result.speechRecognitionMetadata != nil || result.isFinal {
             let transcription = result.bestTranscription
             if let first = transcription.segments.first, let last = transcription.segments.last {
-                transcript.accept(transcription.formattedString, from: first.timestamp, through: last.timestamp + last.duration)
+                transcript.accept(transcription.formattedString, from: first.timestamp, through: last.timestamp + last.duration, segments: transcription.segments)
             }
         }
         guard result?.isFinal == true || error != nil else { return }
         completed = true
         if let error, !((error as NSError).domain == "kAFAssistantErrorDomain" && (error as NSError).code == 1110) {
             completion(.failure(error))
-        } else { completion(.success(transcript.text)) }
+        } else { completion(.success(transcript)) }
     } }
 }
 
@@ -7925,6 +7938,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private struct Library: Codable {
         var selected = UUID()
         var draftDirectory: URL?
+        var draftSelections: [Selection]?
         var draftCapture: Capture?
         var draftText: String?
         var chats: [Chat] = []
@@ -7985,6 +7999,38 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return playback + quote + "\n\n" + text
         }
     }
+    struct Selection: Codable, Equatable {
+        let time: TimeInterval
+        let source, text: String
+    }
+    private let selectionChip = NSButton()
+    private var selections: [Selection] = [] {
+        didSet {
+            selectionChip.isHidden = selections.isEmpty
+            selectionChip.title = selections.indices.map { "[\($0 + 1)]" }.joined(separator: " ") + "  Selected text"
+            selectionChip.toolTip = selections.last?.source
+        }
+    }
+    @discardableResult func addSelection(chat: UUID, time: TimeInterval, source: String, text: String) -> Int? {
+        guard chat == library.selected, voiceStatus["selection_chat"] != nil, !text.isEmpty, time.isFinite else { return nil }
+        selections.append(Selection(time: time, source: source, text: text))
+        save()
+        return selections.count
+    }
+    private var selectionNotes: String {
+        selections.enumerated().map { "[\($0.offset + 1)] " + $0.element.source + "\n" + $0.element.text }.joined(separator: "\n\n")
+    }
+    @objc private func inspectSelections() {
+        let sheet = NSAlert()
+        sheet.messageText = "Selected text"
+        sheet.accessoryView = detailView(selectionNotes)
+        sheet.addButton(withTitle: "Done")
+        sheet.addButton(withTitle: "Remove all")
+        let inspected = selections
+        sheet.beginSheetModal(for: window) { [weak self] result in
+            if result == .alertSecondButtonReturn, self?.selections == inspected { self?.selections = []; self?.save() }
+        }
+    }
     let contextChip = NSButton()
     private var pendingCapture: Capture? { didSet {
         contextChip.isHidden = pendingCapture == nil
@@ -7994,6 +8040,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     } }
     private struct Saved: Codable, Equatable {
         var messages: [Message]
+        var selections: [Selection]?
         var pendingCapture: Capture?
         var draftText: String?
         let directory: URL?
@@ -8086,8 +8133,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var transcriptionTask: Task<Void, Never>?
     private var liveTranscript: LiveTranscript?
     private var finishingTranscript: LiveTranscript?
-    private var recordedClips: [(Data, LiveTranscript?)] = []
+    private var recordedClips: [(Data, LiveTranscript?, TimeInterval)] = []
     private var transcripts: [String] = []
+    // Wall-clock word endings, in the same clock as the selection gesture.
+    private var wordEnds: [(time: TimeInterval, offset: Int)] = []
     private var transcriptionID: UUID?
     private var playedPassages = [String]()
     private var playingPassage = ""
@@ -8158,7 +8207,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         contextChip.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
         contextChip.font = .systemFont(ofSize: 12, weight: .medium); contextChip.lineBreakMode = .byTruncatingTail
         contextChip.target = self; contextChip.action = #selector(inspectCapture); contextChip.isHidden = true
-        let entry = NSStackView(views: [contextChip, input])
+        selectionChip.bezelStyle = .accessoryBarAction; selectionChip.controlSize = .small
+        selectionChip.lineBreakMode = .byTruncatingTail; selectionChip.target = self
+        selectionChip.action = #selector(inspectSelections); selectionChip.isHidden = true
+        let entry = NSStackView(views: [contextChip, selectionChip, input])
+        selectionChip.widthAnchor.constraint(lessThanOrEqualTo: entry.widthAnchor).isActive = true
         entry.orientation = .vertical; entry.alignment = .leading; entry.spacing = 6
         for view in [entry,send,meter,voiceStatus] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
@@ -8386,7 +8439,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func clearTurns() {
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
-        checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
+        selections = []; checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
@@ -8425,6 +8478,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
+        if restoreError == nil, !micMuted, (window.isVisible || audio != nil) {
+            result["selection_chat"] = library.selected.uuidString
+        }
         if canPauseListening { result["listeningPaused"] = micMuted }
         return result
     }
@@ -8642,13 +8698,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): end=\(reason, privacy: .public) audioMs=\(samples.count / 32)")
         recording = nil; state(.decoding, reason == "duration limit" ? "Two-minute limit reached · Transcribing…" : "Transcribing…")
         liveTranscript?.input.finish()
-        recordedClips.append((samples, liveTranscript)); liveTranscript = nil
+        recordedClips.append((samples, liveTranscript, Date().timeIntervalSince1970 - Double(samples.count) / 32000)); liveTranscript = nil
         transcribeNext()
     }
     private func transcribeNext() {
         guard transcriptionID == nil, let audio else { return }
         guard !recordedClips.isEmpty else {
             guard recording == nil else { return }
+            let ends = wordEnds; wordEnds.removeAll()
             let text = transcripts.joined(separator: "\n")
             transcripts.removeAll()
             if heldReply {
@@ -8668,13 +8725,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             }
             if audio.stopped { self.audio = nil }
             if text.isEmpty { state(audio.stopped ? .idle : .listening, audio.stopped ? "Microphone off" : "Listening") }
-            else { respond(text) }
+            else { respond(text, ends: ends) }
             return
         }
         guard let recognizer else { stop("Dictation unavailable."); return }
-        let (samples, live) = recordedClips.removeFirst(), id = UUID()
+        let (samples, live, start) = recordedClips.removeFirst(), id = UUID()
         finishingTranscript = live
         transcriptionID = id
+        var times: [(TimeInterval, Int)] = []
         let finish: (Result<String, Error>) -> Void = { [weak self, weak audio] result in
             guard let self, let audio, self.audio === audio, self.transcriptionID == id else { return }
             self.transcriptionID = nil; self.finishingTranscript = nil
@@ -8687,7 +8745,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             case .success(let text):
                 ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): transcriptChars=\(text.count)")
                 let words = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !words.isEmpty { self.transcripts.append(words) }
+                if !words.isEmpty {
+                    let lead = (text as NSString).range(of: words).location
+                    let offset = self.transcripts.reduce(0) { $0 + $1.utf16.count + 1 }
+                    self.wordEnds += times.map { (start + $0.0, offset + min(words.utf16.count, max(0, $0.1 - lead))) }
+                    if times.isEmpty { self.wordEnds.append((start + Double(samples.count) / 32000, offset + words.utf16.count)) }
+                    self.transcripts.append(words)
+                }
             }
             self.transcribeNext()
         }
@@ -8700,13 +8764,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         transcriptionTask = Task { @MainActor [weak self] in
             if let live, let text = try? await live.result.value {
                 guard !Task.isCancelled else { return }
-                self?.transcriptionTask = nil; finish(.success(text)); return
+                self?.transcriptionTask = nil; times = text.ends; finish(.success(text.text)); return
             }
             guard !Task.isCancelled else { return }
             // Retry from the retained clip only when the streaming recognizer failed.
             self?.transcriptionTask = nil
             do {
-                self?.decoding = recognizeTurn(try recordedBuffer(samples, format: audio.format), recognizer: recognizer, completion: finish)
+                self?.decoding = recognizeTurn(try recordedBuffer(samples, format: audio.format), recognizer: recognizer) { result in
+                    finish(result.map { times = $0.ends; return $0.text })
+                }
             } catch { finish(.failure(error)) }
         }
     }
@@ -8722,7 +8788,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private final class LiveTranscript {
         let input: AsyncStream<AnalyzerInput>.Continuation
-        let result: Task<String, Error>
+        let result: Task<(text: String, ends: [(TimeInterval, Int)]), Error>
         init(recognizer: SFSpeechRecognizer) {
             let (stream, producer) = AsyncStream<AnalyzerInput>.makeStream()
             input = producer
@@ -8730,13 +8796,19 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 defer { producer.finish() }
                 if SpeechTranscriber.isAvailable, let locale = await SpeechTranscriber.supportedLocale(equivalentTo: recognizer.locale),
                    await SpeechTranscriber.installedLocales.contains(locale) {
-                    let module = SpeechTranscriber(locale: locale, preset: .transcription)
+                    let module = SpeechTranscriber(locale: locale, transcriptionOptions: [], reportingOptions: [], attributeOptions: [.audioTimeRange])
                     let analyzer = SpeechAnalyzer(modules: [module])
                     return try await withTaskCancellationHandler {
-                        async let text: String = {
-                            var text = ""
-                            for try await result in module.results { text += String(result.text.characters) }
-                            return text
+                        async let text: (String, [(TimeInterval, Int)]) = {
+                            var text = "", ends = [(TimeInterval, Int)](), offset = 0
+                            for try await result in module.results {
+                                for run in result.text.runs {
+                                    let part = String(result.text[run.range].characters)
+                                    text += part; offset += part.utf16.count
+                                    if let range = run.audioTimeRange { ends.append((range.end.seconds, offset)) }
+                                }
+                            }
+                            return (text, ends)
                         }()
                         _ = try await analyzer.analyzeSequence(stream)
                         try await analyzer.finalizeAndFinishThroughEndOfInput()
@@ -8745,7 +8817,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 }
                 let request = SFSpeechAudioBufferRecognitionRequest()
                 request.requiresOnDeviceRecognition = true; request.shouldReportPartialResults = true; request.addsPunctuation = true
-                let (results, output) = AsyncThrowingStream<String, Error>.makeStream()
+                let (results, output) = AsyncThrowingStream<ReviewTranscript, Error>.makeStream()
                 let task = recognizeRequest(request, recognizer: recognizer) { result in
                     switch result {
                     case .success(let text): output.yield(text); output.finish()
@@ -8755,7 +8827,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 defer { task.cancel() }
                 for await frame in stream { try Task.checkCancellation(); request.append(frame.buffer) }
                 request.endAudio()
-                for try await text in results { return text }
+                for try await text in results { return (text.text, text.ends) }
                 throw CancellationError()
             }
         }
@@ -8810,11 +8882,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.contentView?.layoutSubtreeIfNeeded()
         turns.scrollToVisible(NSRect(x: 0, y: max(0, turns.bounds.maxY - 1), width: 1, height: 1))
     }
-    func respond(_ text: String) {
+    func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = []) {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
         playedPassages.removeAll(); playingPassage = ""; playingThrough = 0
         turnDone = false; lastMessage = nil; turnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
+        let text = Self.referencedTranscript(transcript, ends: ends, selections: selections)
+        selections = []
         append(text, from: "You", capture: capture)
         messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
         rememberTurn(); state(.thinking, "Thinking…")
@@ -8847,6 +8921,22 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 try write(request)
             } catch { generationFailed(error) }
         }
+    }
+    static func referencedTranscript(_ text: String, ends: [(time: TimeInterval, offset: Int)], selections: [Selection]) -> String {
+        guard !selections.isEmpty else { return text }
+        let words = text as NSString
+        var result = "", cursor = 0
+        for (i, selection) in selections.enumerated() {
+            let end = max(cursor, ends.isEmpty ? words.length : ends.last(where: { $0.time <= selection.time })?.offset ?? 0)
+            result += words.substring(with: NSRange(location: cursor, length: end - cursor))
+            if let last = result.last, !last.isWhitespace { result += " " }
+            result += "[\(i + 1)]"
+            if end < words.length, let next = UnicodeScalar(words.character(at: end)), !CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters).contains(next) { result += " " }
+            cursor = end
+        }
+        result += words.substring(from: cursor)
+        for (i, selection) in selections.enumerated() { result += "\n\n[\(i + 1)] " + selection.source + "\n" + selection.text }
+        return result
     }
     var conversationHistory: [[String: String]] {
         messages.filter { $0.speaker != "Conversation" }.map {
@@ -9389,7 +9479,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         liveTranscript?.cancel(); liveTranscript = nil
         finishingTranscript?.cancel(); finishingTranscript = nil
         recordedClips.forEach { $0.1?.cancel() }
-        recording = nil; recordedClips.removeAll(); transcripts.removeAll()
+        recording = nil; recordedClips.removeAll(); transcripts.removeAll(); wordEnds.removeAll()
     }
     func resumeSession(_ id: UUID) -> Bool {
         guard pauseID == id else { return false }
@@ -9412,6 +9502,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func chatURL(_ id: UUID) -> URL { saveURL.deletingLastPathComponent().appendingPathComponent(id.uuidString + ".json") }
     private func writeLibrary() throws {
         library.draftDirectory = messages.isEmpty ? directory : nil
+        library.draftSelections = messages.isEmpty && !selections.isEmpty ? selections : nil
         library.draftCapture = messages.isEmpty ? pendingCapture : nil
         library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
@@ -9423,7 +9514,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter)
+                let saved = Saved(messages: rows, selections: selections.isEmpty ? nil : selections, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter)
                 try recordChat(saved)
             }
             try writeLibrary(); return true
@@ -9431,7 +9522,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func apply(_ saved: Saved) {
         directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
-        pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
+        selections = saved.selections ?? []; pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
         activities = (saved.activities ?? []).map { activity in
             var value = activity
             if value.state == "Running" { value.state = "Interrupted" }
@@ -9462,7 +9553,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if library.chats.contains(where: { $0.id == library.selected }) {
                     let loaded = try readChat(library.selected); checkpoint = loaded; apply(loaded.saved)
                 } else {
-                    pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
+                    selections = library.draftSelections ?? []; pendingCapture = library.draftCapture; input.stringValue = library.draftText ?? ""; directory = library.draftDirectory
                     refreshScope(); state(.idle, "Voice off")
                 }
             } else {
@@ -9615,7 +9706,7 @@ final class SpokenReview {
                 guard let self, !self.audio.stopped, self.decoding != nil else { return }
                 self.watchdog?.invalidate(); self.decoding = nil
                 switch result {
-                case .success(let text): if text.isEmpty { self.resume() } else { self.submit(text) }
+                case .success(let transcript): if transcript.text.isEmpty { self.resume() } else { self.submit(transcript.text) }
                 case .failure(let error): self.finish(error.localizedDescription)
                 }
             }
@@ -11094,7 +11185,16 @@ struct Daemon {
                         #endif
                         reply.send(["status": "error", "error": "Voice chat requires macOS 26."])
                     } else if request.command == "selection_notice" {
-                        onMain { ui.showSelection(request); reply.send(["status": "ok"]) }
+                        onMain {
+                            var number: Int?
+                            #if canImport(FoundationModels)
+                            if #available(macOS 26, *), let id = request.selection_chat,
+                               let time = request.selection_time, let source = request.selection_source, let text = request.selection_text {
+                                number = overview.currentConversation().addSelection(chat: id, time: time, source: source, text: text)
+                            }
+                            #endif
+                            ui.showSelection(request, number: number); reply.send(["status": "ok"])
+                        }
                     } else if request.command == "toast" {
                         let lines = [request.title, request.question].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
                         guard lines.count == 2, lines.allSatisfy({ !$0.isEmpty && $0.count <= 160 && $0.rangeOfCharacter(from: .controlCharacters) == nil }) else {

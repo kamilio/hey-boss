@@ -1,12 +1,22 @@
 import AppKit
 
-/// A session-only probe. No clipboard, history, or conversation delivery.
+/// Read only the selected range; never touch the clipboard.
 final class SelectionCapture: NSObject, NSMenuItemValidation {
     private var monitor: Any?
     private var down: CGPoint?
     private var session = UUID()
     private let queue = DispatchQueue(label: "hey-talk.selection", qos: .userInitiated)
     private var terminalHintShown = false
+    private var manual = false
+    private var mutedChat: String?
+    var conversation: String? {
+        didSet {
+            guard oldValue != conversation else { return }
+            mutedChat = nil
+            session = UUID()
+            updateMonitor()
+        }
+    }
     var enabled: Bool { monitor != nil }
 
     func menuItem() -> NSMenuItem {
@@ -23,16 +33,23 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
     }
 
     @objc private func toggle(_ sender: NSMenuItem) {
-        if enabled { stop() }
+        if enabled { manual = false; mutedChat = conversation }
         else if AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) {
-            monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .keyUp]) { [weak self] in self?.event($0) }
+            manual = conversation == nil; mutedChat = nil
         }
+        updateMonitor()
         _ = validateMenuItem(sender)
         if !enabled && !AXIsProcessTrusted() {
             toast("Selection Capture is off", "Allow Hey Talk in Accessibility, then turn capture on.")
         } else if enabled {
             toast("Selection Capture is on", "Highlight text in your browser, cmux, T3, or Slack.")
         }
+    }
+
+    private func updateMonitor() {
+        guard manual || (conversation != nil && mutedChat != conversation) else { if enabled { stop() }; return }
+        guard !enabled, AXIsProcessTrusted() else { return }
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .keyUp]) { [weak self] in self?.event($0) }
     }
 
     func stop() {
@@ -70,7 +87,10 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
                     return
                 }
                 let stamp = time.formatted(date: .omitted, time: .standard)
-                self.send(Self.notice(app: app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), text: capture.text))
+                var request = Self.notice(app: app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), text: capture.text)
+                request["selection_chat"] = self.conversation
+                request["selection_time"] = time.timeIntervalSince1970
+                self.send(request)
             }
         }
     }
@@ -128,6 +148,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
         let longest = content.split(whereSeparator: { $0 != "`" }).map(\.count).max() ?? 0
         let fence = String(repeating: "`", count: max(3, longest + 1))
         return ["command": "selection_notice", "sync": false, "title": app,
+                "selection_text": text, "selection_source": app + " · " + detail,
                 "description": String(text.prefix(240)), "question": fence + "\n" + content + "\n" + fence]
     }
 

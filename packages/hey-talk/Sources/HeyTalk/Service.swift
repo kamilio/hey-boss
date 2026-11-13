@@ -312,6 +312,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     func applyConversation(_ state: [String: Any]?) {
         conversationRevision += 1
+        selectionCapture.conversation = state?["selection_chat"] as? String
         let next = state?["active"] as? Bool == true ? state : nil
         if next != nil, waitingPaste != nil || session.phase == .processing || (session.phase == .recording && autoTarget == nil) {
             if next?["microphone"] as? Bool == true && resumedDuringProcessing != session.generation {
