@@ -3455,13 +3455,17 @@ fn pr_review_comments_and_edited_wording_replicate() {
     let fb = Fixture::new();
     let b = fb.db();
     install(&b, "b").unwrap();
-    a.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer',node='a'; INSERT INTO pr_code_reviews VALUES(45,'p',8,'abc','Fix timezone','submitted','APPROVE','Looks good',2,1,2,'',''); INSERT INTO pr_code_comments VALUES(43,'p',45,1,'{}','context line','Check timezone');").unwrap();
+    a.execute_batch("UPDATE distributed_meta SET active=1; UPDATE fleet_meta SET role='peer',node='a'; INSERT INTO pr_code_reviews VALUES(45,'p',8,'abc','Fix timezone','submitted','APPROVE','Looks good',2,1,2,'',''); INSERT INTO pr_code_comments VALUES(43,'p',45,1,'{}','context line','Check timezone'); INSERT INTO issue_code_reviews VALUES('p',1,45);").unwrap();
     b.execute_batch("UPDATE distributed_meta SET active=1,controller='a'; UPDATE fleet_meta SET role='peer',node='b';").unwrap();
     let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
     let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
     capture_all(&a, &mut ea);
     transfer(&ea, &mut eb);
     capture_all(&b, &mut eb);
+    assert_eq!(
+        b.query_row("SELECT count(*) FROM issue_code_reviews WHERE project_id='p' AND issue_number=1 AND review_id=45", [], |r| r.get::<_, i64>(0)).unwrap(),
+        1
+    );
     assert_eq!(
         b.query_row(
             "SELECT body FROM pr_code_comments WHERE review_id=45",
