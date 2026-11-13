@@ -63,19 +63,23 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
         let point = event.cgEvent?.location
         if event.type == .leftMouseDown { down = point; return }
         let keyboard = event.type == .keyUp
+        let addressOnly: Bool
         if keyboard {
-            guard event.modifierFlags.contains(.shift), (123...126).contains(event.keyCode) else { return }
+            let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+            addressOnly = modifiers == .command && ["l", "a"].contains(event.charactersIgnoringModifiers?.lowercased())
+            guard addressOnly || (modifiers.contains(.shift) && (123...126).contains(event.keyCode)) else { return }
         } else {
             defer { down = nil }
-            guard let down, let point, hypot(point.x - down.x, point.y - down.y) >= 3 ||
-                    event.clickCount >= 2 || event.modifierFlags.contains(.shift) else { return }
+            guard let down, let point else { return }
+            addressOnly = hypot(point.x - down.x, point.y - down.y) < 3 && event.clickCount < 2 && !event.modifierFlags.contains(.shift)
         }
-        guard let app = NSWorkspace.shared.frontmostApplication,
-              BrowserPage.isBrowser(app) || ["com.cmuxterm.app", "com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(app.bundleIdentifier) else { return }
+        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        let browser = BrowserPage.isBrowser(app)
+        guard browser || (!addressOnly && ["com.cmuxterm.app", "com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(app.bundleIdentifier)) else { return }
         let id = session, time = Date(), hit = keyboard ? nil : point
         queue.async {
             guard app.isActive else { return }
-            let capture = Self.read(app, at: hit)
+            let capture = Self.read(app, at: hit, addressOnly: addressOnly)
             DispatchQueue.main.async {
                 guard self.session == id, self.enabled else { return }
                 guard let capture else { return }
@@ -95,7 +99,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
         }
     }
 
-    private static func read(_ app: NSRunningApplication, at point: CGPoint?) -> (text: String, source: [String])? {
+    private static func read(_ app: NSRunningApplication, at point: CGPoint?, addressOnly: Bool) -> (text: String, source: [String])? {
         guard let window = ConversationContext.focusedWindow(app) else { return nil }
         let root = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(root, 0.08)
@@ -104,6 +108,8 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &node) == .success else { return nil }
         } else { node = SpeechAX.element(root, "AXFocusedUIElement") }
         guard let first = node, let owner = SpeechAX.element(first, "AXWindow"), CFEqual(owner, window) else { return nil }
+        // For a click or ⌘L/⌘A, never reuse a selection elsewhere on the page.
+        if addressOnly && SpeechAX.string(first, "AXRole") != "AXTextField" { return nil }
         var chain = [AXUIElement]()
         for _ in 0..<48 {
             guard let item = node else { break }
@@ -113,6 +119,15 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             if SpeechAX.string(item, "AXRole") == "AXWebArea" || CFEqual(item, window) { break }
             node = SpeechAX.element(item, "AXParent")
         }
+        if BrowserPage.isBrowser(app), let last = chain.last, CFEqual(last, window),
+           let field = chain.first(where: { SpeechAX.string($0, "AXRole") == "AXTextField" }),
+           isAddressField(identifier: SpeechAX.string(field, "AXIdentifier"), domID: SpeechAX.string(field, "AXDOMIdentifier"), description: SpeechAX.string(field, "AXDescription")) {
+            let text = SpeechAX.string(field, "AXSelectedText")
+            guard !text.isEmpty, !text.allSatisfy(\.isWhitespace) else { return nil }
+            let page = BrowserPage.url(window, "AXDocument") ?? BrowserPage.page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.08)?.url
+            return (text, [SpeechAX.string(window, "AXTitle"), "Address bar", page?.absoluteString ?? ""].filter { !$0.isEmpty })
+        }
+        guard !addressOnly else { return nil }
         var text: String?
         for item in chain {
             if let s = SpeechAX.value(item, "AXSelectedText") as? String, !s.isEmpty { text = s; break }
@@ -141,6 +156,11 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             if let tab = field.cmuxTab { source.append(SpeechAX.string(tab, "AXDescription")) }
         }
         return (text, source.filter { !$0.isEmpty })
+    }
+
+    static func isAddressField(identifier: String, domID: String, description: String) -> Bool {
+        identifier == "WEB_BROWSER_ADDRESS_AND_SEARCH_FIELD" || domID == "urlbar-input" ||
+        description == "Address and search bar"
     }
 
     static func notice(app: String, detail: String, text: String) -> [String: Any] {

@@ -8,7 +8,7 @@ to Hyper (Control + Command + Option + Shift). Click the pill to toggle recordin
 drag to move it, or press Esc to discard. Clicking the pill follows the same
 Auto Submit setting. CLI commands without `--submit` paste by default.
 
-**Selection Capture** (waveform menu or right-click the pill) previews highlights from your browser, cmux, T3, or Slack. Drag and release, double-click a word, or select with Shift+Arrow. In a remote cmux program that handles its own mouse, hold Shift while dragging. Open the Hey Boss notice to inspect the full quote and source. With a conversation open or voice running, highlights attach to your next message as [1], [2], and so on. The full selections and sources appear below the transcript and stay in that chat. Outside a conversation the toggle only previews highlights.
+**Selection Capture** (waveform menu or right-click the pill) previews highlights from your browser, cmux, T3, or Slack. Drag and release, double-click a word, or select with Shift+Arrow. In your browser, press **⌘L** or click the address bar to capture the URL if it becomes selected. Drag over part of the address to capture just that text. In a remote cmux program that handles its own mouse, hold Shift while dragging. Open the Hey Boss notice to inspect the full quote and source. With a conversation open or voice running, highlights attach to your next message as [1], [2], and so on. The full selections and sources appear below the transcript and stay in that chat. Outside a conversation the toggle only previews highlights.
 
 
 Brief focus changes are silent. If the original destination is still unfocused after 0.8 seconds, the pill shows **Waiting to paste**.
