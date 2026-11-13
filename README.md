@@ -467,7 +467,10 @@ Codex-only; it does not disable hooks globally or add `--no-verify` automaticall
 
 Agent configuration and fleet upgrade migrations also set `features.worktrees = false`
 in Codex's `config.toml`, disabling its built-in worktree feature. Restart existing
-Codex sessions to load the change. Existing worktrees are preserved.
+Codex sessions to load the change. Existing worktrees are preserved. On Linux,
+setup also sets `sandbox_workspace_write.network_access = true` so commands can
+reach the local Hey Boss database socket. This enables networking for all
+workspace-write commands. Named permission profiles retain their own network policy.
 
 The updater preserves unrelated settings and formatting, recognizes existing
 permission entries, and does not touch `default.rules`. It validates

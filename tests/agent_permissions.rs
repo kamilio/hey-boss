@@ -88,7 +88,11 @@ fn new_configs_are_global_scoped_and_idempotent() {
     );
     assert_eq!(
         fs::read_to_string(fixture.0.join(".codex/config.toml")).unwrap(),
-        "model = 'custom'\n\n[features]\nworktrees = false\n"
+        if cfg!(target_os = "linux") {
+            "model = 'custom'\n\n[features]\nworktrees = false\n\n[sandbox_workspace_write]\nnetwork_access = true\n"
+        } else {
+            "model = 'custom'\n\n[features]\nworktrees = false\n"
+        }
     );
     let inode = fs::metadata(fixture.settings()).unwrap().ino();
     fixture.success();
@@ -133,6 +137,31 @@ fn codex_worktrees_are_disabled_without_changing_other_settings() {
         assert_eq!(fs::read_to_string(&path).unwrap(), changed);
         assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
     }
+}
+
+#[test]
+fn existing_workspace_network_setting_is_merged_only_on_linux() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join(".codex/config.toml");
+    let source = "[features]\nworktrees = false\n[sandbox_workspace_write]\nnetwork_access = false # existing\nwritable_roots = ['/srv/build']\n";
+    fs::write(&path, source).unwrap();
+    fixture.success();
+    let expected = if cfg!(target_os = "linux") {
+        source.replace("network_access = false", "network_access = true")
+    } else {
+        source.to_owned()
+    };
+    assert_eq!(fs::read_to_string(path).unwrap(), expected);
+}
+
+#[test]
+fn named_permission_profiles_keep_their_own_network_policy() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join(".codex/config.toml");
+    let source = "default_permissions = ':workspace'\n[features]\nworktrees = false\n";
+    fs::write(&path, source).unwrap();
+    fixture.success();
+    assert_eq!(fs::read_to_string(path).unwrap(), source);
 }
 
 #[test]
