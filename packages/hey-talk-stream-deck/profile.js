@@ -6,10 +6,7 @@ import {keys,prefix} from "./keys.js";
 // Stream Deck's editable six-key profile. Page controls are native Elgato actions.
 const pages = [
   ["dictation","conversation","stop","auto","catch-up","next"],
-  ["mute","interrupt","transcript","previous","new-chat","next"],
-  ["submit","correction","return","previous","send","next"],
-  ["speech","play","pill","previous","history","next"],
-  ["vocabulary","permissions",null,"previous"]
+  ["mute","interrupt","transcript","previous"]
 ];
 const guid = n => "cc888980-91af-4751-978e-"+String(n).padStart(12,"0");
 export async function miniProfile(dir,version) {

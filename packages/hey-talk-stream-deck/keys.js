@@ -1,5 +1,6 @@
 // 24-point line icons; the same shapes identify a key in the action list and on the deck.
 export const prefix = "local.heytalk.deck";
+export const hiddenKeys = new Set(["submit","correction","return","pill","history","vocabulary","permissions"]);
 export const keys = {
   dictation: ["Dictation", "Start or finish dictation, including during a conversation.", "M7 9v6 M12 5v14 M17 7.5v9"],
   conversation: ["Conversation", "Start voice chat, then use the current conversation action.", "M3 4h13v10H8l-5 4z M17 9h4v12l-4-3h-5v-2"],

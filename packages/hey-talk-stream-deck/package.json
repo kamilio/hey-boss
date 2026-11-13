@@ -16,5 +16,5 @@
     "@elgato/cli": "^1.10.4",
     "esbuild": "^0.28.2"
   },
-  "version": "1.0.2"
+  "version": "1.0.3"
 }

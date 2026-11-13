@@ -467,4 +467,4 @@ Auto Submit without interrupting recording, Hyper+R respects that setting, and s
 See [THIRD_PARTY.md](THIRD_PARTY.md) for the retained OpenWhispr, sherpa-onnx,
 ONNX Runtime, and Orukeet licenses.
 
-**Stream Deck:** [Hey Talk for Stream Deck](../hey-talk-stream-deck/) provides live, icon-only keys and a five-page Mini profile.
+**Stream Deck:** [Hey Talk for Stream Deck](../hey-talk-stream-deck/) provides live, icon-only keys and a two-page Mini profile.
