@@ -42,7 +42,7 @@ enum CatchUpSource: Equatable {
     }
 }
 
-struct SpokenRecap: Encodable {
+struct SpokenRecap: Codable {
     var lastMessage: String? = nil
     var replies: String? = nil
     var note: String? = nil

@@ -95,8 +95,8 @@ controls whether it sends. Name a project to switch projects, or leave out the t
 reads the current sidebar first and resolves the title among positions 1–9. If the list changes before navigation, the action stops.
 “Settle this thread”, “Pin this thread”, and “Unpin this thread” check the current state, so repeating a command is safe. You can also say “stop pinning this chat”.
 After a T3 action, a check slides out to the left and the pill glows softly green for three seconds. A failed thread action shows a red glow, a cross, and a short explanation for five seconds. Paste, clear, and sidebar lookups stay quiet.
-Rename, pin/unpin, and settle use T3’s protocol-2 API with five-minute credentials issued on the thread’s host and held only in memory.
-Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts. Catch Up and thread actions work locally and over T3 Desktop’s open SSH connections.
+Catch Up, rename, pin/unpin, and settle use [hey-t3](../hey-t3/README.md). Run `hey-t3 connect SSH_HOST` once per remote environment.
+Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts.
 These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
 name and bundle identifier, plus the current T3 thread title, refreshed after navigation. Auto Dictation resumes listening
 after switching, pinning, unpinning, or settling.

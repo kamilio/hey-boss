@@ -53,22 +53,6 @@ final class CatchUpTests: XCTestCase {
         XCTAssertEqual(spoken, ["It passed."])
     }
 
-    func testT3ReadsOnlyAssistantTextAfterLastHumanMessage() throws {
-        func row(_ type: String, _ text: String, _ author: String = "agent") -> [String: Any] {
-            ["item": ["type": type, "text": text, "createdBy": author]]
-        }
-        let items = [row("user_message","first","user"), row("assistant_message","old"), row("user_message","latest","user"),
-                     row("assistant_message","Checking."), row("reasoning","hidden"), row("command_execution","log"),
-                     row("user_message","internal event"), row("assistant_message","Done.")]
-        var replies = [String]()
-        XCTAssertNil(try T3Server.catchUpText(Array(items.suffix(2)), newer: &replies))
-        let passage = try XCTUnwrap(T3Server.catchUpText(Array(items.dropLast(2)), newer: &replies))
-        XCTAssertEqual(passage.lastMessage, "latest")
-        XCTAssertEqual(passage.replies, "Checking.\n\nDone.")
-        replies = []
-        XCTAssertThrowsError(try T3Server.catchUpText(Array(items.prefix(3)), newer: &replies))
-    }
-
     func testChannelPagesBackToMeAndNamesSpeakers() async throws {
         var calls = [String]()
         let result = try await SlackTools.catchUp(URL(string: "https://app.slack.com/client/T123/C456")!) { method, p in

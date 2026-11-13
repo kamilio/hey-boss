@@ -45,6 +45,7 @@ if [ "$(uname -m)" = arm64 ]; then
 fi
 install_name_tool -change '@rpath/libonnxruntime.dylib' '@loader_path/libonnxruntime.dylib' "$app/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
 cp THIRD_PARTY.md "$app/Contents/Resources/"
+cp ../hey-t3/hey-t3.mjs "$app/Contents/Resources/"
 cp vocabulary.md Sources/HeyTalk/speech-model.json "$app/Contents/Resources/"
 cp Sources/HeyTalk/Prompts/*.md "$app/Contents/Resources/"
 cp -R Licenses "$app/Contents/Resources/"
