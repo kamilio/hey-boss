@@ -21,6 +21,7 @@ func audit() {
         defer { NSStatusBar.system.removeStatusItem(item) }
         toast.show("Sculpt numpad", "Shortcuts on", symbol: "keyboard", below: item.button)
         let number = toast.window.windowNumber
+        precondition(item.button!.isHighlighted)
         precondition(toast.window.isVisible && !toast.window.isKeyWindow && toast.window.ignoresMouseEvents)
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 1))
         if let button = item.button, let bar = button.window, let area = bar.screen?.visibleFrame {
@@ -33,7 +34,7 @@ func audit() {
         precondition(toast.window.isVisible && toast.window.windowNumber == number)
         precondition(toast.label.stringValue == "Number keys on")
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 1.2))
-        precondition(!toast.window.isVisible)
+        precondition(!toast.window.isVisible && !item.button!.isHighlighted)
         print("Toast replaced in place and expired without taking focus")
         return
     }

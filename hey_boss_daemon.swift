@@ -1492,6 +1492,7 @@ final class StatusToast {
     let label = NSTextField(labelWithString: "")
     private let icon = NSImageView()
     private var expiry: Timer?
+    private weak var sourceControl: NSButton?
 
     init() {
         let surface = nativeBackdrop()
@@ -1517,10 +1518,14 @@ final class StatusToast {
         window.contentView = surface
     }
 
-    func show(_ title: String, _ message: String, symbol: String?, below button: NSStatusBarButton?) {
+    func show(_ title: String, _ message: String, symbol: String?, below button: NSStatusBarButton?, control: NSButton? = nil) {
         let anchor = button.flatMap { b in b.window?.convertToScreen(b.convert(b.bounds, to: nil)) }
         guard let area = (button?.window?.screen ?? NSScreen.main)?.visibleFrame else { return }
         expiry?.invalidate()
+        sourceControl?.highlight(false)
+        sourceControl = control
+        control?.highlight(true)
+        button?.highlight(true)
         heading.stringValue = title; label.stringValue = message
         icon.image = symbol.flatMap { NSImage(systemSymbolName: $0, accessibilityDescription: nil) }
             ?? NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: nil)
@@ -1543,7 +1548,11 @@ final class StatusToast {
                 window.animator().setFrame(frame, display: true)
             }
         }
-        let timer = Timer(timeInterval: 2, repeats: false) { [weak self] _ in self?.window.orderOut(nil) }
+        let timer = Timer(timeInterval: 2, repeats: false) { [weak self, weak button] _ in
+            self?.window.orderOut(nil)
+            button?.highlight(false)
+            self?.sourceControl?.highlight(false)
+        }
         expiry = timer; RunLoop.main.add(timer, forMode: .common)
     }
 }
@@ -5125,6 +5134,7 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     let emptyTitle = NSTextField(labelWithString: "No agents running")
     let emptyHint = NSTextField(wrappingLabelWithString: "Start a Claude or Codex session, then reopen or refresh this overview.")
     let emptyState = NSStackView()
+    let toast = StatusToast()
     let statusItem: NSStatusItem?
     var detailBottomConstraint: NSLayoutConstraint?
     var detailHeightConstraint: NSLayoutConstraint?
@@ -5351,13 +5361,13 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @available(macOS 26, *)
     var conversationStatus: [String: Any] { (conversationWindow as? VoiceConversation)?.voiceStatus ?? ["active": false] }
     @available(macOS 26, *)
-    func controlConversation(_ action: String?) -> Bool {
+    func controlConversation(_ action: String?, source: String = "Hey Boss") -> Bool {
         guard let chat = conversationWindow as? VoiceConversation, chat.voiceStatus["active"] as? Bool == true else { return false }
         if chat.window.attachedSheet != nil, action != "stop" { chat.show(); return true }
         if action == "show" { chat.show() }
         else if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
         else if action == "stop" { chat.stop("Microphone off") }
-        else if action == "pause_listening" || action == "resume_listening" { chat.setListeningPaused(action == "pause_listening") }
+        else if action == "pause_listening" || action == "resume_listening" { chat.setListeningPaused(action == "pause_listening", source: source) }
         else if action == "interrupt" { chat.listenForNextTurn() }
         else { chat.toggle() }
         return true
@@ -5365,6 +5375,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     @available(macOS 26, *)
     func currentConversation() -> VoiceConversation {
         let conversation = conversationWindow as? VoiceConversation ?? VoiceConversation(cli: cli ?? "/opt/homebrew/bin/hey-boss")
+        conversation.showControlToast = { [weak self] source, message, symbol, control in
+            guard let self else { return }
+            self.toast.show(source, message, symbol: symbol, below: self.statusItem?.button, control: control)
+        }
         conversationWindow = conversation; return conversation
     }
     #endif
@@ -7911,6 +7925,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let listenNext = NSButton()
     let muteMic = NSButton()
     let pauseReply = NSButton()
+    var showControlToast: ((String, String, String, NSButton) -> Void)?
     private var playbackPaused = false
     private var micMuted: Bool { audio?.inputMuted == true }
     private var sessionLock: FileHandle?
@@ -8404,10 +8419,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var canPauseListening: Bool {
         pauseID == nil && approvalSheet == nil && audio?.stopped == false && (phase == .listening || phase == .recording)
     }
-    func setListeningPaused(_ paused: Bool) {
+    func setListeningPaused(_ paused: Bool, source: String = "Hey Boss") {
         guard canPauseListening, micMuted != paused else { return }
         audio?.muteInput(paused)
         state(phase, phase == .recording ? "Recording" : "Listening")
+        showControlToast?(source, paused ? "Listening paused" : "Listening resumed", paused ? "pause.fill" : "play.fill", muteMic)
     }
     private func publishVoiceStatus() {
         guard Bundle.main.bundleIdentifier == "local.hey-boss.desktop" else { return }
@@ -8492,6 +8508,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         playbackPaused.toggle()
         if playbackPaused { audio.pause(); state(.speaking, "Paused") }
         else { audio.resume(); state(.speaking, "Speaking"); playNext() }
+        showControlToast?("Hey Boss", playbackPaused ? "Reply paused" : "Reply resumed", playbackPaused ? "pause.fill" : "play.fill", pauseReply)
     }
     @objc func toggleMute() {
         guard let audio, !audio.stopped, phase != .starting else { return }
@@ -10984,7 +11001,6 @@ struct Daemon {
         app.delegate = ArtifactEditors.shared
         NativeArtifactEditor.installMenu()
         ArtifactEditors.shared.restoreDrafts()
-        let toast = StatusToast()
         let ui = Interface(present: true)
         let overview = AgentsOverview()
         _ = overview.quickIssueShortcut
@@ -11049,7 +11065,10 @@ struct Daemon {
                                     reply.send(["status": "ok", "conversation": overview.conversationStatus]); return
                                 }
                                 if request.command == "conversation_control" {
-                                    reply.send(["status": overview.controlConversation(request.title) ? "ok" : "unhandled", "conversation": overview.conversationStatus]); return
+                                    var pid: pid_t = 0, length = socklen_t(MemoryLayout<pid_t>.size)
+                                    let source = getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0
+                                        ? NSRunningApplication(processIdentifier: pid)?.localizedName : nil
+                                    reply.send(["status": overview.controlConversation(request.title, source: source ?? "Hey Boss") ? "ok" : "unhandled", "conversation": overview.conversationStatus]); return
                                 }
                                 if request.command == "conversation_start" {
                                     overview.currentConversation().startFromPill()
@@ -11068,7 +11087,7 @@ struct Daemon {
                             reply.send(["status": "error", "error": "Toast title and message must each be one line of 1–160 characters"]); return
                         }
                         onMain {
-                            toast.show(lines[0], lines[1], symbol: request.icon, below: overview.statusItem?.button)
+                            overview.toast.show(lines[0], lines[1], symbol: request.icon, below: overview.statusItem?.button)
                             reply.send(["task_id": "toast", "status": "ok"])
                         }
                     } else if request.command == "secret" {

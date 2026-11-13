@@ -480,7 +480,7 @@ correct it and rerun `agent configure`. To remove these permissions, delete the
 managed `hey-boss.rules` file and remove only the hey-boss entries from Claude's
 `permissions.allow` array.
 
-For a local mode change, `hey-boss notif toast --title 'Sculpt numpad' --icon keyboard 'Shortcuts on'` shows a small glass label beneath the Hey Boss menu-bar icon. It disappears after two seconds; another toast replaces it. Toasts do not take focus or create Inbox history. Rust callers can use `Client::toast(title, message, icon)` on the local desktop client.
+For a local mode change, `hey-boss notif toast --title 'Hey Keyboard' --icon keyboard 'Sculpt · Shortcuts on'` shows a small glass label beneath the highlighted Hey Boss menu-bar icon. Use the sending app as the title. Pausing or resuming conversation listening or reply playback uses the same toast. It disappears after two seconds; another toast replaces it. Toasts do not take focus or create Inbox history. Rust callers can use `Client::toast(title, message, icon)` on the local desktop client.
 
 Mac banners disappear after 12 seconds (alerts) or 20 seconds (updates), pausing while you read them. They stay unread and can be reopened from the menu-bar Inbox. Questions remain open; explicit `--autoclose` keeps its completion behavior. Three or more notifications form a collapsible project stack. The project × dismisses the stack. Read update/Open dismisses its card and keeps history. Questions support `--sync` and `--async`. Run `hey-boss --help` for concise usage guidance.
 
