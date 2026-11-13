@@ -1,4 +1,4 @@
-import {keys, artwork} from "./keys.js";
+import {keys, hiddenKeys, artwork} from "./keys.js";
 import {mkdir, writeFile} from "node:fs/promises";
 import {execFileSync} from "node:child_process";
 const dest = process.argv[2] ?? "dist/preview";
@@ -13,9 +13,10 @@ const states={
 };
 const svgURI=svg=>"data:image/svg+xml;base64,"+Buffer.from(svg).toString("base64");
 const items=(id,all=true)=>(all?[...states[id],"Offline","Update app"]:states[id]).map(state=>artwork(id,state,{level:4,progress:6}));
+const visible = Object.entries(keys).filter(([id])=>!hiddenKeys.has(id));
 const groups={"Mini · first page":["dictation","conversation","stop","auto","catch-up"].map(id=>artwork(id,states[id][0]))};
-groups["Action list icons"]=Object.entries(keys).map(([id,[name,,d]])=>'<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144"><rect width="144" height="144" rx="10" fill="#12161f"/><path transform="translate(48 31) scale(2)" d="'+d+'" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="72" y="111" font-size="16" font-family="Helvetica, sans-serif" text-anchor="middle" fill="white">'+name+'</text></svg>');
-for(const id of Object.keys(keys)) groups[keys[id][0]]=items(id);
+groups["Action list icons"]=visible.map(([id,[name,,d]])=>'<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144"><rect width="144" height="144" rx="10" fill="#12161f"/><path transform="translate(48 31) scale(2)" d="'+d+'" fill="none" stroke="white" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><text x="72" y="111" font-size="16" font-family="Helvetica, sans-serif" text-anchor="middle" fill="white">'+name+'</text></svg>');
+for(const [id] of visible) groups[keys[id][0]]=items(id);
 groups["Auto mode & badges"]=[false,true].flatMap(auto=>[false,true].flatMap(c=>[false,true].map(s=>artwork("dictation","Recording",{auto:auto?"On":"Off",correction:c?"Off":"On",submit:s?"Off":"On",level:4}))));
 groups["Live meter & progress"]=[...Array.from({length:6},(_,level)=>artwork("dictation","Recording",{level})),...Array.from({length:10},(_,progress)=>artwork("dictation","Processing",{progress}))];
 const name="Hey Talk · Stream Deck";
@@ -28,7 +29,7 @@ await writeFile(dest+"/gallery.html",page);
 // Each sheet is rasterized from the exact SVG sent in setImage, including key typography.
 for(const [slug, labels] of Object.entries({
  voice:["Dictation","Conversation","Auto mode & badges","Live meter & progress"],
- controls:Object.values(keys).map(k=>k[0]).filter(n=>!["Dictation","Conversation"].includes(n)),
+ controls:visible.map(([,k])=>k[0]).filter(n=>!["Dictation","Conversation"].includes(n)),
  icons:["Action list icons"]
 })){
   let y=68,content='';
