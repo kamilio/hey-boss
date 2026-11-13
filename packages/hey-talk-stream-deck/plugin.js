@@ -21,7 +21,7 @@ function draw(context, key) {
   const level = ["Recording","Listening"].includes(state) ? frame.level ?? 0 : 0;
   const stamp = [state,level,...(key.id==="dictation" ? [frame.auto,frame.submit,frame.correction,frame.progress] : [])].join("|");
   if (key.stamp === stamp) return;
-  const image = "data:image/svg+xml;base64,"+Buffer.from(artwork(key.id,state,frame,key.appearance)).toString("base64");
+  const image = "data:image/svg+xml;base64,"+Buffer.from(artwork(key.id,state,frame)).toString("base64");
   send({event:"setImage", context, payload:{image}});
   key.stamp = stamp;
 }
@@ -77,7 +77,7 @@ async function keyDown(id) {
 }
 host.on("open", ()=>send({event:arg("-registerEvent"),uuid:arg("-pluginUUID")}));
 host.on("message", raw=>{
-  const {event,action,context,payload} = JSON.parse(raw);
+  const {event,action,context} = JSON.parse(raw);
   if (!action?.startsWith(prefix+".")) return;
   const id = action.slice(prefix.length+1);
   if (!Object.hasOwn(keys,id)) return;
@@ -85,9 +85,7 @@ host.on("message", raw=>{
   const invoke = action => keyDown(action).catch(()=>send({event:"showAlert",context}));
   if (event === "willAppear") {
     clearTimeout(visible.get(context)?.hold);
-    const key = {id,appearance:payload?.settings?.appearance}; visible.set(context,key); draw(context,key); clearTimeout(retry); watch();
-  } else if (event === "didReceiveSettings" && key) {
-    key.appearance=payload.settings?.appearance; key.stamp=undefined; draw(context,key);
+    const key = {id}; visible.set(context,key); draw(context,key); clearTimeout(retry); watch();
   } else if (event === "willDisappear") {
     clearTimeout(key?.hold);
     visible.delete(context);

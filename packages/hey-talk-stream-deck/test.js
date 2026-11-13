@@ -56,16 +56,7 @@ test("keys register, follow external changes, route presses once, and go offline
   await until(()=>calls.length===1);
   assert.deepEqual(calls,["conversation"]);
   const dict = event=>send(event,"d","dictation");
-  dict("willAppear");
-  client.send(JSON.stringify({event:"willAppear",context:"styled",action:prefix+".dictation",payload:{settings:{appearance:"monochrome"}}}));
-  stream.write('{"ok":true,"dictation":"Recording","level":2,"conversation":"Ready"}\n');
-  await until(()=>title("d","Recording") && title("styled","Recording"));
-  const svg = c=>Buffer.from(events.find(e=>matches(e,c,"Recording")).payload.image.split(",")[1],"base64").toString();
-  assert.match(svg("styled"),/#12191e/);
-  assert.doesNotMatch(svg("styled"),/linearGradient/);
-  assert.match(svg("d"),/linearGradient/);
-  assert.match(svg("styled"),/width="2.5"/); // Live input meter.
-  dict("keyDown"); dict("keyUp");
+  dict("willAppear"); dict("keyDown"); dict("keyUp");
   await until(()=>calls.length===2);
   dict("keyDown");
   await until(()=>calls.length===3);
