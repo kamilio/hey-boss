@@ -539,10 +539,11 @@ fn staged_migration_does_not_leave_a_temporary_service_running() {
         fixture.replacement.is_none(),
         "Staged installer left a companion running"
     );
-    assert!(
-        fs::read_to_string(fixture.root.join("codex/config.toml"))
-            .unwrap()
-            .contains("worktrees = false")
+    let config = fs::read_to_string(fixture.root.join("codex/config.toml")).unwrap();
+    assert!(config.contains("worktrees = false"));
+    assert_eq!(
+        config.contains("network_access = true"),
+        cfg!(target_os = "linux")
     );
     let db = rusqlite::Connection::open(fixture.root.join("issues.db")).unwrap();
     assert!(

@@ -328,7 +328,7 @@ fn unique_file(path: &Path, suffix: &str) -> io::Result<(PathBuf, File)> {
     }
 }
 
-pub fn disable_codex_worktrees() -> io::Result<()> {
+pub fn configure_codex_settings() -> io::Result<()> {
     let path = config_home("CODEX_HOME", ".codex")?.join("config.toml");
     let apply = || -> io::Result<()> {
         let config = ConfigFile::open(path.clone())?;
@@ -337,23 +337,26 @@ pub fn disable_codex_worktrees() -> io::Result<()> {
             .unwrap_or("")
             .parse::<toml_edit::DocumentMut>()
             .map_err(|_| invalid("Invalid Codex config TOML; left unchanged"))?;
-        if !doc.contains_key("features") {
-            doc["features"] = toml_edit::Item::Table(toml_edit::Table::new());
+        let mut settings = vec![("features", "worktrees", false)];
+        // Named permission profiles cannot be combined with sandbox_workspace_write.
+        if cfg!(target_os = "linux") && !doc.contains_key("default_permissions") {
+            settings.push(("sandbox_workspace_write", "network_access", true));
         }
-        let features = doc["features"]
-            .as_table_like_mut()
-            .ok_or_else(|| invalid("Codex features must be a TOML table"))?;
-        if features.get("worktrees").and_then(toml_edit::Item::as_bool) == Some(false) {
-            return Ok(());
+        for (section, key, enabled) in settings {
+            let table = doc
+                .entry(section)
+                .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+                .as_table_like_mut()
+                .ok_or_else(|| invalid(format!("Codex {section} must be a TOML table")))?;
+            if table.get(key).and_then(toml_edit::Item::as_bool) == Some(enabled) {
+                continue;
+            }
+            let mut value = toml_edit::value(enabled);
+            if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+                *value.as_value_mut().unwrap().decor_mut() = old.decor().clone();
+            }
+            table.insert(key, value);
         }
-        let mut disabled = toml_edit::value(false);
-        if let Some(old) = features
-            .get("worktrees")
-            .and_then(toml_edit::Item::as_value)
-        {
-            *disabled.as_value_mut().unwrap().decor_mut() = old.decor().clone();
-        }
-        features.insert("worktrees", disabled);
         config.write(&doc.to_string())
     };
     apply().map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))
@@ -441,7 +444,7 @@ pub fn configure(binaries: &[PathBuf]) -> io::Result<()> {
     claude
         .unchanged()
         .map_err(|e| contextual(&claude_path, e))?;
-    disable_codex_worktrees()?;
+    configure_codex_settings()?;
     codex
         .write(&rules)
         .map_err(|e| contextual(&codex_path, e))?;
