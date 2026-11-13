@@ -68,9 +68,9 @@ fn commit_attachments_survive_switching_to_a_pr_workflow() {
             .unwrap();
         p.wait("document.querySelector('.commit-count')?.textContent==='6'");
         assert_eq!(
-            p.eval("document.querySelector('.commit-section').open")
+            p.eval("document.querySelector('.commit-target').checkVisibility()")
                 .unwrap(),
-            false
+            true
         );
         assert_eq!(
             p.eval("document.querySelector('.commit-summary').innerText.includes('Commits')")
