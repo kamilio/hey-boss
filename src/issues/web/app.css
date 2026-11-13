@@ -2158,6 +2158,13 @@ details[open] > .activity-summary .activity-chevron { transform: rotate(90deg); 
 .commit-trace-row {
   margin-top: 4px;
 }
+#detail-view > .commit-section {
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  background: var(--surface);
+}
 .commit-summary {
   display: flex;
   align-items: center;
