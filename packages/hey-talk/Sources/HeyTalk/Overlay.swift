@@ -176,6 +176,7 @@ final class Overlay {
     private let noticeRecordButton = NSButton()
     var onToggle: (() -> Void)?
     var onOpenAccessibility: (() -> Void)?
+    let selectionCapture: SelectionCapture
     var onCatchUp: (() -> Void)?
     var onToggleSpeech: (() -> Void)?
     var onToggleAuto: (() -> Void)?
@@ -192,7 +193,8 @@ final class Overlay {
     var speechEnabled: () -> Bool = { false }
     var level: () -> Double = { 0 }
 
-    init() {
+    init(selectionCapture: SelectionCapture = SelectionCapture()) {
+        self.selectionCapture = selectionCapture
         panel = RecordingPanel(contentRect: root.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.title = "Hey Talk — Recording"
         panel.level = .statusBar
@@ -551,6 +553,7 @@ final class Overlay {
             if conversation["action"] as? String != "Cancel opening chat" {
                 menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
             }
+            menu.addItem(selectionCapture.menuItem())
             return menu
         }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
@@ -579,6 +582,7 @@ final class Overlay {
         start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")
         recap.target = self; recap.keyEquivalentModifierMask = [.control, .command, .option, .shift]
+        menu.addItem(selectionCapture.menuItem())
         menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Setup"))
         let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)
