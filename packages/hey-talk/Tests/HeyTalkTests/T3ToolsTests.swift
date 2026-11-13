@@ -78,9 +78,16 @@ final class T3ToolsTests: XCTestCase {
         XCTAssertThrowsError(try T3Server.command(.paste("oops"), thread: unpinned))
     }
 
+    func testLiveRemoteCatchUp() async throws {
+        guard let environment = ProcessInfo.processInfo.environment["HEY_TALK_T3_ENVIRONMENT"],
+              let id = ProcessInfo.processInfo.environment["HEY_TALK_T3_SERVER_THREAD"] else { throw XCTSkip("Requires a connected T3 thread with a reply") }
+        let recap = try await T3Server.shared.catchUp(id, environment: environment)
+        XCTAssertFalse(recap.replies?.isEmpty ?? true)
+    }
+
     func testLiveServerPinUnpinAndSettleState() async throws {
         guard let id = ProcessInfo.processInfo.environment["HEY_TALK_T3_SERVER_THREAD"] else { throw XCTSkip("Requires a local T3 thread ID") }
-        let environment = try String(contentsOf: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".t3/userdata/environment-id"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+        let environment = try ProcessInfo.processInfo.environment["HEY_TALK_T3_ENVIRONMENT"] ?? String(contentsOf: FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".t3/userdata/environment-id"), encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
         let server = T3Server.shared
         let original = try await server.thread(id, environment: environment)
         let title = try XCTUnwrap(original["title"] as? String)

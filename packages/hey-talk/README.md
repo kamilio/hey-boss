@@ -84,7 +84,7 @@ If correction fails during dictation, Hey Talk copies the raw transcript so you 
 If correction times out, click the retry arrow next to the close button to continue with the same transcript and original destination. Completed actions won’t run again.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
-uses T3’s local server API without submitting a message or touching the clipboard.
+uses T3’s server API without submitting a message or touching the clipboard.
 Ask for a new thread in your own words. “Start a new thread and check whether publishing works”
 opens a thread in the current project and puts the request in its composer. Auto Submit
 controls whether it sends. Name a project to switch projects, or leave out the task for a blank thread.
@@ -92,8 +92,8 @@ controls whether it sends. Name a project to switch projects, or leave out the t
 reads the current sidebar first and resolves the title among positions 1–9. If the list changes before navigation, the action stops.
 “Settle this thread”, “Pin this thread”, and “Unpin this thread” check the current state, so repeating a command is safe. You can also say “stop pinning this chat”.
 After a T3 action, a check slides out to the left and the pill glows softly green for three seconds. A failed thread action shows a red glow, a cross, and a short explanation for five seconds. Paste, clear, and sidebar lookups stay quiet.
-Rename, pin/unpin, and settle use T3’s protocol-2 API with five-minute credentials from `~/.t3/bin/t3`, held only in memory.
-Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts. Server actions currently support local T3 threads.
+Rename, pin/unpin, and settle use T3’s protocol-2 API with five-minute credentials issued on the thread’s host and held only in memory.
+Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts. Catch Up and thread actions work locally and over T3 Desktop’s open SSH connections.
 These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
 name and bundle identifier, plus the current T3 thread title, refreshed after navigation. Auto Dictation resumes listening
 after switching, pinning, unpinning, or settling.
