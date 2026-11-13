@@ -85,6 +85,15 @@ pub(super) fn execute(
             "Unlink project documents before moving this issue",
         ));
     }
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_code_reviews WHERE project_id=?1 AND issue_number=?2)",
+        params![source.id, number],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Err(Error::conflict(
+            "Unlink code reviews before moving this issue to another project",
+        ));
+    }
     if issue.plan.is_some() {
         return Err(Error::conflict(
             "Issues with a file-synced plan cannot move between projects",
@@ -151,7 +160,10 @@ pub(super) fn execute(
     db.execute("INSERT OR IGNORE INTO issue_commits(project_id,issue_number,sha,url,title,added_by,created_at,origin) SELECT ?3,?4,sha,url,title,added_by,created_at,origin FROM issue_commits WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     // The task and its discussion move; the source repository keeps its shelf.
     db.execute("INSERT INTO commit_reviews SELECT r.project_id,0,r.sha,r.snapshot,r.message FROM commit_reviews r JOIN commit_shelf s USING(project_id,issue_number,sha) WHERE r.project_id=?1 AND r.issue_number=?2",params![source.id,number])?;
-    db.execute("UPDATE commit_shelf SET issue_number=0 WHERE project_id=?1 AND issue_number=?2",params![source.id,number])?;
+    db.execute(
+        "UPDATE commit_shelf SET issue_number=0 WHERE project_id=?1 AND issue_number=?2",
+        params![source.id, number],
+    )?;
     db.execute("UPDATE commit_reviews SET project_id=?3,issue_number=?4 WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     db.execute("UPDATE commit_review_comments SET project_id=?3,issue_number=?4 WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     // Opaque file IDs and disk locations survive a project transfer; only access

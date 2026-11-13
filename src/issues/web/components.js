@@ -420,5 +420,12 @@ function date(at) {
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||fallback);
       return value;
     }
-  return {jobWarning, post, pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
+  return {codeReviewStage: {
+    draft: "Draft",
+    submitted: "Awaiting approval",
+    publishing: "Publication pending",
+    published: "Published",
+    outdated: "Outdated",
+    discarded: "Discarded",
+  }, jobWarning, post, pagination, actorLabel, rememberActors, infoTip, requestId, sha256, icon, icons, relative, date, projectId, projectNavigation, ProjectPicker};
 })();

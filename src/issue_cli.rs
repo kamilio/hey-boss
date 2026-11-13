@@ -279,6 +279,11 @@ enum Action {
     CodeReview,
     #[command(hide = true)]
     CodeReviewProjects,
+    /// Link a saved code review to an issue, or remove its link.
+    Review {
+        #[command(subcommand)]
+        command: ReviewLink,
+    },
     /// Attach, list, or remove first-class pull request links.
     Pr {
         #[command(subcommand)]
@@ -758,6 +763,11 @@ enum CommitAction {
 }
 
 #[derive(Subcommand)]
+enum ReviewLink {
+    Add { number: i64, id: i64 },
+    Remove { number: i64, id: i64 },
+}
+#[derive(Subcommand)]
 enum PrAction {
     /// Attach a PR; existing links keep their recorded purpose. Supports --supervisor without a work claim.
     Add {
@@ -1014,6 +1024,18 @@ impl Options {
                         CommitAction::Show { .. } => issues::commit_reviews::Operation::View,
                         CommitAction::Patch { .. } => issues::commit_reviews::Operation::Patch,
                         _ => issues::commit_reviews::Operation::Comments,
+                    },
+                },
+            },
+            Action::Review { command } => Operation::CodeReview {
+                operation: match command {
+                    ReviewLink::Add { number, id } => issues::code_reviews::Operation::Link {
+                        issue: *number,
+                        id: *id,
+                    },
+                    ReviewLink::Remove { number, id } => issues::code_reviews::Operation::Unlink {
+                        issue: *number,
+                        id: *id,
                     },
                 },
             },
@@ -2399,6 +2421,18 @@ pub(crate) fn print_text(value: &Value) {
             } else {
                 println!("    Unavailable: {}", line(&file["error"]));
             }
+        }
+    }
+    if let Some(reviews) = value["code_reviews"].as_array().filter(|r| !r.is_empty()) {
+        println!("\nLinked code reviews:");
+        for r in reviews {
+            println!(
+                "  PR #{} · {} · {} · review {}",
+                r["number"],
+                line(&r["title"]),
+                line(&r["stage"]),
+                r["id"]
+            );
         }
     }
     if let Some(artifacts) = value["artifacts"]

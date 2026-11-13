@@ -1507,7 +1507,7 @@ impl Store {
         provenance::migrate(&db)?;
         super::commits::migrate(&db)?;
         if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='pr_code_comment_review')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_code_reviews')",
             [],
             |r| r.get::<_, bool>(0),
         )? {
@@ -2568,7 +2568,7 @@ impl Store {
                 } else {
                     None
                 };
-                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"ready_guard":ready::snapshot(&tx,&project.id,&issue)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"artifacts":artifacts::links(&tx,&project,Some(*number))?["artifacts"]})
+                json!({"ok":true,"project":project,"issue":issue,"allocation":super::fleet::allocation(&tx,&project.id,*number,caller)?,"ready_guard":ready::snapshot(&tx,&project.id,&issue)?,"comments":page["comments"],"comment_count":page["comment_count"],"more_comments":!page["next_offset"].is_null(),"next_comment_offset":page["next_offset"],"assignee_agent":assignee,"code_reviews":super::code_reviews::issue_links(&tx,&project.id,*number)?,"artifacts":artifacts::links(&tx,&project,Some(*number))?["artifacts"]})
             }
             Operation::Comments {
                 number,

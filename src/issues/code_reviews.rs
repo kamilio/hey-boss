@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS pr_code_reviews(
 CREATE INDEX IF NOT EXISTS pr_code_reviews_queue ON pr_code_reviews(project_id,number,updated_at);
 CREATE TABLE IF NOT EXISTS pr_code_comments(id INTEGER PRIMARY KEY,project_id TEXT NOT NULL,review_id INTEGER NOT NULL,
  ordinal INTEGER NOT NULL,anchor TEXT NOT NULL,snippet TEXT NOT NULL,body TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS issue_code_reviews(project_id TEXT NOT NULL,issue_number INTEGER NOT NULL,review_id INTEGER NOT NULL,PRIMARY KEY(project_id,issue_number,review_id));
 CREATE INDEX IF NOT EXISTS pr_code_comment_review ON pr_code_comments(project_id,review_id,id);";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +52,14 @@ pub enum Operation {
         version: i64,
         comment: Option<i64>,
         body: String,
+    },
+    Link {
+        id: i64,
+        issue: i64,
+    },
+    Unlink {
+        id: i64,
+        issue: i64,
     },
     Discard {
         id: i64,
@@ -104,11 +113,14 @@ fn view(db: &Connection, p: &str, id: i64) -> Result<Value> {
     ));
     Ok(review)
 }
+pub(super) fn issue_links(db: &Connection, project: &str, issue: i64) -> Result<Vec<Value>> {
+    Ok(db.query_collect("SELECT r.id,r.number,r.title,r.stage,r.receipt,r.head FROM issue_code_reviews l JOIN pr_code_reviews r ON r.project_id=l.project_id AND r.id=l.review_id WHERE l.project_id=?1 AND l.issue_number=?2 ORDER BY r.updated_at DESC,r.id",params![project,issue], |r|Ok::<_,rusqlite::Error>(json!({"id":r.get::<_,i64>(0)?,"number":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,"stage":r.get::<_,String>(3)?,"receipt":r.get::<_,String>(4)?,"head":r.get::<_,String>(5)?})))?)
+}
 fn valid_text(s: &str) -> bool {
     !s.trim().is_empty() && s.len() <= 65536
 }
 pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) -> Result<Value> {
-    if !db.query_row("SELECT coalesce((SELECT code_reviews_enabled FROM project_settings WHERE project_id=?1),0)",[&p.id],|r|r.get::<_,bool>(0))?{return Err(Error::invalid("Code Reviews is disabled for this project"))}
+    if !matches!(op, Operation::Unlink { .. }) && !db.query_row("SELECT coalesce((SELECT code_reviews_enabled FROM project_settings WHERE project_id=?1),0)",[&p.id],|r|r.get::<_,bool>(0))?{return Err(Error::invalid("Code Reviews is disabled for this project"))}
     let id = match op {
         Operation::List => {
             let sql = format!("SELECT r.*,
@@ -237,6 +249,19 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
             if db.execute("UPDATE pr_code_reviews SET body=CASE WHEN ?5 IS NULL THEN ?4 ELSE body END,version=version+1,updated_at=?6 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage IN ('draft','submitted')",params![p.id,id,version,body,comment,now])?!=1{return Err(stale())}
             if let Some(c)=comment && db.execute("UPDATE pr_code_comments SET body=?4 WHERE project_id=?1 AND review_id=?2 AND id=?3",params![p.id,id,c,body])?!=1{return Err(Error::invalid("Comment not found"))}
             *id
+        }
+        Operation::Link { id, issue } | Operation::Unlink { id, issue } => {
+            super::store::get_issue(db, &p.id, *issue, false)?;
+            if matches!(op, Operation::Link { .. }) {
+                view(db, &p.id, *id)?;
+                db.execute(
+                    "INSERT OR IGNORE INTO issue_code_reviews VALUES(?1,?2,?3)",
+                    params![p.id, issue, id],
+                )?;
+            } else {
+                db.execute("DELETE FROM issue_code_reviews WHERE project_id=?1 AND issue_number=?2 AND review_id=?3",params![p.id,issue,id])?;
+            }
+            return Ok(json!({"ok":true,"code_reviews":issue_links(db,&p.id,*issue)?}));
         }
         Operation::Discard { id, version } => {
             if db.execute("UPDATE pr_code_reviews SET stage='discarded',version=version+1,updated_at=?4 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage IN ('draft','submitted','outdated')", params![p.id,id,version,now])? != 1 { return Err(stale()); }
