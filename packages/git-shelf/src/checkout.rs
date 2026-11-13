@@ -131,29 +131,83 @@ fn materialize(v: &Value, verify_tree: bool) -> Result<String> {
 }
 
 pub fn stash(expected: Option<&str>, task: Option<i64>) -> Result<String> {
-    let branch = ready()?;
-    let sha = git(&["rev-parse", "HEAD"])?;
+    let sha = head()?;
     if expected.is_some_and(|s| s.len() < 4 || !sha.starts_with(&s.to_ascii_lowercase())) {
         return Err("Selected commit is not the current branch tip; nothing changed".into());
     }
-    let parents = git(&["show", "-s", "--format=%P", &sha])?;
+    stash_selected(&sha, &sha, task)
+}
+
+pub fn stash_selected(sha: &str, expected_head: &str, task: Option<i64>) -> Result<String> {
+    let branch = ready()?;
+    if head()? != expected_head {
+        return Err("Branch tip changed; reopen the shelf and select the commit again".into());
+    }
+    let parents = git(&["show", "-s", "--format=%P", sha])?;
     let mut ps = parents.split_whitespace();
     let parent = ps.next().ok_or("Cannot shelve the root commit")?;
     if ps.next().is_some() {
         return Err("Shelve an individual commit, not a merge".into());
     }
+    let next = if sha == expected_head {
+        parent.to_owned()
+    } else {
+        if !active(expected_head)?.iter().any(|e| e["sha"] == sha) {
+            return Err("Selected commit is no longer ahead of the remote base".into());
+        }
+        let range = format!("{sha}..{branch}");
+        if !git(&["rev-list", "--merges", &range])?.is_empty() {
+            return Err("Cannot shelve through a merge; branch unchanged".into());
+        }
+        // Replay in the object database. Older Git only prints ref updates;
+        // newer Git must be told not to apply them.
+        let updates = git(&[
+            "-c",
+            "replay.refAction=print",
+            "replay",
+            "--onto",
+            parent,
+            &range,
+        ])
+        .map_err(|e| format!("Could not replay newer commits; branch unchanged. {e}"))?;
+        let next = updates
+            .lines()
+            .find_map(|l| {
+                let w: Vec<_> = l.split_whitespace().collect();
+                match w.as_slice() {
+                    ["update", r, new, old] if *r == branch && *old == expected_head => {
+                        Some(new.to_string())
+                    }
+                    _ => None,
+                }
+            })
+            .ok_or("Branch changed or Git could not replay this stack; nothing changed")?;
+        if git(&["rev-list", "--count", &format!("{sha}..{expected_head}")])?
+            != git(&["rev-list", "--count", &format!("{parent}..{next}")])?
+        {
+            return Err("Replay would omit a newer commit; branch unchanged".into());
+        }
+        next
+    };
     let raw = Command::new("git")
-        .args(["cat-file", "commit", &sha])
+        .args(["cat-file", "commit", sha])
         .output()?;
     if !raw.status.success() {
         return Err("Could not read HEAD".into());
     }
     rpc(json!({"command":"save","sha":sha,"raw_commit":STANDARD.encode(raw.stdout),"task":task}))?;
-    let saved = open(&sha)?;
+    let saved = open(sha)?;
     if materialize(&saved, true)? != sha || task.is_some_and(|n| saved["number"] != n) {
         return Err("Could not verify the shelved commit and task; branch unchanged".into());
     }
-    git(&["update-ref", &format!("refs/hey-boss/shelf/{sha}"), &sha])?;
+    git(&["update-ref", &format!("refs/hey-boss/shelf/{sha}"), sha])?;
+    if sha != expected_head {
+        git(&[
+            "update-ref",
+            &format!("refs/hey-boss/shelf-recovery/{expected_head}"),
+            expected_head,
+        ])?;
+    }
     // Lock HEAD at the expected SHA before touching the index. Two concurrent
     // shelves cannot remove two tips. read-tree refuses obstructing local files.
     let mut txn = Command::new("git")
@@ -164,7 +218,7 @@ pub fn stash(expected: Option<&str>, task: Option<i64>) -> Result<String> {
     let mut pipe = txn.stdin.take().unwrap();
     let mut replies = BufReader::new(txn.stdout.take().unwrap());
     let step = (|| -> Result<()> {
-        writeln!(pipe, "start\nupdate HEAD {parent} {sha}\nprepare")?;
+        writeln!(pipe, "start\nupdate HEAD {next} {expected_head}\nprepare")?;
         for expect in ["start: ok", "prepare: ok"] {
             let mut line = String::new();
             replies.read_line(&mut line)?;
@@ -175,8 +229,8 @@ pub fn stash(expected: Option<&str>, task: Option<i64>) -> Result<String> {
         if ready()? != branch {
             return Err("Worktree changed while shelving; the saved commit is safe".into());
         }
-        protect_loose(&sha, parent)?;
-        git(&["read-tree", "-m", "-u", &sha, parent])?;
+        protect_loose(expected_head, &next)?;
+        git(&["read-tree", "-m", "-u", expected_head, &next])?;
         writeln!(pipe, "commit")?;
         Ok(())
     })();
@@ -279,8 +333,12 @@ fn protect_loose(from: &str, to: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn branch() -> Result<String> {
+    git(&["branch", "--show-current"])
+}
+
 pub fn tip() -> Result<String> {
-    let branch = git(&["branch", "--show-current"])?;
+    let branch = branch()?;
     let subject = git(&["log", "-1", "--format=%h · %s"]).unwrap_or_else(|_| "No commits".into());
     Ok(format!(
         "{}  /  {}",
@@ -291,4 +349,70 @@ pub fn tip() -> Result<String> {
         },
         clean(&subject)
     ))
+}
+
+// Match the original shelf: compare with the tracking remote's default branch,
+// even when this branch has an upstream of its own.
+pub fn active(head: &str) -> Result<Vec<Value>> {
+    let upstream = git(&["rev-parse", "--symbolic-full-name", "@{upstream}"]).ok();
+    let remotes = git(&["remote"])?;
+    let remote = upstream
+        .as_deref()
+        .and_then(|r| r.strip_prefix("refs/remotes/"))
+        .and_then(|r| {
+            remotes
+                .lines()
+                .find(|name| r.starts_with(&format!("{name}/")))
+        })
+        .or_else(|| remotes.lines().find(|r| *r == "origin"))
+        .or_else(|| remotes.lines().next());
+    if head.is_empty() {
+        return Ok(vec![]);
+    }
+    let base = remote.and_then(|r| {
+        [
+            Some(format!("refs/remotes/{r}/HEAD")),
+            upstream.clone(),
+            Some(format!("refs/remotes/{r}/master")),
+            Some(format!("refs/remotes/{r}/main")),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|name| git(&["rev-parse", "--verify", &format!("{name}^{{commit}}")]).ok())
+    });
+    // Until the first fetch there is no known range. Keep the current tip
+    // available, without treating the entire repository history as local.
+    let range = base.as_ref().map(|b| format!("{b}..{head}"));
+    let mut args = vec!["log", "--format=%H%x00%s", "--reverse"];
+    if range.is_none() {
+        args.push("-1");
+    }
+    args.extend([range.as_deref().unwrap_or(head), "--"]);
+    Ok(git(&args)?
+        .lines()
+        .filter_map(|l| l.split_once('\0'))
+        .map(|(sha, title)| json!({"sha":sha,"title":title,"active":true}))
+        .collect())
+}
+
+pub fn head() -> Result<String> {
+    git(&["rev-parse", "--verify", "HEAD"])
+}
+
+pub fn preview(sha: &str) -> Result<Value> {
+    let output = git(&[
+        "show",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--format=%an%x00%B%x00",
+        "--patch",
+        sha,
+        "--",
+    ])?;
+    let mut fields = output.splitn(3, '\0');
+    Ok(
+        json!({"sha":sha,"comments":[],"review":{"author":fields.next(),"message":fields.next(),
+        "patch":fields.next().unwrap_or("").trim_start_matches('\n')}}),
+    )
 }

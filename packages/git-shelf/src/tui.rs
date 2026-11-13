@@ -169,7 +169,8 @@ struct View {
     rows: Vec<Row>,
     cursor: usize,
     horizontal: u16,
-    tip: String,
+    branch: String,
+    head: String,
     detail: bool,
     message: String,
     prompt: Option<Prompt>,
@@ -182,21 +183,34 @@ impl View {
         self.cursor = 0;
         self.horizontal = 0;
         if let Some(e) = self.entries.get(self.index) {
-            let value = open(field(e, "sha")?)?;
+            let sha = field(e, "sha")?;
+            let value = if e["active"] == true {
+                checkout::preview(sha)?
+            } else {
+                open(sha)?
+            };
             self.rows = lines(&value)?;
             self.sha = field(&value, "sha")?.into();
         }
         Ok(())
     }
     fn refresh(&mut self) -> Result<()> {
-        self.tip = checkout::tip()?;
+        self.head = checkout::head().unwrap_or_default();
+        self.branch = checkout::branch()?;
         let v = rpc(json!({"command":"list"}))?;
         self.project = clean(field(&v["project"], "name")?);
-        self.entries = v["entries"].as_array().ok_or("Missing entries")?.clone();
+        self.entries = checkout::active(&self.head)?;
+        self.entries.extend(
+            v["entries"]
+                .as_array()
+                .ok_or("Missing entries")?
+                .iter()
+                .cloned(),
+        );
         self.index = self
             .entries
             .iter()
-            .position(|e| e["sha"] == self.sha)
+            .position(|e| e["sha"] == self.sha && e["active"] != true)
             .unwrap_or(0);
         self.load()
     }
@@ -226,16 +240,22 @@ impl View {
     fn submit(&mut self, p: Prompt) -> Result<()> {
         let text = self.input.trim();
         let msg = match p {
-            Prompt::Stash => checkout::stash(
-                self.tip
-                    .split_once("  /  ")
-                    .and_then(|(_, s)| s.split_whitespace().next()),
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text.parse()?)
-                },
-            )?,
+            Prompt::Stash => {
+                if checkout::branch()? != self.branch {
+                    return Err(
+                        "Branch changed; reopen the shelf and select the commit again".into(),
+                    );
+                }
+                checkout::stash_selected(
+                    &self.sha,
+                    &self.head,
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(text.parse()?)
+                    },
+                )?
+            }
             Prompt::Restore => checkout::unstash(&self.sha)?,
             Prompt::Link => {
                 let n: i64 = text.parse()?;
@@ -275,9 +295,26 @@ impl View {
                 Line::from(vec![
                     Span::styled("  SHELF  ", style(SKY).add_modifier(Modifier::BOLD)),
                     Span::styled(self.project.clone(), style(Color::White)),
-                    Span::styled(format!("   /   {} saved", self.entries.len()), style(MUTED)),
+                    Span::styled(
+                        format!(
+                            "   /   {} active · {} saved",
+                            self.entries.iter().filter(|e| e["active"] == true).count(),
+                            self.entries.iter().filter(|e| e["active"] != true).count()
+                        ),
+                        style(MUTED),
+                    ),
                 ]),
-                Line::styled(format!("  {}", self.tip), style(MUTED)),
+                Line::styled(
+                    format!(
+                        "  {}",
+                        if self.branch.is_empty() {
+                            "detached HEAD"
+                        } else {
+                            &self.branch
+                        }
+                    ),
+                    style(MUTED),
+                ),
             ]),
             head,
         );
@@ -296,7 +333,7 @@ impl View {
             f.render_widget(block, left);
             if self.entries.is_empty() {
                 f.render_widget(
-                    Paragraph::new("No shelved commits yet.\n\nCtrl+S to stash your tip commit.")
+                    Paragraph::new("No active or saved commits.")
                         .wrap(Wrap { trim: false })
                         .style(style(MUTED)),
                     inner,
@@ -314,7 +351,16 @@ impl View {
                     ListItem::new(vec![
                         Line::raw(clean(e["title"].as_str().unwrap_or(""))),
                         Line::styled(
-                            format!("{}{}", sha.get(..10).unwrap_or(sha), task),
+                            format!(
+                                "{}  {}{}",
+                                if e["active"] == true {
+                                    "Active"
+                                } else {
+                                    "Saved"
+                                },
+                                sha.get(..10).unwrap_or(sha),
+                                task
+                            ),
                             style(MUTED),
                         ),
                     ])
@@ -335,7 +381,7 @@ impl View {
             f.render_widget(block, right);
             if self.rows.is_empty() {
                 f.render_widget(
-                    Paragraph::new("Select a shelved commit to review its changes.")
+                    Paragraph::new("Select a commit to review its changes.")
                         .wrap(Wrap { trim: false })
                         .style(style(MUTED)),
                     inner,
@@ -364,10 +410,18 @@ impl View {
                 f.render_widget(Paragraph::new(rows).scroll((0, self.horizontal)), inner);
             }
         }
-        let hint = if self.detail {
+        let active = self
+            .entries
+            .get(self.index)
+            .is_some_and(|e| e["active"] == true);
+        let hint = if active && self.detail {
+            "↑↓ lines  ←→ pan  Ctrl+S stash-commit  Esc back"
+        } else if active {
+            "↑↓ select  Enter review  Ctrl+S stash-commit  Esc quit"
+        } else if self.detail {
             "↑↓ lines  ←→ pan  Tab shelf  Ctrl+C comment  Esc back"
         } else {
-            "↑↓ select  Enter review  Ctrl+S stash-commit  Ctrl+U apply-commit  Ctrl+L link  Esc quit"
+            "↑↓ select  Enter review  Ctrl+U apply-commit  Ctrl+L link  Esc quit"
         };
         if let Some(p) = self.prompt {
             let label = match p {
@@ -406,7 +460,8 @@ fn session(t: &mut DefaultTerminal, initial: Option<&str>) -> Result<()> {
         entries: vec![],
         index: 0,
         project: String::new(),
-        tip: String::new(),
+        branch: String::new(),
+        head: String::new(),
         sha: String::new(),
         rows: vec![],
         cursor: 0,
@@ -454,6 +509,7 @@ fn session(t: &mut DefaultTerminal, initial: Option<&str>) -> Result<()> {
             }
             continue;
         }
+        let active = v.entries.get(v.index).is_some_and(|e| e["active"] == true);
         let result = match (k.code, k.modifiers.contains(M::CONTROL)) {
             (K::Esc, _) if v.detail && initial.is_none() => {
                 v.detail = false;
@@ -476,20 +532,22 @@ fn session(t: &mut DefaultTerminal, initial: Option<&str>) -> Result<()> {
                 v.horizontal = v.horizontal.saturating_sub(8);
                 Ok(())
             }
-            (K::Char('s'), true) => {
+            (K::Char('s'), true) if active && !v.sha.is_empty() => {
                 v.begin(Prompt::Stash);
                 Ok(())
             }
-            (K::Char('u'), true) if !v.sha.is_empty() => {
+            (K::Char('u'), true) if !active && !v.sha.is_empty() => {
                 v.begin(Prompt::Restore);
                 Ok(())
             }
-            (K::Char('l'), true) if !v.sha.is_empty() => {
+            (K::Char('l'), true) if !active && !v.sha.is_empty() => {
                 v.begin(Prompt::Link);
                 Ok(())
             }
             (K::Char('c'), true) if v.detail => {
-                if v.rows.get(v.cursor).is_some_and(|r| r.location.is_some()) {
+                if active {
+                    v.message = "Shelve this commit before adding review comments.".into();
+                } else if v.rows.get(v.cursor).is_some_and(|r| r.location.is_some()) {
                     v.begin(Prompt::Comment);
                 } else {
                     v.message = "Select a changed or context line to comment.".into();
