@@ -65,6 +65,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var startingInput: FocusedInput?
     private var waitingPaste: (timer: Timer, text: String)? { didSet { oldValue?.timer.invalidate() } }
     private var paste = true
+    private var lastDeckSnapshot = -Double.infinity
+    private var autoSubmitEnabled = true
     private var pressEnter = false { didSet { updateSubmitIndicator() } }
     private var transcriptionSource = "microphone"
     private var overlayEnabled: Bool
@@ -88,6 +90,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         NativeMenus.install()
         do { try server.start() }
         catch { fputs("hey-talk: \(error.localizedDescription)\n", stderr); NSApp.terminate(nil); return }
+        server.deckSnapshot = { [weak self] in self?.deckSnapshot() ?? [:] }
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(conversationChanged(_:)), name: .init("local.hey-boss.conversation"), object: "local.hey-boss.desktop")
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
@@ -97,7 +100,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             name: NSWorkspace.didActivateApplicationNotification, object: nil)
         // Switching tabs doesn't activate a new application.
         let siteTimer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            guard let self, self.overlayEnabled, BrowserPage.isBrowser(NSWorkspace.shared.frontmostApplication) else { return }
+            guard let self, self.overlayEnabled || ProcessInfo.processInfo.systemUptime - self.lastDeckSnapshot < 2, BrowserPage.isBrowser(NSWorkspace.shared.frontmostApplication) else { return }
             self.updateSubmitIndicator()
         }
         siteTimer.tolerance = 0.2
@@ -477,8 +480,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let requested = !active || (paste && (pressEnter || (automatic != nil && session.phase == .recording)))
         let followsFocus = session.phase == .recording && automatic?.followsFocus == true
         let host = active && !followsFocus ? recordingHost : BrowserPage.host(in: app)
-        overlay?.setAutoSubmit((!BrowserPage.isBrowser(app) || host != nil) &&
-            enterExceptions.shouldPressEnter(requested: requested, bundleID: app?.bundleIdentifier, host: host))
+        autoSubmitEnabled = (!BrowserPage.isBrowser(app) || host != nil) &&
+            enterExceptions.shouldPressEnter(requested: requested, bundleID: app?.bundleIdentifier, host: host)
+        overlay?.setAutoSubmit(autoSubmitEnabled)
     }
     private func updateStatusTooltip() {
         let text = "Hey Talk is running · Pill \(overlayEnabled ? "visible" : "hidden")"
@@ -673,6 +677,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let command = request["command"] as? String ?? ""
         switch command {
+        case "deck": deck(request["action"] as? String, reply: reply)
         case "remember_focus":
             if conversation == nil || conversationFocus == nil { conversationFocus = ConversationFocus() }
             reply(["ok": true])
@@ -1230,5 +1235,82 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         idleRelease = item
         DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: item)
+    }
+}
+
+// The keys use the same actions and current state as the pill and keyboard.
+// Polling must not enumerate audio devices, query Accessibility, or load a model.
+private extension TalkService {
+    func deck(_ action: String?, reply: @escaping ([String: Any]) -> Void) {
+        if let action {
+            switch action {
+            case "dictation" where session.phase != .processing && waitingPaste == nil: recordShortcut()
+            case "conversation" where conversation != nil: toggle()
+            case "conversation", "new-chat":
+                guard !openingConversation, !switchingToDictation, waitingPaste == nil,
+                      session.phase != .processing, session.phase != .recording || autoTarget != nil
+                else { reply(failure("Finish dictating first")); return }
+                startConversation()
+            case "mute" where conversation?["listeningPaused"] is Bool:
+                controlConversation(conversation?["listeningPaused"] as? Bool == true ? "resume_listening" : "pause_listening")
+            case "interrupt" where conversation?["interrupt"] as? Bool == true: controlConversation("interrupt")
+            case "transcript" where conversation != nil: controlConversation("show")
+            case "stop" where conversation != nil: controlConversation("stop")
+            case "stop" where speech.active: speech.stop()
+            case "stop" where session.phase != .idle || waitingPaste != nil: cancelDictation()
+            case "send" where autoTarget != nil && session.phase == .recording && autoSubmitKey.shouldCapture():
+                autoSubmitKey.onSubmit?()
+            case "auto": toggleAutoMode()
+            case "submit": toggleAutoSubmit()
+            case "correction": toggleCorrection()
+            case "return": toggleReturnToField()
+            case "pill": toggleOverlay()
+            case "speech": speech.toggleEnabled()
+            case "play":
+                speech.toggle { result in
+                    switch result {
+                    case .success: reply(["ok": true])
+                    case .failure(let error): reply(self.failure(error.localizedDescription))
+                    }
+                }
+                return
+            case "catch-up":
+                Task { @MainActor in
+                    do { try await startCatchUp(); reply(["ok": true]) }
+                    catch { reply(failure(error.localizedDescription)) }
+                }
+                return
+            case "history": showHistory()
+            case "vocabulary": openVocabulary()
+            case "permissions": showAccessibilitySetup()
+            default: reply(failure("Action unavailable")); return
+            }
+            reply(["ok": true]); return
+        }
+        reply(deckSnapshot())
+    }
+
+    func deckSnapshot() -> [String: Any] {
+        lastDeckSnapshot = ProcessInfo.processInfo.systemUptime
+        let capturing = session.phase == .listening || session.phase == .recording
+        let dictation = waitingPaste != nil ? "Paste wait" : capturing && !(captureReady && capture.isReady)
+            ? "Connecting" : session.phase == .idle ? overlay?.deckFeedback ?? "Ready" : session.phase.rawValue.capitalized
+        let muted = conversation?["listeningPaused"] as? Bool
+        let chat = conversation?["approval"] as? Bool == true ? "Approval" : muted == true ? "Muted" :
+            conversation?["message"] as? String == "Paused" || pausedConversation != nil ? "Paused" :
+            ["idle": "Voice off", "starting": "Starting", "listening": "Listening", "recording": "Recording",
+             "decoding": "Transcribing", "thinking": "Thinking", "speaking": "Speaking"][conversation?["phase"] as? String ?? ""] ?? "Ready"
+        let canStop = conversation != nil || speech.active || capturing || session.phase == .processing || waitingPaste != nil
+        let playback = speech.playbackState == "idle" ? "Ready" : speech.playbackState.capitalized
+        return ["ok": true, "dictation": dictation, "conversation": chat, "mute": muted.map { $0 ? "Muted" : "Live" } ?? "Unavailable",
+               "interrupt": conversation?["interrupt"] as? Bool == true ? "Ready" : "Unavailable",
+               "transcript": conversation == nil ? "Unavailable" : "Open", "new-chat": "Start",
+               "stop": canStop ? "Stop" : "Unavailable", "auto": autoSettings.enabled ? "On" : "Off",
+               "submit": autoSubmitEnabled ? "On" : "Off", "correction": correctionSettings.enabled ? "On" : "Off",
+               "send": autoTarget != nil && session.phase == .recording ? "Send" : "Unavailable",
+               "progress": overlay?.deckProgress ?? 0, "return": returnToField ? "On" : "Off", "pill": overlayEnabled ? "Shown" : "Hidden",
+               "speech": speech.settings.enabled ? "On" : "Off", "play": playback,
+               "catch-up": speech.isRecap ? playback : "Ready", "history": "Open", "vocabulary": "Open", "permissions": "Open",
+               "level": min(5, Int(sqrt(max(0, conversation == nil ? capture.level : conversationLevel)) * 12))]
     }
 }

@@ -71,9 +71,11 @@ final class SpeechController {
         }
         changed()
     }
+    var isRecap: Bool { recapSource != nil }
+    var playbackState: String { preparing != nil && !playback.active ? "loading" : playback.state.rawValue }
     var status: [String: Any] {
         var result = settings.json
-        result["state"] = preparing != nil && !playback.active ? "loading" : playback.state.rawValue
+        result["state"] = playbackState
         if recapSource != nil { result["source"] = "catch-up" }
         result["model"] = SpeechModel.selected?.name; result["voice"] = SpeechModel.selected?.voice; result["model_ready"] = SpeechModel.selected?.available == true
         result["rate"] = playback.rate; result["overlay"] = overlay.visible
