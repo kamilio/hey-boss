@@ -1,0 +1,20 @@
+{
+  "name": "hey-talk-stream-deck",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "test": "node --test test.js",
+    "pack": "npm run build && streamdeck pack local.heytalk.deck.sdPlugin --output dist --force",
+    "install:deck": "npm run pack && open dist/local.heytalk.deck.streamDeckPlugin",
+    "preview": "node preview.js"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
+  },
+  "devDependencies": {
+    "@elgato/cli": "^1.10.4",
+    "esbuild": "^0.28.2"
+  },
+  "version": "1.0.2"
+}
