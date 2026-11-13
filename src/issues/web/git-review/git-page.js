@@ -38,7 +38,9 @@ function fileHtml(file, context = {}) {
   const unified = file.hunks.map((hunk) => `<div class="hunk">${escapeHtml(hunk.header)}</div>${hunk.lines.map(renderLine).join("")}`).join("");
   const split = file.hunks.map((hunk) => splitHunk(hunk, file, renderLine)).join("");
   const content = file.binary ? '<div class="empty">Binary file not shown</div>' : unified ? `<div class="unified-view" tabindex="0" role="group" aria-label="Unified lines in ${escapeHtml(file.path)}">${unified}</div><div class="split-view">${split}</div>` : '<div class="empty">No textual changes</div>';
-  return `<article class="file" data-review-context="${escapeHtml(JSON.stringify(context))}" style="--git-line-number-digits:${gitLineNumberDigits(file)}"><header>${renderGitFileToggle()}<strong>${escapeHtml(file.status === "renamed" ? `${file.oldPath} → ${file.path}` : file.path)}</strong><span>+${file.additions} −${file.deletions}</span></header><div class="file-content">${content}</div></article>`;
+  const boundary = file.path.lastIndexOf("/") + 1;
+  const path = `<span class="file-directory">${escapeHtml((file.status === "renamed" ? file.oldPath + " → " : "") + file.path.slice(0, boundary))}</span>${escapeHtml(file.path.slice(boundary))}`;
+  return `<article class="file" data-review-context="${escapeHtml(JSON.stringify(context))}" style="--git-line-number-digits:${gitLineNumberDigits(file)}"><header>${renderGitFileToggle()}<strong>${path}</strong><span><span class="stat-add">+${file.additions}</span> <span class="stat-del">−${file.deletions}</span></span></header><div class="file-content">${content}</div></article>`;
 }
 
 export function renderGitFiles(model) {

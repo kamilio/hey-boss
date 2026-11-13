@@ -7,10 +7,15 @@
   --subtle: var(--hover);
   --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
+/* Keep the reading surface quiet; use color for navigation and changes. */
+html body { background: var(--solid); }
+@media (prefers-color-scheme: dark) {
+  html body { background: var(--bg); }
+}
 main { width: 100%; }
 .detail-top h1 { font-family: inherit; }
-#task-title { overflow-wrap: anywhere; }
-#task-title:hover { color: var(--accent); }
+#task-title { color: var(--accent); overflow-wrap: anywhere; }
+#task-title:hover { text-decoration: underline; }
 #commit-sha { font-weight: 500; }
 .review-byline, .message-actions, .task-strip, .task-actions, .changes-heading, .changes-heading h2 {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
@@ -19,7 +24,7 @@ main { width: 100%; }
 .review-byline time::before { content: "·"; margin-right: 8px; }
 .review-byline .message-actions, .task-actions { margin-left: auto; color: var(--text); }
 #full-message { margin-top: 12px; }
-#full-message summary { width: fit-content; color: var(--muted); cursor: pointer; font-size: 12px; }
+#full-message summary { width: fit-content; color: var(--accent); cursor: pointer; font-size: 12px; }
 #message-body { white-space: pre-wrap; max-width: 85ch; overflow-wrap: anywhere; }
 #message-form { margin-top: 16px; }
 #message-form label { font-weight: 600; }
@@ -27,25 +32,33 @@ textarea { color: var(--text); background: var(--solid); border: 1px solid var(-
 #commit-message { display: block; margin: 6px 0 10px; min-height: 10em; font: 13px/1.6 ui-monospace, monospace; }
 #message-form .message-actions { justify-content: flex-end; }
 #message-error, #review-error { color: var(--danger); }
-.task-strip, .file { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
-.task-strip { margin: 22px 0 0; padding: 12px 16px; }
+.task-strip { margin-top: 22px; padding: 12px 0; border-block: 1px solid var(--line); }
 .task-strip strong { font-size: 13px; }
 .changes-heading { margin: 28px 0 12px; gap: 10px; }
-.changes-heading h2 { margin: 0 auto 0 0; font: 650 18px/1.4 var(--font-body); letter-spacing: -.4px; }
+.changes-heading h2 { margin: 0 auto 0 0; font: 650 22px/1.4 var(--font-body); letter-spacing: -.4px; }
 .heading-count { font-size: 12px; padding: 2px 7px; }
 .git-layout { display: inline-flex; padding: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--control-radius); }
 .git-layout button { padding: 5px 10px; font-size: 12px; border-radius: 6px; background: transparent; color: var(--muted); }
-.git-layout button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
-.file { margin-bottom: 16px; background: var(--solid); }
-.file > header, .placeholder, .split [data-diff-side]::before { background: var(--bg); color: var(--muted); border-color: var(--line); }
-.file > header strong, .diff-row { color: var(--text); }
-.file > header > span { color: var(--muted); font: 12px ui-monospace, monospace; }
+.git-layout button.active { background: var(--primary-bg); color: var(--primary-text); font-weight: 600; }
+.file { margin-bottom: 22px; border: 1px solid var(--line); border-radius: 10px; background: var(--solid); }
+.file > header { background: #23334c; color: #fff; border-bottom: 1px solid #354963; }
+.file > header strong { color: inherit; font-size: 14px; }
+.file-directory { color: #bdcee2; font-weight: 400; }
+.file > header .git-file-toggle { color: inherit; }
+.file > header .git-file-toggle:hover { background: #ffffff20; }
+.file > header > span { font: 600 12px ui-monospace, monospace; }
+.stat-add { color: #a4ebbd; }
+.stat-del { color: #ffb6b5; }
+.placeholder, .split [data-diff-side]::before { background: var(--bg); color: var(--muted); border-color: var(--line); }
+.diff-row { color: var(--text); font-size: 13px; }
 .diff-row > span, .split-pair > div:first-child { border-color: var(--line); color: var(--muted); }
-.diff-row.addition { background: color-mix(in srgb, var(--green) 12%, var(--solid)); }
-.diff-row.deletion { background: color-mix(in srgb, var(--danger) 12%, var(--solid)); }
-.hunk { background: var(--accent-soft); color: var(--muted); overflow-wrap: anywhere; }
-.diff-row code .syntax-keyword { color: var(--purple); }
-.diff-row code .syntax-string { color: var(--green); }
+.diff-row.addition { background: light-dark(#e2f7e9, #17382d); }
+.diff-row.deletion { background: light-dark(#ffe9e7, #492a32); }
+.addition > .new-line { background: light-dark(#b9e9c9, #24513f); color: light-dark(#205a38, #b5f3cb); }
+.deletion > .old-line { background: light-dark(#ffcfc9, #663542); color: light-dark(#832d37, #ffced1); }
+.hunk { background: light-dark(#edf3ff, #263651); color: light-dark(#36527f, #bed4f7); overflow-wrap: anywhere; }
+.diff-row code .syntax-keyword { color: light-dark(#754499, #dfb3ff); }
+.diff-row code .syntax-string { color: light-dark(#176044, #9fe4c4); }
 .diff-row code .syntax-number { color: var(--accent); }
 .diff-row code .syntax-comment { color: var(--muted); }
 .add-comment, .comment-actions .submit-comment { background: var(--primary-bg); color: var(--primary-text); }
