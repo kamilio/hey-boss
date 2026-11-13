@@ -26,6 +26,12 @@ async page => {
   let button=page.locator('.issue-readiness').getByRole('button',{name:'Move to Ready',exact:true});
   check(await page.locator('#issue-assignment').isHidden(),'Assignment picker stays closed until requested');
   check(await button.isEnabled() && await page.locator('.issue-readiness [data-draft-action=draft]').isVisible(),'Ready and Draft share the issue state controls');
+  check(await page.locator('.readiness-status').innerText()==='Open','Issue state is separate from pickup eligibility');
+  const help = page.locator('#readiness-help');
+  check(await help.isHidden(),'Pickup guidance starts tucked away');
+  await page.getByRole('button',{name:'About issue state'}).click();
+  check(await help.isVisible() && (await help.innerText()).includes('Ready issues remain eligible for agent pickup when unassigned.'),'Info explains Ready pickup');
+  await page.keyboard.press('Escape');
   const nextIssue = page.locator('.dependency-group:visible a[data-issue="2"]');
   check(await nextIssue.isVisible() && !await page.locator('[data-add-blocker]').isVisible(),'Downstream issue is directly linked without editing controls');
   await nextIssue.click();

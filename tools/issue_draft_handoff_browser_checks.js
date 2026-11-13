@@ -50,7 +50,10 @@ async page => {
   check(source.closed_at===null&&source.pull_requests[0].status==='unknown','Handoff asserts neither completion nor verified CI');
   check((await view(2)).state==='open','Eligible dependent is released');
   check(await page.getByRole('button',{name:'Mark ready',exact:true}).count()===0,'Recorded handoff offers no accidental undraft shortcut');
-  check((await page.locator('.issue-readiness').innerText()).includes('No worker pickup'),'Readiness explains source scheduling');
+  check(await page.locator('.readiness-status').innerText()==='Ready · Draft','Handoff shows both Ready and retained Draft');
+  await page.getByRole('button',{name:'About issue state'}).click();
+  check((await page.locator('#readiness-help').innerText()).includes('Draft status pauses agent pickup'),'Info explains why pickup stays paused');
+  await page.keyboard.press('Escape');
   for(const scheme of ['light','dark']){
     await page.emulateMedia({colorScheme:scheme,reducedMotion:'reduce'});
     for(const width of [1440,768,390,320]){

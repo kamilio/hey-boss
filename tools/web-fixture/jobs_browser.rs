@@ -141,14 +141,14 @@ fn legacy_job_issues_show_job_ownership_and_run_state() {
             assert_eq!(
                 page.eval("document.querySelector('.issue-readiness h2').textContent")
                     .unwrap(),
-                "Scheduled job"
+                "Issue state"
             );
             let status = page
-                .eval("document.querySelector('.readiness-status').textContent")
+                .eval("document.querySelector('.issue-readiness p').textContent")
                 .unwrap();
             assert_eq!(
                 status,
-                format!("{}{}", &state[..1].to_uppercase(), &state[1..])
+                format!("Scheduled job · {}{}", &state[..1].to_uppercase(), &state[1..])
             );
             let sidebar = page
                 .eval("document.querySelector('.issue-readiness').innerText")
