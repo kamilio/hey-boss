@@ -578,6 +578,7 @@ final class Overlay {
         }
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Conversation"))
+        menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self
         let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
         start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")

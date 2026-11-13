@@ -5378,10 +5378,10 @@ final class AgentsOverview: NSObject, NSTableViewDataSource, NSTableViewDelegate
     var conversationStatus: [String: Any] { (conversationWindow as? VoiceConversation)?.voiceStatus ?? ["active": false] }
     @available(macOS 26, *)
     func controlConversation(_ action: String?, source: String = "Hey Boss") -> Bool {
+        if action == "show" { currentConversation().show(); return true }
         guard let chat = conversationWindow as? VoiceConversation, chat.voiceStatus["active"] as? Bool == true else { return false }
         if chat.window.attachedSheet != nil, action != "stop" { chat.show(); return true }
-        if action == "show" { chat.show() }
-        else if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
+        if action == "dictation_busy" { chat.stop("Finish dictating before starting voice chat.") }
         else if action == "stop" { chat.stop("Microphone off") }
         else if action == "pause_listening" || action == "resume_listening" { chat.setListeningPaused(action == "pause_listening", source: source) }
         else if action == "interrupt" { chat.listenForNextTurn() }

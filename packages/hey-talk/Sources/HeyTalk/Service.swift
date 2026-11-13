@@ -454,7 +454,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onShowHistory = { [weak self] in self?.showHistory() }
             view.onStartConversation = { [weak self] in self?.startConversation() }
             view.onPauseListening = { [weak self] paused in self?.controlConversation(paused ? "pause_listening" : "resume_listening") }
-            view.onOpenTranscript = { [weak self] in self?.controlConversation("show") }
+            view.onOpenTranscript = { [weak self] in
+                guard let self else { return }
+                self.contextQueue.async {
+                    let reply = try? self.chatRequest(["command": "conversation_control", "title": "show", "sync": false])
+                    if reply?["status"] as? String != "ok" {
+                        DispatchQueue.main.async { self.overlay?.error("Couldn’t open the Hey Boss chat.") }
+                    }
+                }
+            }
             view.onCatchUp = { [weak self] in self?.catchUp() }
             view.onInterruptConversation = { [weak self] in self?.controlConversation("interrupt") }
             view.onStopConversation = { [weak self] in self?.controlConversation("stop") }
