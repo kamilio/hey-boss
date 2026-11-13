@@ -343,8 +343,13 @@ impl RowPlan {
             .collect::<Vec<_>>()
             .join(",");
         let placeholders = vec!["?"; columns.len()].join(",");
+        let action = if updates.is_empty() {
+            "NOTHING".to_owned()
+        } else {
+            format!("UPDATE SET {updates}")
+        };
         let sql = format!(
-            "INSERT INTO {table}({names}) VALUES({placeholders}) ON CONFLICT({}) DO UPDATE SET {updates}",
+            "INSERT INTO {table}({names}) VALUES({placeholders}) ON CONFLICT({}) DO {action}",
             k.join(",")
         );
         Ok(Self { columns, sql })
@@ -2607,6 +2612,16 @@ pub(super) fn allocate(db: &Connection, node: &str, workers: &[Value]) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn issue_code_review_link_replays_without_duplicates() {
+        let f = Fixture::new();
+        let row = json!({"project_id":"p","issue_number":1,"review_id":45});
+        for _ in 0..2 {
+            put_row(&f.db, "issue_code_reviews", &row).unwrap();
+        }
+        assert_eq!(current_row(&f.db, "issue_code_reviews", &row).unwrap(), row);
+    }
+
     #[test]
     fn journal_reads_only_payloads_near_its_existing_byte_budget() {
         let f = Fixture::new();

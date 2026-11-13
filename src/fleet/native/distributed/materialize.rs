@@ -301,8 +301,13 @@ pub(super) fn write(
         .map(|n| format!("\"{n}\"=excluded.\"{n}\""))
         .collect::<Vec<_>>()
         .join(",");
+    let action = if updates.is_empty() {
+        "NOTHING".to_owned()
+    } else {
+        format!("UPDATE SET {updates}")
+    };
     let sql = format!(
-        "INSERT INTO {table}({}) VALUES({}) ON CONFLICT({}) DO UPDATE SET {updates}",
+        "INSERT INTO {table}({}) VALUES({}) ON CONFLICT({}) DO {action}",
         names
             .iter()
             .map(|n| format!("\"{n}\""))
