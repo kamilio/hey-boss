@@ -32,7 +32,7 @@ const symbols = {
   notice: "M12 3L2 21h20z M12 9v5 M12 17v.1", wait: "M6 5h12v16H6z M9 3h6v4H9z M9 13h6",
 };
 // Keep the geometry and dark appearance colors in sync with IdentityView and TalkDesign.
-export function artwork(id, state, frame = {}) {
+export function artwork(id, state, frame = {}, appearance) {
   const offline = ["Offline","Update app"].includes(state);
   const dict = id==="dictation" && !offline, chat = id==="conversation";
   const automatic = dict && frame.auto==="On";
@@ -70,5 +70,12 @@ export function artwork(id, state, frame = {}) {
   if (offline) indicator=badge(state==="Offline"?"M3 3l18 18 M5 11l5-5 M13 18l5-5":"M12 19V3 M5 10l7-7 7 7 M3 18v4h18v-4",104,83,"#ffb340");
   else if(state==="Hidden" || state==="Off") indicator=badge("M6 17L18 5",104,82,color);
   else if(state==="On" || state==="Shown") indicator=badge(symbols.check,104,82,color);
+  if (id==="dictation" && appearance==="monochrome") {
+    const ink = offline ? "#8f9aa7" : "#eff4f4";
+    const status = state.replace(/[<>&]/g, c=>({"<":"&lt;",">":"&gt;","&":"&amp;"})[c]);
+    const caption = state==="Ready" ? (automatic?"Auto":"") : status;
+    const progress = state==="Processing" ? '<path d="M30 102h84" stroke="#36434a" stroke-width="4"/><path d="M30 102h'+(84*Math.max(0,Math.min(1,frame.progress??0)))+'" stroke="'+ink+'" stroke-width="4"/>' : "";
+    return '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144"><title>Dictation · '+status+'</title><rect width="144" height="144" fill="#12191e"/>'+glyph(path,24,caption?12:24,4,ink,2.25)+(meter?'<g transform="translate(-12 42)">'+meter+'</g>':"")+progress+badges+indicator+'<text x="72" y="136" text-anchor="middle" font-family="Helvetica,sans-serif" font-size="18" font-weight="700" fill="'+ink+'">'+caption+'</text></svg>';
+  }
   return '<svg xmlns="http://www.w3.org/2000/svg" width="144" height="144" viewBox="0 0 144 144"><title>'+keys[id][0]+' · '+state+'</title><defs><linearGradient id="glass" x2="0" y2="1"><stop stop-color="#32394a"/><stop offset="1" stop-color="#171d28"/></linearGradient><linearGradient id="edge" x2="1" y2="1"><stop stop-color="#8c94a7"/><stop offset=".48" stop-color="'+glassColor+'"/><stop offset="1" stop-color="#535b6b"/></linearGradient></defs><rect width="144" height="144" rx="10" fill="#11151d"/><g opacity="'+(state==="Unavailable"?.38:1)+'"><rect '+capsule+' fill="url(#glass)" stroke="url(#edge)" stroke-width="'+(automatic?3:1.5)+'"/>'+rim+glyph(path,meter?18:47,47,2.05,color)+meter+badges+indicator+'</g></svg>';
 }
