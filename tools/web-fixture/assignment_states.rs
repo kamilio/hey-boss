@@ -158,15 +158,14 @@ fn assignment_controls_distinguish_owner_destination_and_stopped_watchers() {
             &["Pickup is paused until the retained attempt is reconciled"],
             &["An available machine can pick this up"],
         );
-        assert!(
-            output
-                .split("<select ")
-                .nth(1)
-                .unwrap()
-                .split('>')
-                .next()
-                .unwrap()
-                .contains(" disabled")
+        shows(
+            &output,
+            &[],
+            &[
+                "data-change-assignment",
+                "data-assignment-target",
+                "<select ",
+            ],
         );
         let mut i = issue(json!({"kind":"github","waiting":true}));
         shows(

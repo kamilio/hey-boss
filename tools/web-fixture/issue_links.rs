@@ -66,7 +66,7 @@ fn commit_attachments_survive_switching_to_a_pr_workflow() {
         }
         p.eval("document.querySelector('.issue-commits-more').click()")
             .unwrap();
-        p.wait("document.querySelector('.commit-count')?.textContent==='6'");
+        p.wait("document.querySelector('.commit-section .commit-count')?.textContent==='6'");
         assert_eq!(
             p.eval("document.querySelector('.commit-target').checkVisibility()")
                 .unwrap(),
@@ -96,7 +96,7 @@ fn commit_attachments_survive_switching_to_a_pr_workflow() {
         );
         p.wait("document.querySelector('.commit-target').target==='_blank' && document.querySelector('.commit-trace-link').getAttribute('aria-label')==='Open agent trace for commit abcdef5'");
         assert_eq!(
-            p.eval("document.querySelector('.issue-review a').href === document.querySelector('.commit-target').href && document.querySelector('.issue-review [data-action=ready]').checkVisibility() && !document.querySelector('.issue-review [data-remove-commit]')").unwrap(),
+            p.eval("!!document.querySelector('.linked-changes .commit-target') && !document.querySelector('.linked-changes [data-action=ready]')").unwrap(),
             true
         );
         let trace = p

@@ -365,6 +365,8 @@ fn blocker_picker_rejects_cycles_and_releases_only_the_last_active_link() {
         .unwrap();
     };
     let picker = |p: &mut Page| {
+        p.eval("document.querySelector('.dep-manage').open=true")
+            .unwrap();
         click(p, "[data-add-blocker]");
         p.wait("document.querySelector('#blocker-picker-dialog').open && !!document.querySelector('[data-select-blocker]')");
     };
@@ -379,6 +381,7 @@ fn blocker_picker_rejects_cycles_and_releases_only_the_last_active_link() {
     p.wait("!document.querySelector('#blocker-picker-dialog').open && !!document.querySelector('[data-remove-blocker=\"1\"]')");
     issue(&["close", "1"]);
     go(&mut p, 3);
+    click(&mut p, ".dep-manage summary");
     p.wait("!!document.querySelector('.state-pill.blocked') && document.querySelector('.issue-blockers').innerText.includes('Closed')");
     issue(&["close", "2"]);
     go(&mut p, 3);
@@ -391,11 +394,12 @@ fn blocker_picker_rejects_cycles_and_releases_only_the_last_active_link() {
     p.wait("document.querySelector('#blocker-picker-dialog').open && document.querySelector('#blocker-picker-error').innerText.includes('cycle')");
     assert_eq!(issue(&["view", "1"])["issue"]["blocker_numbers"], json!([]));
     go(&mut p, 3);
+    click(&mut p, ".dep-manage summary");
     click(&mut p, "[data-remove-blocker='1']");
     p.wait("!!document.querySelector('.state-pill.open') && !document.querySelector('[data-remove-blocker=\"1\"]')");
     issue(&["reopen", "2"]);
     go(&mut p, 3);
-    p.wait("document.querySelector('[data-remove-blocker=\"2\"]').checkVisibility()");
+    p.wait("document.querySelector('.dependency-group a[data-issue=\"2\"]').checkVisibility()");
     layouts(&mut p, "links", ".issue-blockers", &[1440, 768, 390, 320]);
     picker(&mut p);
     layouts(

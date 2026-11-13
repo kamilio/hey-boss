@@ -1182,7 +1182,7 @@ async function refresh(quiet = true) {
     $("#editor-dialog").open ||
     $("#confirm-dialog").open ||
     $("#transfer-dialog").open ||
-    !!$(".issue-overflow[open]")
+    !!$(".issue-overflow[open], [data-change-assignment][aria-expanded=true]")
   )
     return;
   model.polling = true;
@@ -1393,19 +1393,19 @@ function renderReadiness(value) {
   if (i.job_run_id) {
     const result = /^Job (failed|cancelled|succeeded|running|pending)\b/.exec(i.status?.comment || "")?.[1];
     const status = result ? result[0].toUpperCase() + result.slice(1) : i.state === "closed" ? "Succeeded" : i.assignee && !i.assignee.startsWith("job:") ? "Running" : "Pending";
-    return `<div class="side-section issue-readiness"><h2 class="side-heading">Scheduled job</h2><strong class="readiness-status">${esc(status)}</strong><p>This execution runs independently of worker slots. Its result stays linked to the job’s history.</p></div>`;
+    return `<div class="side-section issue-readiness"><h2 class="side-heading">Scheduled job</h2><strong class="readiness-status">${esc(status)}</strong><p>This execution runs independently of worker slots. Its result stays linked to the job’s history.</p>${readyAction(i)}</div>`;
   }
   if (i.attempt_hold) return `<div class="side-section issue-readiness"><h2 class="side-heading">Worker pickup</h2><strong class="readiness-status">Attempt protected · pickup paused</strong><p>The original attempt must be reconciled on ${esc(i.attempt_hold.host)} before another agent can start.</p></div>`;
-  if(i.state === "open" && !i.draft && i.assignment && i.assignment.kind !== "unassigned") return "";
+
   const expired = a?.reason === "allocation_expired";
   const reserved = !!a?.reserved_machine && !expired && i.state !== "closed";
   const missing = a?.role === "agent" && !a.reserved_machine;
   const reason = draftUnavailable(i, value.drafts_enabled);
-  const status = i.state === "ready" ? i.draft ? "Development handoff · draft retained" : "Ready" : i.state === "blocked" ? `${IssueBlockers.description(i)} · pickup paused` : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Eligible for pickup";
+  const status = i.state === "ready" ? i.draft ? "Development handoff · draft retained" : "Ready" : i.state === "blocked" ? `${IssueBlockers.description(i)} · pickup paused` : i.state === "closed" ? "Completed" : i.draft ? "Draft · not ready for agents" : i.assignee || (i.assignment && i.assignment.kind !== "unassigned") ? "Assigned" : expired ? "Reservation expired" : reserved ? "Reserved" : missing ? "Waiting for supervisor" : "Eligible for pickup";
   const help = "Reserved while a worker prepares an agent and waits for its claim. Unclaimed reservations expire after 15 minutes for startup, then at the worker's claim deadline. Claimed work stays protected, including offline. Release an unused reservation to let another device pick it up sooner.";
   const label = reserved || expired ? `<span class="fleet-allocation-label" tabindex="0" aria-label="${esc(status + '. ' + help)}"><strong class="readiness-status">${esc(status)}</strong><span class="fleet-allocation-help" aria-hidden="true">${esc(help)}</span></span>` : `<strong class="readiness-status">${esc(status)}</strong>`;
   const note = value.drafts_enabled === false && !i.draft && ["open", "blocked"].includes(i.state) ? "" : i.state === "ready" ? i.draft ? "No worker pickup for this source. Eligible dependents can start. CI, review, merge and production approval remain separate. Reopen to withdraw the handoff." : "Unassign to let a worker pick up this task. Move it out of Ready to request rework." : i.state === "blocked" ? reason || "Move to draft to refine the scope while pickup stays paused. Linked blockers are kept and checked again when you mark it ready." : i.state === "closed" ? "" : i.draft ? "Keep refining the scope. Mark ready when this issue can be picked up." : i.assignee ? "" : reason || (reserved ? "" : missing ? "This replica has no allocation. Check the supervisor before resuming; it may have a newer reservation." : "Move to draft to pause agent pickup while you refine the scope.");
-  return `<div class="side-section issue-readiness"><h2 class="side-heading">Worker pickup${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}${value.drafts_enabled === false || (i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}</div>`;
+  return `<div class="side-section issue-readiness"><h2 class="side-heading">Issue state${icon(i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : "edit")}</h2>${label}${note ? `<p id="readiness-help">${esc(note)}</p>` : ""}<div class="state-actions">${readyAction(i)}${value.drafts_enabled === false || (i.draft && i.state !== "blocked") || i.state === "closed" || i.assignee ? "" : `<button type="button" class="button" data-draft-action="draft" ${note ? 'aria-describedby="readiness-help"' : ""} ${reason ? "disabled" : ""}>${icon("edit")}Move to draft</button>`}</div></div>`;
 }
 function issueStateActions(issue) {
   if (issue.attempt_hold) return "";
@@ -1473,13 +1473,7 @@ function issueTools(issue) {
 }
 function readyAction(issue) {
   if (issue.deleted_at || issue.attempt_hold || !(issue.state === "open" || (issue.state === "blocked" && issue.manual_blocked))) return "";
-  return `<button type="button" class="button primary" data-action="ready">${icon("check")}${issue.draft ? "Development handoff" : "Move to Ready"}</button>`;
-}
-function issueReview(issue) {
-  const c = issue.commits.at(-1);
-  const review = commitReviewUrl(c, issue);
-  const short = c.short_sha || c.sha.slice(0, 7);
-  return `<section class="issue-review" aria-label="Attached commit"><div class="review-work"><div class="review-label">${icon("code")}${issue.commits.length > 1 ? `Latest of ${issue.commits.length} commits` : "Commit"} <code>${esc(short)}</code></div><a href="${esc(review || c.url)}" ${review ? "" : 'target="_blank" rel="noopener noreferrer"'}>${esc(c.title || ("View commit " + short))}${icon("arrow-right")}</a></div>${readyAction(issue)}</section>`;
+  return `<button type="button" class="button" data-action="ready">${icon("check")}${issue.draft ? "Development handoff" : "Move to Ready"}</button>`;
 }
 function renderDistributedAttempts(issue) {
   const attempts = issue.attempts || [];
@@ -1513,7 +1507,7 @@ function renderDetail(value) {
   const root=$("#detail-view"),key=detailKey(model.project.id,i.number);
   const keep=root.dataset.htmlIssueKey===key && root.htmlDescription===description ? $("#issue-description-body") : null;
   const markup =
-    `<div class="issue-topline"><div class="issue-path"><button class="back-link" data-back>${icon("arrow-left")}All issues</button><span aria-hidden="true">/</span><span class="detail-number">#${i.number}</span></div>${issueTools(i)}</div>${IssueSubtasks.parent(i)}<div class="detail-top"><h1 aria-label="${esc(i.title)} #${i.number}">${esc(i.title)}</h1>${i.commits?.length ? "" : readyAction(i)}</div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>${commentCount(value.comments.length, value.more_comments)}</span></div>${renderDraftNotice(i)}${i.commits?.length ? issueReview(i) : ""}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div id="issue-description-body" class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}${renderDistributedAttempts(i)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2></div><div id="comments" class="issue-timeline">${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2>${renderCommits(i)}${renderPullRequests(i, value.prs_enabled)}<div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
+    `<div class="issue-topline"><div class="issue-path"><button class="back-link" data-back>${icon("arrow-left")}All issues</button><span aria-hidden="true">/</span><span class="detail-number">#${i.number}</span></div>${issueTools(i)}</div>${IssueSubtasks.parent(i)}<div class="detail-top"><h1 aria-label="${esc(i.title)} #${i.number}">${esc(i.title)}</h1></div><div class="detail-meta"><span class="state-pill ${state} ${IssueBlockers.kind(i) === "hold" ? "on-hold" : ""}">${icon(deleted ? "trash" : i.attempt_hold ? "blocked" : i.state === "ready" ? "pull-request" : i.state === "blocked" ? "blocked" : i.state === "closed" ? "closed" : i.draft ? "edit" : "issue")}${deleted ? "Deleted" : i.attempt_hold ? "Attempt protected" : i.state === "ready" ? i.draft ? "Development handoff" : "Ready" : i.state === "blocked" ? (i.manual_blocked ? "On hold" : "Waiting for dependencies") : i.state === "closed" ? "Closed" : i.draft ? "Draft" : "Open"}</span><span class="issue-authorship"><strong>${authored}</strong> opened this issue ${date(i.created_at)}</span><span>${commentCount(value.comments.length, value.more_comments)}</span></div>${renderDraftNotice(i)}<div class="detail-layout"><div class="detail-main"><article class="comment-card issue-description" aria-labelledby="issue-description-heading"><div class="comment-header"><h2 id="issue-description-heading">Description</h2></div><div id="issue-description-body" class="comment-body markdown">${description}</div></article>${HeyBossStatus.card(i, actorName)}<section class="linked-changes" aria-label="Linked changes"><h2 class="issue-section-heading">Linked changes</h2>${renderPullRequests(i, value.prs_enabled)}${renderCommits(i)}</section>${renderDistributedAttempts(i)}<section id="issue-attachments"></section>${IssueSubtasks.card(value)}<section class="issue-discussion" aria-labelledby="issue-discussion-heading"><div class="discussion-heading"><h2 id="issue-discussion-heading" class="issue-section-heading">Discussion</h2></div><div id="comments" class="issue-timeline">${value.comments.map((c) => renderIssueComment(c, deleted)).join("")}</div>${deleted ? `<div class="update-banner"><span>This issue is deleted. Its history is preserved.</span><button data-action="restore">Restore issue</button></div>` : `<form id="comment-form" class="comment-compose"><div class="compose-heading">${avatar(model.actor.id)}<label for="comment-body">Add a comment</label></div><div class="markdown-editor"><div class="editor-tabs" role="tablist" aria-label="Comment mode"><button type="button" id="comment-write" class="selected" role="tab" aria-selected="true">Write</button><button type="button" id="comment-preview" role="tab" aria-selected="false" tabindex="-1">Preview</button></div><textarea id="comment-body" aria-label="Your comment" rows="4" placeholder="Share a finding, decision, or question…"></textarea><div class="markdown preview-content" id="comment-rendered" hidden></div></div><p class="form-error" id="comment-error" role="alert" hidden></p><div class="compose-actions">${issueStateActions(i)}<button class="button primary" type="submit" id="comment-submit">Comment${icon("arrow-right")}</button></div></form>`}</section></div><section class="sidebar" aria-label="Issue properties">${renderIssueWork(value)}<section class="issue-resources" aria-label="Linked resources"><h2 class="issue-section-heading">Links</h2><div id="issue-artifacts" class="side-section"></div><div class="side-section" id="related-notices"><h2 class="side-heading">Related notices${icon("inbox")}</h2><p class="muted-text">Loading…</p></div></section>${renderIssueContext(i)}${deleted ? `<button class="button link-button" data-action="restore">${icon("refresh")}Restore issue</button>` : ""}</section></div>`;
   HeyBossHTML.replaceContent(root,markup,keep);
   root.dataset.htmlIssueKey=key;
   root.htmlDescription=description;
@@ -1635,6 +1629,13 @@ $("#detail-view").addEventListener("click", async (e) => {
       toast("Copy the URL from your address bar.", true);
     }
   }
+  if (button.hasAttribute("data-change-assignment")) {
+    const select = $("#issue-assignment");
+    select.hidden = !select.hidden;
+    button.setAttribute("aria-expanded", String(!select.hidden));
+    if (!select.hidden) select.focus();
+  }
+  if (button.dataset.assignmentTarget) changeAssignment(button, button.dataset.assignmentTarget);
   if (button.dataset.removePr)
     changePullRequest("remove_pull_request", button.dataset.removePr);
   if (button.dataset.removeCommit)
@@ -1644,29 +1645,29 @@ $("#detail-view").addEventListener("click", async (e) => {
 $("#detail-view").addEventListener("change", event => {
   if(event.target.matches('[data-assignment-select]')) changeAssignment(event.target);
 });
-async function changeAssignment(select) {
+async function changeAssignment(control, target = control.value) {
   const issue=model.detail.issue,project=model.project.id,host=model.route.host||null;
-  const target=select.value,assignment=IssueAssignments.current(issue);
+  const assignment=IssueAssignments.current(issue);
   if(target==='active') return;
-  const hadFocus=select===document.activeElement;
+  const hadFocus=control===document.activeElement;
   const restoreFocus=()=>{
-    if(hadFocus && document.activeElement===document.body && model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) $('#issue-assignment')?.focus({preventScroll:true});
+    if(hadFocus && document.activeElement===document.body && model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) $('[data-change-assignment]')?.focus({preventScroll:true});
   };
   if((target==='boss'||target==='unassigned') && assignment.actor && assignment.actor!=='human:boss') {
-    await performAction(target==='boss'?'assign_boss':'unassign',select);
-    if(select.isConnected) await renderRoute();
+    await performAction(target==='boss'?'assign_boss':'unassign',control);
+    if(control.isConnected) await renderRoute();
     restoreFocus();
     return;
   }
   saveComment();
-  select.disabled=true;
+  control.disabled=true;
   try {
     await mutate({action:'assign',number:issue.number,target,if_version:issue.version},project,host);
     toast(target==='github'?'Assigned to GitHub PR watcher':target==='unassigned'?'Assignment cleared':'Assignment updated');
     if(model.project.id===project && model.route.issue===issue.number && (model.route.host||null)===host) await renderRoute();
   } catch(error) {
     toast(error.message,true);
-    if(select.isConnected) { select.disabled=false; select.value=IssueAssignments.selectedTarget(issue); }
+    if(control.isConnected) { control.disabled=false; if(control.matches("select")) control.value=IssueAssignments.selectedTarget(issue); }
   } finally {
     restoreFocus();
   }
@@ -2598,10 +2599,10 @@ async function changeCommit(action, commit) {
 }
 function renderPullRequests(issue, prsEnabled) {
   if (!prsEnabled) return "";
-  return `<div class="side-section"><h2 class="side-heading">Pull requests${icon("link")}</h2><p class="field-help pr-purpose-help">Link fixes, prerequisites, or supporting evidence.</p><div class="pr-links">${(issue.pull_requests || []).map((pr) => {
+  return `<details class="side-section pr-section"${issue.pull_requests?.length ? " open" : ""}><summary class="commit-summary">${icon("pull-request")}Pull requests <span class="commit-count">${issue.pull_requests?.length || 0}</span><span class="commit-chevron" aria-hidden="true">›</span></summary><div class="pr-links">${(issue.pull_requests || []).map((pr) => {
     const trace = traceLinkForOrigin(pr.origin, issue.number, pr.added_by);
     return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
-  }).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</div>`;
+  }).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</details>`;
 }
 async function changePullRequest(action, url, purpose, control) {
   const project = model.project.id,

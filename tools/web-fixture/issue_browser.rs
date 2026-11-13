@@ -491,7 +491,7 @@ fn blocked_issue_views_distinguish_holds_from_dependency_chains() {
     let chain = json!({"number":2,"title":"API layer","state":"open","blocked_by":[],"blocker_links":[{"number":1,"title":"Storage layer","state":"ready","satisfied":true,"pull_requests":[{"url":"https://github.com/example/repo/pull/101"}]}],"blocking":[{"number":3,"title":"Web UI","state":"blocked","actively_blocked":true,"unblocks_on_release":true}]});
     let html = page.eval(&format!("IssueBlockers.card({chain})")).unwrap();
     for expected in [
-        "dep-chain-graph",
+        "dependency-group",
         "PR #101",
         "Unblocks on Ready/Close",
         "data-create-dependent=\"2\"",

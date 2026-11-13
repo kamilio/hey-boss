@@ -175,6 +175,7 @@ const server=createServer(async(req,res)=>{
             await page.locator('.github-watcher-dialog').getByText('Merge conflicts',{exact:true}).waitFor();
             await page.keyboard.press('Escape');
             await page.locator(`[data-issue-number="${number}"] .issue-title`).click();
+            await page.getByRole('button',{name:'Change assignment'}).click();
             await page.locator('#issue-assignment').waitFor();
             assert.equal(await page.locator('#issue-assignment').inputValue(),selection);
             assert.equal(await page.locator('#issue-assignment option:checked').innerText(),label);

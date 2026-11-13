@@ -43,20 +43,12 @@ const IssueBlockers = (() => {
     if (issue.deleted_at || issue.state==="closed") return "";
     const active = issue.blocked_by || [], linked = issue.blocker_links || [], dependents = issue.blocking || [];
     const linkedNumbers = new Set(linked.map(i=>i.number));
-    const inherited = active.filter(i=>!linkedNumbers.has(i.number));
-    const prerequisites = [...linked, ...inherited];
-    const hasGraph = prerequisites.length > 0 || dependents.length > 0;
-    const stateBadge = i => {
-      const label = i.deleted_at ? "Deleted" : i.state==="ready" ? "Ready" : i.state==="closed" ? "Closed" : i.state==="blocked" ? "Blocked" : i.source==="subtask" ? "Unfinished subtask" : "Open";
-      return `<span class="dep-state-pill is-${esc(i.state || "open")}">${label}</span>`;
-    };
-    const graphHtml = hasGraph ? `<div class="dep-chain-graph" aria-label="Dependency chain visualization">
-      ${prerequisites.length ? `<div class="dep-chain-stage"><div class="dep-stage-label">Prerequisites (${active.length ? "Blocked by" : "Depends on"})</div><ul class="blocker-list">${prerequisites.map(i=>`<li class="dep-node ${i.state==="ready"||i.state==="closed" ? "is-satisfied" : "is-waiting"}">${link(i)}${prBadge(i)}${stateBadge(i)}${linkedNumbers.has(i.number) ? `<button type="button" class="icon-button" data-remove-blocker="${i.number}" aria-label="Remove blocker #${i.number}">${icon("x")}</button>` : ""}</li>`).join("")}</ul></div><div class="dep-flow-arrow" aria-hidden="true">↓ unblocks</div>` : ""}
-      <div class="dep-chain-current"><span class="dep-current-badge">#${issue.number} ${esc(issue.title)}</span>${prBadge(issue)}<span class="dep-state-pill is-${esc(issue.state)}">${esc(issue.state)}</span></div>
-      ${dependents.length ? `<div class="dep-flow-arrow" aria-hidden="true">↓ blocks (${dependents.length})</div><div class="dep-chain-stage"><div class="dep-stage-label">Blocking downstream tasks</div><ul class="blocker-list">${dependents.map(d=>`<li class="dep-node ${d.actively_blocked ? "is-waiting" : "is-satisfied"}">${link(d)}${prBadge(d)}${stateBadge(d)}${d.unblocks_on_release ? '<span class="dep-unblock-hint">Unblocks on Ready/Close</span>' : ""}</li>`).join("")}</ul></div>` : ""}
-    </div>` : `<p>${issue.state==="blocked" ? "No linked issue. Review the blocker in comments." : "No blockers"}</p>`;
+    const activeNumbers = new Set(active.map(i => i.number));
+    const groups = [[active, "Blocked by"], [linked.filter(i => !activeNumbers.has(i.number)), "Depends on"], [dependents.filter(i => i.actively_blocked), "Blocks"], [dependents.filter(i => !i.actively_blocked), "Dependents"]].filter(([items]) => items.length);
+    const rows = groups.map(([items, label]) => `<div class="dependency-group"><strong>${label}</strong><ul>${items.slice(0, 2).map(i => `<li>${link(i)}</li>`).join("")}</ul></div>`).join("");
+    const more = groups.reduce((n, [items]) => n + Math.max(0, items.length - 2), 0);
     const help = issue.draft && issue.state === "open" ? "Dependencies are checked when the draft is marked ready." : issue.manual_blocked ? "Release the hold to resume. Unfinished dependencies still pause pickup." : issue.dependency_ready_state === "ready" ? "Resumes when blockers are Ready or Closed. Stack PRs on prerequisite branches." : "Resumes when all blockers are Closed. Dependents wait for this issue.";
-    return `<div class="side-section issue-blockers"><h2 class="side-heading">Dependencies${HeyBossUI.infoTip("dependencies-help", "About dependencies", help)}</h2>${graphHtml}<div class="dep-actions-row"><button type="button" class="button" data-add-blocker>${icon("plus")}Blocker</button><button type="button" class="button" data-create-dependent="${issue.number}">${icon("plus")}Dependent</button></div></div>`;
+    return `<div class="side-section issue-blockers"><h2 class="side-heading">Dependencies${HeyBossUI.infoTip("dependencies-help", "About dependencies", help)}</h2>${rows || "<span class='muted-text'>None</span>"}<details class="dep-manage"><summary>${more ? `Show ${more} more · Manage dependencies` : "Manage dependencies"}</summary>${groups.map(([items,label]) => `<div class="dependency-group"><strong>${label}</strong><ul>${items.map(i => `<li>${link(i)} ${prBadge(i)}<span class="dep-status">${esc(i.deleted_at ? "Deleted" : i.state?.replace(/^./, c => c.toUpperCase()))}${i.unblocks_on_release ? " · Unblocks on Ready/Close" : ""}</span>${(label === "Blocked by" || label === "Depends on") && linkedNumbers.has(i.number) ? `<button type="button" class="icon-button" data-remove-blocker="${i.number}" aria-label="Remove blocker #${i.number}">${icon("x")}</button>` : ""}</li>`).join("")}</ul></div>`).join("")}<div class="dep-actions-row"><button type="button" class="button" data-add-blocker>${icon("plus")}Blocker</button><button type="button" class="button" data-create-dependent="${issue.number}">${icon("plus")}Dependent</button></div></details></div>`;
   }
   function close() { if(busy)return;generation++;context=null;$("#blocker-picker-dialog").close();$("[data-add-blocker]")?.focus(); }
   function options() {
