@@ -852,6 +852,15 @@ final class Overlay {
         statusDismiss?.cancel(); statusDismiss = nil
         status?.removeFromSuperview(); status = nil; closingStatus = false
     }
+    var deckFeedback: String? {
+        guard enabled else { return nil }
+        if notice != nil { return "Notice" }
+        guard !resultIcon.isHidden else { return nil }
+        return resultIcon.contentTintColor == TalkDesign.failure ? "Failed" : "Done"
+    }
+    var deckProgress: Int {
+        phase == .processing && conversation == nil ? Int(10 * progress.fraction(elapsed: ProcessInfo.processInfo.systemUptime - processingStarted)) : 0
+    }
     func confirmAction(_ action: CorrectionAction, failed: Bool = false) {
         guard enabled, pasteWait == nil, notice == nil else { return }
         let message: String

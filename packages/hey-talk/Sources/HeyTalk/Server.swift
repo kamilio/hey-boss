@@ -12,6 +12,7 @@ final class CommandServer {
     private let connections = DispatchQueue(label: "hey-talk.connections", attributes: .concurrent)
     private let responses = DispatchQueue(label: "hey-talk.responses", attributes: .concurrent)
     private let slots = DispatchSemaphore(value: 16)
+    var deckSnapshot: (() -> [String: Any])?
     var handle: (([String: Any], @escaping ([String: Any]) -> Void) -> Void)?
     init(directory: URL = ControlSocket.directory) { self.directory = directory }
     func start() throws {
@@ -49,6 +50,10 @@ final class CommandServer {
                 do {
                     let data = try Wire.line(from: fd, timeout: 5, limit: 16_384)
                     guard let request = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw TalkError("Invalid command") }
+                    if request["command"] as? String == "watch_deck" {
+                        try self.watchDeck(fd)
+                        close(fd); return
+                    }
                     let finished = DispatchSemaphore(value: 0)
                     let replyLock = NSLock()
                     var replied = false
@@ -68,6 +73,22 @@ final class CommandServer {
                     close(fd)
                 }
             }
+        }
+    }
+    // One read-only connection for all visible keys; never queue old meter frames.
+    private func watchDeck(_ fd: Int32) throws {
+        var previous: NSDictionary?
+        while true {
+            guard let frame = DispatchQueue.main.sync(execute: { self.deckSnapshot?() }) else { return }
+            if previous?.isEqual(to: frame) != true {
+                try Wire.write(Wire.json(frame), to: fd, timeout: 1)
+                previous = frame as NSDictionary
+            }
+            let live = ["Listening", "Recording"].contains(frame["dictation"] as? String ?? "") ||
+                ["Listening", "Recording"].contains(frame["conversation"] as? String ?? "")
+            var peer = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let result = poll(&peer, 1, live ? 150 : 450)
+            if result != 0 && !(result < 0 && errno == EINTR) { return }
         }
     }
     deinit {
