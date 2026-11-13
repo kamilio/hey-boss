@@ -18,3 +18,5 @@ The first page has Dictation, Conversation, Stop, Auto Dictate, Catch Up and Nex
 **Build and install:** Run `../hey-talk/install.sh` first when updating the native service. With Node 22 and the macOS zip utility, run `npm ci && npm test && npm run install:deck`. For redistribution, `npm run pack` validates the manifest and writes the installer to `dist/`. CI produces the same installer on package changes. To regenerate the state gallery and PNG sheets, install librsvg and run `npm run preview`.
 
 One local socket subscription serves all visible keys. Hey Talk transmits changed indicator frames only; Stream Deck redraws only affected keys. Hiding the last key closes the subscription. No transcripts, window titles or audio cross that connection.
+
+A profile can set `Settings.appearance` to `"monochrome"` on the dictation action to use a dark key with a centered line icon. The live recording meter, processing progress, and tap/hold actions still work.
