@@ -81,13 +81,27 @@ host.on("message", raw=>{
   if (!action?.startsWith(prefix+".")) return;
   const id = action.slice(prefix.length+1);
   if (!Object.hasOwn(keys,id)) return;
+  const key = visible.get(context);
+  const invoke = action => keyDown(action).catch(()=>send({event:"showAlert",context}));
   if (event === "willAppear") {
+    clearTimeout(visible.get(context)?.hold);
     const key = {id}; visible.set(context,key); draw(context,key); clearTimeout(retry); watch();
   } else if (event === "willDisappear") {
+    clearTimeout(key?.hold);
     visible.delete(context);
     if (!visible.size) { clearTimeout(retry); watcher?.destroy(); watcher=undefined; frame={}; missing="Offline"; }
-  } else if (event === "keyDown") {
-    keyDown(id).catch(()=>send({event:"showAlert",context}));
+  } else if (id === "dictation" && key) {
+    if (event === "keyDown" && key.hold === undefined) {
+      key.hold = setTimeout(()=>{
+        key.hold = null; // Release after a hold must not toggle dictation.
+        if (!frame.conversation || ["Ready","Voice off"].includes(frame.conversation)) invoke("new-chat");
+      }, 500);
+    } else if (event === "keyUp") {
+      if (key.hold) { clearTimeout(key.hold); invoke("dictation"); }
+      delete key.hold;
+    }
+  } else if (id !== "dictation" && event === "keyDown") {
+    invoke(id);
   }
 });
 host.on("error", ()=>process.exit(1));

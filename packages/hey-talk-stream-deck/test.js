@@ -46,7 +46,7 @@ test("keys register, follow external changes, route presses once, and go offline
     assert.fail("missing expected event: "+JSON.stringify(events.map(e=>e.payload?.title ?? e.event)));
   };
   await until(()=>events.some(e=>e.event==="registerPlugin" && e.uuid==="test"));
-  const send = (event,context)=>client.send(JSON.stringify({event,context,action:prefix+".conversation"}));
+  const send = (event,context,id="conversation")=>client.send(JSON.stringify({event,context,action:prefix+"."+id}));
   const matches = (e,c,s)=>e.context===c && e.payload?.image && Buffer.from(e.payload.image.split(",")[1],"base64").toString().includes(" · "+s+"</title>");
   const title = (c,s)=>events.some(e=>matches(e,c,s));
   send("willAppear","a"); send("willAppear","b");
@@ -55,6 +55,15 @@ test("keys register, follow external changes, route presses once, and go offline
   send("keyDown","b"); send("keyUp","b");
   await until(()=>calls.length===1);
   assert.deepEqual(calls,["conversation"]);
+  const dict = event=>send(event,"d","dictation");
+  dict("willAppear"); dict("keyDown"); dict("keyUp");
+  await until(()=>calls.length===2);
+  dict("keyDown");
+  await until(()=>calls.length===3);
+  assert.deepEqual(calls,["conversation","dictation","new-chat"]);
+  dict("keyUp"); dict("keyDown"); dict("willDisappear"); dict("keyUp");
+  await new Promise(r=>setTimeout(r,750));
+  assert.equal(calls.length,3);
   stream.write('{"ok":true,"conversation":"Listening"}\n');
   await until(()=>title("b","Listening"));
   assert.equal(title("a","Listening"),false);
