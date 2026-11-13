@@ -1,4 +1,55 @@
-body{margin:0;font:14px/1.5 system-ui,sans-serif;background:var(--bg,#fafbf9);color:var(--fg,#202620)}[hidden]{display:none!important}button,a,textarea{outline-offset:3px}button:focus-visible,a:focus-visible{outline:2px solid var(--accent,#22664d)}button{font:inherit;cursor:pointer;border:1px solid var(--border,#dce1dc);border-radius:7px;background:var(--bg,#fff);color:inherit;padding:7px 11px}button:hover{background:var(--subtle,#eef2ee)}button:disabled{opacity:.5;cursor:default}button.primary{background:var(--fg,#23372e);color:var(--bg,#fff);border-color:transparent}a{color:inherit}.bar .mark{text-decoration:none;white-space:nowrap}.task-bar{position:sticky;top:64px;z-index:4;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px max(24px,calc((100% - var(--container-max,1440px))/2));background:var(--bg,#fff);border-bottom:1px solid var(--border,#dce1dc);box-shadow:0 3px 12px #00000005}.task-info{min-width:0}#task-title{display:block;max-width:55ch;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;text-decoration:none}.task-meta{display:flex;gap:10px;font-size:12px;color:var(--muted,#67706a);margin-top:4px}#task-state{font-weight:600}.task-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0}.task-actions button{font-size:12px}.review-error{position:sticky;top:151px;z-index:6;background:#fff0ee;color:#a12319;padding:12px 24px;border-bottom:1px solid #e4b5b0}main{margin:28px auto;max-width:1440px;padding:0 24px}.summary p:empty{display:none}.message-tools{display:flex;align-items:center;gap:8px;margin-top:18px;flex-wrap:wrap}.message-tools code{margin-right:auto;font:12px var(--font-mono,monospace);color:var(--muted);overflow-wrap:anywhere}.message-tools button{font-size:12px}#message-form{margin-top:18px}#message-form label{display:block;margin-bottom:7px;font-weight:600}#commit-message{min-height:160px;box-sizing:border-box;resize:vertical;color:inherit;background:var(--bg);font:13px/1.6 var(--font-mono,monospace)}.message-actions{display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-top:8px}#message-error{margin-right:auto;color:#c02c26}.add-comment:focus-visible{visibility:visible}.file{scroll-margin-top:165px}@media(prefers-color-scheme:dark){:root{--bg:#181d1a;--fg:#e1e8e3;--muted:#9baaa0;--surface-warm:#202923;--border:#34453b;--accent:#6fc59c;--accent-on:#12281c;--accent-hover:#89d5ad;--subtle:#202923;--add:#183b2b;--del:#412626;--hunk:#24352d}.review-error{background:#402522;color:#ffb3a9}}@media(max-width:850px){.task-bar{position:static;align-items:flex-start;flex-direction:column;gap:10px;padding:12px 16px}.task-actions{justify-content:flex-start;flex-shrink:1}.task-actions button{padding:8px 9px}.bar{padding:0 16px!important}.bar strong{font-size:13px}.bar .mark{padding:4px 6px}main{padding:0 12px}.summary{padding:16px!important}.message-tools code{flex-basis:100%}.review-error{top:64px}.file{scroll-margin-top:80px}.add-comment{visibility:visible}.file>header strong{overflow-wrap:anywhere;min-width:0}}
-html body .bar .mark{width:auto;padding:0 10px}html body .bar{background:var(--bg);height:72px}.task-bar{top:72px;padding-inline:max(24px,calc((100% - 1100px)/2))}html body .summary h1{font-family:var(--font-body);font-size:26px;font-weight:600;letter-spacing:-.02em}html body .summary{background:var(--bg)}html body .file>header strong{color:var(--fg)}html body main{padding-top:28px}
-@media(prefers-color-scheme:dark){:root:root{color-scheme:dark;--bg:#181d1a;--surface:#202923;--surface-warm:#202923;--subtle:#202923;--fg:#e1e8e3;--fg-2:#f0f5f1;--muted:#9baaa0;--meta:#9baaa0;--border:#34453b;--border-soft:#34453b;--accent:#6fc59c;--accent-on:#12281c;--accent-hover:#89d5ad;--add:#183b2b;--del:#412626;--hunk:#24352d}html body .file{background:var(--bg);border-color:var(--border)}html body .file>header,html body .placeholder,html body.split [data-diff-side]::before{background:var(--surface);border-color:var(--border);color:var(--muted)}html body .diff-row{color:var(--fg)}html body .diff-row span{border-color:var(--border);color:var(--muted)}html body .diff-row.addition,html body .addition{background:var(--add)}html body .diff-row.deletion,html body .deletion{background:var(--del)}html body .hunk{background:var(--hunk);color:var(--muted)}html body .diff-row code .syntax-keyword{color:#ffa8b8}html body .diff-row code .syntax-string{color:#acd9b5}html body .diff-row code .syntax-number{color:#9dc9ff}html body .diff-row code .syntax-comment{color:var(--muted)}html body .split-pair>div:first-child{border-color:var(--border)}html body textarea{color:var(--fg)}}
-@media(max-width:850px){.task-bar{padding-inline:16px}}@media(max-width:700px){html body .bar{height:auto}.review-error{position:static}html body .summary h1{font-size:23px}}
+@import url("/git-review/review.css") layer(diff);
+
+:root {
+  --fg: var(--text);
+  --border: var(--line);
+  --surface-warm: var(--solid);
+  --subtle: var(--hover);
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+main { width: 100%; }
+.detail-top h1 { font-family: inherit; }
+#task-title { overflow-wrap: anywhere; }
+#task-title:hover { color: var(--accent); }
+#commit-sha { font-weight: 500; }
+.review-byline, .message-actions, .task-strip, .task-actions, .changes-heading, .changes-heading h2 {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+}
+.review-byline, #task-owner, #count, #status { color: var(--muted); font-size: 12px; }
+.review-byline time::before { content: "·"; margin-right: 8px; }
+.review-byline .message-actions, .task-actions { margin-left: auto; color: var(--text); }
+#full-message { margin-top: 12px; }
+#full-message summary { width: fit-content; color: var(--muted); cursor: pointer; font-size: 12px; }
+#message-body { white-space: pre-wrap; max-width: 85ch; overflow-wrap: anywhere; }
+#message-form { margin-top: 16px; }
+#message-form label { font-weight: 600; }
+textarea { color: var(--text); background: var(--solid); border: 1px solid var(--line); border-radius: var(--control-radius); }
+#commit-message { display: block; margin: 6px 0 10px; min-height: 10em; font: 13px/1.6 ui-monospace, monospace; }
+#message-form .message-actions { justify-content: flex-end; }
+#message-error, #review-error { color: var(--danger); }
+.task-strip, .file { border: 1px solid var(--line); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.task-strip { margin: 22px 0 0; padding: 12px 16px; }
+.task-strip strong { font-size: 13px; }
+.changes-heading { margin: 28px 0 12px; gap: 10px; }
+.changes-heading h2 { margin: 0 auto 0 0; font: 650 18px/1.4 var(--font-body); letter-spacing: -.4px; }
+.heading-count { font-size: 12px; padding: 2px 7px; }
+.git-layout { display: inline-flex; padding: 3px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--control-radius); }
+.git-layout button { padding: 5px 10px; font-size: 12px; border-radius: 6px; background: transparent; color: var(--muted); }
+.git-layout button.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.file { margin-bottom: 16px; background: var(--solid); }
+.file > header, .placeholder, .split [data-diff-side]::before { background: var(--bg); color: var(--muted); border-color: var(--line); }
+.file > header strong, .diff-row { color: var(--text); }
+.file > header > span { color: var(--muted); font: 12px ui-monospace, monospace; }
+.diff-row > span, .split-pair > div:first-child { border-color: var(--line); color: var(--muted); }
+.diff-row.addition { background: color-mix(in srgb, var(--green) 12%, var(--solid)); }
+.diff-row.deletion { background: color-mix(in srgb, var(--danger) 12%, var(--solid)); }
+.hunk { background: var(--accent-soft); color: var(--muted); overflow-wrap: anywhere; }
+.diff-row code .syntax-keyword { color: var(--purple); }
+.diff-row code .syntax-string { color: var(--green); }
+.diff-row code .syntax-number { color: var(--accent); }
+.diff-row code .syntax-comment { color: var(--muted); }
+.add-comment, .comment-actions .submit-comment { background: var(--primary-bg); color: var(--primary-text); }
+@media (max-width: 700px) {
+  .review-byline .message-actions, .task-actions { width: 100%; margin-left: 0; }
+  .changes-heading { row-gap: 8px; }
+}

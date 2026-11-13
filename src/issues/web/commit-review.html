@@ -1,2 +1,60 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><title>Commit review · Hey Boss</title><link rel="icon" href="/icon.png"><script src="/routes.js" defer></script><script src="/components.js" defer></script><script type="module" src="/commit-review.js"></script><link rel="stylesheet" href="/git-review/review.css"><link rel="stylesheet" href="/commit-review.css"></head><body><main><p role="status">Loading commit review…</p></main></body></html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Commit review · Hey Boss</title>
+  <link rel="icon" href="/icon.png">
+  <link rel="stylesheet" href="/components.css">
+  <link rel="stylesheet" href="/app.css">
+  <link rel="stylesheet" href="/commit-review.css">
+  <script src="/routes.js" defer></script>
+  <script src="/components.js" defer></script>
+  <script type="module" src="/commit-review.js"></script>
+</head>
+<body>
+  <main>
+    <p role="status" id="loading">Loading commit review…</p>
+    <div id="review" hidden>
+      <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
+      <header>
+        <div class="eyebrow">Commit review <span aria-hidden="true">/</span> <code id="commit-sha"></code></div>
+        <div class="detail-top"><h1></h1></div>
+        <div class="review-byline">
+          <span id="author"></span><time id="authored"></time>
+          <div class="message-actions">
+            <button class="button small" id="edit-message">Edit commit message</button>
+            <button class="button small" id="download-patch">Download patch</button>
+          </div>
+        </div>
+        <details id="full-message"><summary>Full commit message</summary><p id="message-body"></p></details>
+        <form id="message-form" hidden>
+          <label for="commit-message">Commit message</label>
+          <textarea id="commit-message" required maxlength="65536" spellcheck="false"></textarea>
+          <div class="message-actions"><span id="message-error" role="alert"></span><button type="button" class="button" id="cancel-message">Cancel</button><button type="submit" class="button primary">Save message</button></div>
+        </form>
+      </header>
+      <section class="task-strip" aria-label="Task actions">
+        <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
+        <div class="task-actions">
+          <button class="button small" id="rework">Not Ready · Assign to me</button>
+          <button class="button small" id="assign-me">Assign to me</button>
+          <button class="button small" id="make-ready">Ready</button>
+          <button class="button small" id="unassign">Unassign</button>
+          <button class="icon-button" id="refresh-task" title="Refresh task status" aria-label="Refresh task status"><span data-icon="refresh"></span></button>
+        </div>
+      </section>
+      <div id="status" role="status"></div><div id="review-error" role="alert" hidden></div>
+      <div class="changes-heading">
+        <h2>Changed files <span class="heading-count" id="file-count"></span></h2>
+        <span id="count"></span>
+        <div class="git-layout" role="group" aria-label="Diff layout">
+          <button type="button" data-layout="unified" class="active" aria-pressed="true">Unified</button><button type="button" data-layout="split" aria-pressed="false">Split</button>
+        </div>
+      </div>
+      <div id="files"></div>
+    </div>
+  </main>
+</body>
+</html>

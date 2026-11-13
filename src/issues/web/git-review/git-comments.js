@@ -2,7 +2,7 @@ import { createGitActivity } from "./git-activity.js";
 
 
 export function mountGitComments({ legacy = false, comments: initialComments = [], createActivity = createGitActivity, request } = {}) {
-  const root = document.querySelector(legacy ? "#files" : "main"), count = document.querySelector("#count");
+  const root = document.querySelector("#files") ?? document.querySelector("main"), count = document.querySelector("#count");
   const escape = (value) => String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]);
   const pointOf = (comment) => comment.location ?? comment;
   const groupKey = (point) => JSON.stringify([point.file, point.side, point.commit ?? "", point.section ?? ""]);
