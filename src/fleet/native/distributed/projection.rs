@@ -177,7 +177,19 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         .as_ref()
         .map(|r| key(db, &fact.table, r))
         .transpose()?;
-    if before_key.is_some() && after_key.is_some() && before_key != after_key {
+    if let (Some(old), Some(new)) = (&before_key, &after_key)
+        && old != new
+    {
+        // Older peers moved a review between issue scopes with one SQL UPDATE.
+        // Replay that saved revision as a deletion and insertion at its original clock.
+        if fact.table == "commit_reviews" && old["sha"] == new["sha"] {
+            let mut moved = fact.clone();
+            let destination = moved.after.take();
+            reduce(db, &moved)?;
+            moved.before = None;
+            moved.after = destination;
+            return reduce(db, &moved);
+        }
         return Err(replica::invalid("Distributed primary keys are immutable"));
     }
     // Cold history may predate enrollment and have no ordinary birth fact.

@@ -164,7 +164,11 @@ pub(super) fn execute(
         "UPDATE commit_shelf SET issue_number=0 WHERE project_id=?1 AND issue_number=?2",
         params![source.id, number],
     )?;
-    db.execute("UPDATE commit_reviews SET project_id=?3,issue_number=?4 WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
+    db.execute("INSERT INTO commit_reviews SELECT ?3,?4,sha,snapshot,message FROM commit_reviews WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
+    db.execute(
+        "DELETE FROM commit_reviews WHERE project_id=?1 AND issue_number=?2",
+        params![source.id, number],
+    )?;
     db.execute("UPDATE commit_review_comments SET project_id=?3,issue_number=?4 WHERE project_id=?1 AND issue_number=?2",params![source.id,number,target.id,next])?;
     // Opaque file IDs and disk locations survive a project transfer; only access
     // metadata follows the issue. Source-project access is revoked atomically.

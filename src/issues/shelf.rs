@@ -189,7 +189,12 @@ pub(super) fn detach(db: &Connection, p: &str, task: i64, sha: &str) -> Result<(
         )
         .optional()?;
     if entry.is_some() {
-        for table in ["commit_shelf", "commit_reviews", "commit_review_comments"] {
+        db.execute("INSERT INTO commit_reviews SELECT project_id,0,sha,snapshot,message FROM commit_reviews WHERE project_id=?1 AND issue_number=?2 AND sha=?3", params![p,task,sha])?;
+        db.execute(
+            "DELETE FROM commit_reviews WHERE project_id=?1 AND issue_number=?2 AND sha=?3",
+            params![p, task, sha],
+        )?;
+        for table in ["commit_shelf", "commit_review_comments"] {
             db.execute(&format!("UPDATE {table} SET issue_number=0 WHERE project_id=?1 AND issue_number=?2 AND sha=?3"),params![p,task,sha])?;
         }
     }

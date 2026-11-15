@@ -3335,6 +3335,33 @@ fn commit_review_snapshots_and_laptop_feedback_sync_without_a_checkout() {
             .unwrap(),
         "Changed on laptop"
     );
+    // Older peers detached shelf reviews by updating their composite key in place.
+    b.execute_batch("UPDATE commit_reviews SET issue_number=0;
+        UPDATE commit_review_comments SET issue_number=0;
+        UPDATE commit_shelf SET issue_number=0;
+        UPDATE issues SET state='closed',closed_by='human:test',closed_at=101 WHERE project_id='p' AND number=1;").unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    assert_eq!(
+        a.query_row("SELECT count(*) FROM commit_reviews", [], |r| r
+            .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        a.query_row("SELECT message FROM commit_reviews JOIN commit_shelf USING(project_id,issue_number,sha) JOIN commit_review_comments USING(project_id,issue_number,sha) WHERE issue_number=0", [], |r| r.get::<_, String>(0)).unwrap(),
+        "Edited on laptop"
+    );
+    assert_eq!(
+        a.query_row(
+            "SELECT state FROM issues WHERE project_id='p' AND number=1",
+            [],
+            |r| r.get::<_, String>(0)
+        )
+        .unwrap(),
+        "closed"
+    );
     b.execute("DELETE FROM commit_review_comments", []).unwrap();
     capture_all(&b, &mut eb);
     transfer(&eb, &mut ea);
