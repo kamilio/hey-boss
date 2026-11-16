@@ -7960,7 +7960,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private static let pageSize = 30
     private var pageStart = 0
     private var pageChats: [Chat] = []
-    private let historyScope = NSSegmentedControl(labels: ["Chats", "Archived"], trackingMode: .selectOne, target: nil, action: nil)
+    private let historyScope = NSPopUpButton(frame: .zero, pullsDown: false)
     private let previousPage = NSButton(), nextPage = NSButton()
     private var terminal: Reply?
 
@@ -8026,14 +8026,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let time: TimeInterval
         let source, text: String
     }
-    private let selectionChip = NSButton()
-    private var selections: [Selection] = [] {
-        didSet {
-            selectionChip.isHidden = selections.isEmpty
-            selectionChip.title = selections.indices.map { "[\($0 + 1)]" }.joined(separator: " ") + "  Selected text"
-            selectionChip.toolTip = selections.last?.source
-        }
-    }
+    private let attachmentStrip = NSScrollView(), attachmentRow = NSStackView()
+    private(set) var contextChip = NSButton()
+    private var selections: [Selection] = [] { didSet { refreshAttachments() } }
+    private var pendingCapture: Capture? { didSet { refreshAttachments() } }
     @discardableResult func addSelection(chat: UUID?, time: TimeInterval, source: String, text: String) -> Int? {
         guard restoreError == nil, !text.isEmpty, time.isFinite else { return nil }
         if let chat, chat != library.selected || voiceStatus["selection_chat"] == nil { return nil }
@@ -8041,27 +8037,55 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         save()
         return selections.count
     }
-    private var selectionNotes: String {
-        selections.enumerated().map { "[\($0.offset + 1)] " + $0.element.source + "\n" + $0.element.text }.joined(separator: "\n\n")
-    }
-    @objc private func inspectSelections() {
-        let sheet = NSAlert()
-        sheet.messageText = "Selected text"
-        sheet.accessoryView = detailView(selectionNotes)
-        sheet.addButton(withTitle: "Done")
-        sheet.addButton(withTitle: "Remove all")
-        let inspected = selections
-        sheet.beginSheetModal(for: window) { [weak self] result in
-            if result == .alertSecondButtonReturn, self?.selections == inspected { self?.selections = []; self?.save() }
+    private func refreshAttachments() {
+        for chip in attachmentRow.arrangedSubviews { chip.removeFromSuperview() }
+        attachmentStrip.isHidden = pendingCapture == nil && selections.isEmpty
+        contextChip.isHidden = pendingCapture == nil
+        if let capture = pendingCapture {
+            contextChip = attachment(title: capture.text == nil ? "No readable text from " + capture.source : capture.source,
+                                     source: capture.source, symbol: "text.viewfinder", index: -1)
+        }
+        for (index, selection) in selections.enumerated() {
+            let excerpt = selection.text.prefix(100).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+            _ = attachment(title: "[\(index + 1)] " + excerpt, source: selection.source, symbol: "text.quote", index: index)
         }
     }
-    let contextChip = NSButton()
-    private var pendingCapture: Capture? { didSet {
-        contextChip.isHidden = pendingCapture == nil
-        guard let capture = pendingCapture else { return }
-        contextChip.title = capture.text == nil ? "No readable text from " + capture.source : capture.source
-        contextChip.toolTip = "View captured context"
-    } }
+    private func attachment(title: String, source: String, symbol: String, index: Int) -> NSButton {
+        let preview = NSButton(title: title, target: self, action: #selector(inspectAttachment(_:)))
+        preview.tag = index; preview.toolTip = source; preview.isBordered = false
+        preview.font = .systemFont(ofSize: 12, weight: .medium); preview.lineBreakMode = .byTruncatingTail
+        preview.image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)
+        preview.imagePosition = .imageLeading; preview.widthAnchor.constraint(lessThanOrEqualToConstant: 180).isActive = true
+        let close = NSButton(image: NSImage(systemSymbolName: "xmark", accessibilityDescription: nil)!, target: self, action: #selector(removeAttachment(_:)))
+        close.tag = index; close.isBordered = false; close.contentTintColor = .secondaryLabelColor
+        close.symbolConfiguration = .init(pointSize: 9, weight: .semibold)
+        close.toolTip = "Remove attachment"; close.setAccessibilityLabel("Remove " + title)
+        close.widthAnchor.constraint(equalToConstant: 22).isActive = true
+        close.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        let chip = NSBox()
+        chip.boxType = .custom; chip.titlePosition = .noTitle; chip.cornerRadius = 8
+        chip.fillColor = .controlBackgroundColor; chip.borderColor = .separatorColor; chip.borderWidth = 0.5
+        let controls = NSStackView(views: [preview, close]); controls.spacing = 2
+        controls.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 2)
+        chip.contentViewMargins = .zero; chip.contentView = controls
+        chip.heightAnchor.constraint(equalToConstant: 26).isActive = true
+        chip.widthAnchor.constraint(equalToConstant: min(180, preview.intrinsicContentSize.width) + 36).isActive = true
+        attachmentRow.addArrangedSubview(chip)
+        return preview
+    }
+    @objc private func removeAttachment(_ sender: NSButton) {
+        if sender.tag == -1 { pendingCapture = nil }
+        else if selections.indices.contains(sender.tag) { selections.remove(at: sender.tag) }
+        save()
+    }
+    @objc private func inspectAttachment(_ sender: NSButton) {
+        if sender === contextChip { inspectCapture(sender); return }
+        guard selections.indices.contains(sender.tag) else { return }
+        let selection = selections[sender.tag], sheet = NSAlert()
+        sheet.messageText = "Selected text"; sheet.informativeText = selection.source
+        sheet.accessoryView = detailView(selection.text); sheet.addButton(withTitle: "Done")
+        sheet.beginSheetModal(for: window)
+    }
     private struct Saved: Codable, Equatable {
         var messages: [Message]
         var selections: [Selection]?
@@ -8227,15 +8251,19 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
         for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
-        contextChip.bezelStyle = .accessoryBarAction; contextChip.imagePosition = .imageLeading
-        contextChip.image = NSImage(systemSymbolName: "text.viewfinder", accessibilityDescription: nil)
-        contextChip.font = .systemFont(ofSize: 12, weight: .medium); contextChip.lineBreakMode = .byTruncatingTail
-        contextChip.target = self; contextChip.action = #selector(inspectCapture); contextChip.isHidden = true
-        selectionChip.bezelStyle = .accessoryBarAction; selectionChip.controlSize = .small
-        selectionChip.lineBreakMode = .byTruncatingTail; selectionChip.target = self
-        selectionChip.action = #selector(inspectSelections); selectionChip.isHidden = true
-        let entry = NSStackView(views: [contextChip, selectionChip, input])
-        selectionChip.widthAnchor.constraint(lessThanOrEqualTo: entry.widthAnchor).isActive = true
+        attachmentStrip.drawsBackground = false; attachmentStrip.scrollerStyle = .overlay
+        attachmentStrip.hasHorizontalScroller = true; attachmentStrip.autohidesScrollers = true
+        attachmentRow.spacing = 6; attachmentRow.translatesAutoresizingMaskIntoConstraints = false
+        attachmentStrip.documentView = attachmentRow
+        let entry = NSStackView(views: [attachmentStrip, input])
+        NSLayoutConstraint.activate([
+            attachmentRow.leadingAnchor.constraint(equalTo: attachmentStrip.contentView.leadingAnchor),
+            attachmentRow.topAnchor.constraint(equalTo: attachmentStrip.contentView.topAnchor),
+            attachmentRow.heightAnchor.constraint(equalToConstant: 30),
+            attachmentStrip.heightAnchor.constraint(equalToConstant: 30),
+            attachmentStrip.widthAnchor.constraint(equalTo: entry.widthAnchor)
+        ])
+        refreshAttachments()
         entry.orientation = .vertical; entry.alignment = .leading; entry.spacing = 6
         for view in [entry,send,meter,voiceStatus] { view.translatesAutoresizingMaskIntoConstraints = false; panel.addSubview(view) }
         NSLayoutConstraint.activate([
@@ -8243,7 +8271,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             turns.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor), turns.topAnchor.constraint(equalTo: scroll.contentView.topAnchor), turns.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
             welcome.centerXAnchor.constraint(equalTo: scroll.centerXAnchor), welcome.centerYAnchor.constraint(equalTo: scroll.centerYAnchor), welcome.widthAnchor.constraint(lessThanOrEqualTo: scroll.widthAnchor),
             dock.leadingAnchor.constraint(equalTo: body.leadingAnchor, constant: 16), dock.trailingAnchor.constraint(equalTo: body.trailingAnchor, constant: -16), dock.bottomAnchor.constraint(equalTo: body.bottomAnchor, constant: -14),
-            entry.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16), entry.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), entry.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8), input.widthAnchor.constraint(equalTo: entry.widthAnchor), contextChip.widthAnchor.constraint(lessThanOrEqualTo: entry.widthAnchor),
+            entry.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16), entry.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14), entry.trailingAnchor.constraint(equalTo: send.leadingAnchor, constant: -8), input.widthAnchor.constraint(equalTo: entry.widthAnchor),
             send.centerYAnchor.constraint(equalTo: input.centerYAnchor), send.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
             meter.leadingAnchor.constraint(equalTo: input.leadingAnchor), meter.heightAnchor.constraint(equalToConstant: 36),
             voiceStatus.leadingAnchor.constraint(equalTo: meter.trailingAnchor, constant: 6), voiceStatus.centerYAnchor.constraint(equalTo: meter.centerYAnchor), voiceStatus.topAnchor.constraint(greaterThanOrEqualTo: input.bottomAnchor, constant: 5),
@@ -8285,10 +8313,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if let text = capture.text { sheet.accessoryView = detailView(text) }
         else { sheet.informativeText = "This window didn’t expose readable text. You can still speak or type." }
         sheet.addButton(withTitle: "Done")
-        if pending { sheet.addButton(withTitle: "Remove") }
-        sheet.beginSheetModal(for: window) { [weak self] result in
-            if result == .alertSecondButtonReturn { self?.pendingCapture = nil }
-        }
+        sheet.beginSheetModal(for: window)
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
         [.init("conversation-sidebar"), .flexibleSpace, .init("new-conversation"), settings.itemIdentifier]
@@ -8318,11 +8343,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let content = NSSplitViewItem(viewController: main); content.minimumThickness = 360
         split.addSplitViewItem(sidebar); split.addSplitViewItem(content)
         let title = historyScope
-        title.selectedSegment = 0; title.controlSize = .small
+        title.addItems(withTitles: ["Chats", "Archived"])
+        title.isBordered = false; title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.setAccessibilityLabel("Conversation list"); title.toolTip = "Show chats or archived chats"
         title.target = self; title.action = #selector(switchHistory)
         for (button, icon, help) in [(previousPage, "chevron.left", "Newer chats"), (nextPage, "chevron.right", "Older chats")] {
             button.image = NSImage(systemSymbolName: icon, accessibilityDescription: help)
-            button.bezelStyle = .accessoryBarAction; button.toolTip = help
+            button.isBordered = false; button.contentTintColor = .secondaryLabelColor; button.toolTip = help
             button.target = self; button.action = #selector(changePage(_:))
         }
         let pager = NSStackView(views: [previousPage, nextPage]); pager.spacing = 8
@@ -8337,7 +8364,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         historyList.addTableColumn(column); historyList.headerView = nil; historyList.style = .sourceList
         historyList.rowHeight = 46; historyList.usesAutomaticRowHeights = false; historyList.backgroundColor = .clear
         historyList.delegate = self; historyList.dataSource = self; historyList.setAccessibilityLabel("Chat history")
-        let list = NSScrollView(); list.drawsBackground = false; list.hasVerticalScroller = true; list.autohidesScrollers = true; list.documentView = historyList
+        let list = NSScrollView(); list.drawsBackground = false; list.hasVerticalScroller = true; list.autohidesScrollers = true; list.scrollerStyle = .overlay
+        list.verticalScroller?.controlSize = .small; list.documentView = historyList
         for view in [title, list, emptyHistory, pager] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 18), title.topAnchor.constraint(equalTo: side.view.safeAreaLayoutGuide.topAnchor, constant: 14),
@@ -8374,12 +8402,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         cell.textField?.stringValue = chat.title; cell.toolTip = chat.title
         let date = Calendar.current.isDateInToday(chat.updated) ? chat.updated.formatted(date: .omitted, time: .shortened) : chat.updated.formatted(date: .abbreviated, time: .omitted)
-        (cell.viewWithTag(2) as? NSTextField)?.stringValue = chat.workspace + "  ·  " + date
+        (cell.viewWithTag(2) as? NSTextField)?.stringValue = chat.workspace == "GPT-6.1 Sol" ? date : chat.workspace + "  ·  " + date
         return cell
     }
     private func refreshHistory() {
         refreshingHistory = true; defer { refreshingHistory = false }
-        let archived = historyScope.selectedSegment == 1
+        let archived = historyScope.indexOfSelectedItem == 1
         let matching = library.chats.lazy.filter { ($0.archived == true) == archived }
         let limit = Self.pageSize
         var page = Array(matching.dropFirst(pageStart).prefix(limit + 1))
@@ -8552,7 +8580,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     guard selectDirectory(nil) else { throw StorageError(description: status.stringValue) }
                 }
                 guard beginSession() else { throw StorageError(description: status.stringValue) }
-                historyScope.selectedSegment = 0; pageStart = 0
+                historyScope.selectItem(at: 0); pageStart = 0
                 terminal = reply
                 reply.event(["type":"thread.started","thread_id":library.selected.uuidString])
                 reply.event(["type":"turn.started"])

@@ -14,6 +14,44 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_SIDEBAR"] {
+        app.finishLaunching()
+        let root = URL(fileURLWithPath: path), index = root.appendingPathComponent("current.json")
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let chats: [[String:Any]] = (0..<40).map { i in
+            ["id":UUID().uuidString, "title":["Release notes", "Inbox shortcuts", "Review the parser", "Speech settings"][i % 4],
+             "workspace":"GPT-6.1 Sol", "updated":Date().timeIntervalSinceReferenceDate, "archived":i == 39]
+        }
+        let fixture: [String:Any] = ["selected":UUID().uuidString, "chats":chats, "draftText":"Compare these changes.",
+                                     "draftCapture":["source":"Editor", "text":"Current file"]]
+        try! JSONSerialization.data(withJSONObject: fixture).write(to: index)
+        let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+        for text in ["Original draft of the message", "Keep this quote"] {
+            _ = chat.addSelection(chat: nil, time: 1, source: "Notes", text: text)
+        }
+        let view = chat.window.contentView!
+        view.layoutSubtreeIfNeeded()
+        func descendants(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap(descendants) }
+        let filter = descendants(view).compactMap { $0 as? NSPopUpButton }.first { $0.itemTitles == ["Chats", "Archived"] }!
+        precondition(chat.historyList.enclosingScrollView?.scrollerStyle == .overlay && chat.historyList.numberOfRows == 30)
+        filter.selectItem(at: 1); filter.sendAction(filter.action!, to: filter.target)
+        precondition(chat.historyList.numberOfRows == 1)
+        filter.selectItem(at: 0); filter.sendAction(filter.action!, to: filter.target)
+        precondition(chat.historyList.numberOfRows == 30)
+        func remove(_ tag: Int) {
+            let close = descendants(view).compactMap { $0 as? NSButton }.first { $0.toolTip == "Remove attachment" && $0.tag == tag }!
+            precondition(!close.isHiddenOrHasHiddenAncestor && close.bounds.width >= 20)
+            close.performClick(nil)
+            view.layoutSubtreeIfNeeded()
+        }
+        remove(0); remove(-1)
+        let saved = try! JSONSerialization.jsonObject(with: Data(contentsOf: index)) as! [String:Any]
+        precondition(saved["draftCapture"] == nil && saved["draftText"] as? String == "Compare these changes.")
+        precondition((saved["draftSelections"] as? [[String:Any]])?.compactMap { $0["text"] as? String } == ["Keep this quote"])
+        precondition(descendants(view).compactMap { $0 as? NSButton }.contains { $0.title == "[1] Keep this quote" })
+        print("PASS sidebar filtering and individual attachment removal, renumbering and draft persistence")
+        return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_MANAGEMENT"] {
         app.finishLaunching(); auditChatManagement(root); return
     }

@@ -3,6 +3,7 @@
 set -eu
 root=$(mktemp -d "$PWD/.conversation-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
+HEY_BOSS_AUDIT_CHAT_SIDEBAR="$root/sidebar" "$2"
 HEY_BOSS_AUDIT_CHAT_MANAGEMENT="$root/management" "$2"
 resources=$(dirname "$2")
 if [ "$(basename "$resources")" = MacOS ]; then resources="$resources/../Resources"; fi
