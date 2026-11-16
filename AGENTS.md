@@ -1,9 +1,9 @@
 - “Conversations” means the Hey Boss desktop conversation chat. Start with `VoiceConversation` in `hey_boss_daemon.swift`; its end-to-end checks are in `tools/conversation_checks.sh`.
 - No PRs, straight to main
 - Commit small changes
-- TDD
+- Do not use GitHub Actions. Run tests locally on demand; use your judgment about what each change needs.
 - Attention to performance
-- Every change must have a slick, polished design and be verified end-to-end before it is considered complete.
+- Keep the design slick and polished.
 - No useless params and config, it's easier to change code. 
 - Install changed components only on machines that use them. For Hey Talk–only changes, use `packages/hey-talk/install.sh` on Macs with Hey Talk; skip `hey-boss upgrade`.
 - Use Rust if possible, NO PYTHON
