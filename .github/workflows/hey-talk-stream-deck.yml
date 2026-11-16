@@ -1,8 +1,5 @@
 name: Hey Talk Stream Deck
-on:
-  push:
-    paths: ['packages/hey-talk-stream-deck/**', 'packages/hey-talk/Sources/HeyTalk/*.swift', '.github/workflows/hey-talk-stream-deck.yml']
-  workflow_dispatch:
+on: workflow_dispatch
 permissions:
   contents: read
 jobs:
