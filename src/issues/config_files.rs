@@ -157,6 +157,7 @@ fn git_visibility(root: &Path, tracked: bool) -> Result<()> {
         next.push('\n');
     }
     next.push_str(START);
+    next.push_str("/.hey-boss.identity-backup\n");
     next.push_str(if tracked {
         "!/.hey-boss/\n/.hey-boss/*\n!/.hey-boss/config.yaml\n!/.hey-boss/prompts/\n/.hey-boss/prompts/*\n!/.hey-boss/prompts/*.md\n!/.hey-boss/jobs/\n/.hey-boss/jobs/*\n!/.hey-boss/jobs/*.yaml\n!/.hey-boss/jobs/*.md\n"
     } else { "/.hey-boss/\n" });
@@ -437,7 +438,6 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
     }
     let mut store = Store::open(path)?;
     let mut settings = store.execute(&request(project, actor, Operation::ProjectSettings))?;
-    let dir = materialize_identity(root, project)?;
     let saved: Option<(String, String, Option<String>)> = store
         .db
         .query_row(
@@ -451,6 +451,16 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
             "This working copy is registered to another project",
         ));
     }
+    let saved_base = saved
+        .as_ref()
+        .map(|(_, raw, _)| serde_json::from_str::<Value>(raw))
+        .transpose()?;
+    let in_git = root.join(".git").exists();
+    let prior_tracking = settings["track_config"] == true;
+    if in_git && saved_base.as_ref().and_then(|b| b["tracking"].as_bool()) != Some(prior_tracking) {
+        git_visibility(root, prior_tracking)?;
+    }
+    let dir = materialize_identity(root, project)?;
     migrate_prompt_names(&dir)?;
     let mut template = desired(&settings, &Files::new())?;
     let mut schedules = jobs::Jobs::load(&store, project)?;
@@ -463,8 +473,8 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
     let saved = saved.filter(|_| disk.values().any(Option::is_some));
     let initial = saved.is_none();
     let had_error = saved.as_ref().is_some_and(|(_, _, error)| error.is_some());
-    let mut base = match saved {
-        Some((_, raw, _)) => serde_json::from_str::<Value>(&raw)?,
+    let mut base = match saved_base.filter(|_| !initial) {
+        Some(base) => base,
         None => {
             // Existing files are user edits. Missing files on initial setup are
             // populated from the database rather than resetting saved overrides.
@@ -547,7 +557,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
     }
     let revision: Option<String> = store.db.query_row("SELECT id FROM project_config_revisions WHERE project_id=?1 ORDER BY sequence DESC,id DESC LIMIT 1", [&project.id], |r| r.get(0)).optional()?;
     let tracking = settings["track_config"] == true;
-    if root.join(".git").exists() && base["tracking"] != json!(tracking) {
+    if in_git && prior_tracking != tracking {
         git_visibility(root, tracking)?;
     }
     let pending = json!({"files":disk,"pending":next,"revision":revision,"tracking":tracking});

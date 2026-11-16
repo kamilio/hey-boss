@@ -203,7 +203,7 @@ mod tests {
         };
         assert!(git(&["init", "-q"]));
         let global = temp.path().join("ignore");
-        fs::write(&global, ".hey-boss\n").unwrap();
+        fs::write(&global, "").unwrap();
         assert!(git(&[
             "config",
             "core.excludesFile",
@@ -223,8 +223,15 @@ mod tests {
             )
             .unwrap();
         let sync = || sync_root(&db, &root, &p);
-        sync().unwrap();
         let dir = root.join(".hey-boss");
+        fs::create_dir(&dir).unwrap();
+        fs::write(dir.join("config.yaml"), "incomplete").unwrap();
+        assert!(sync().is_err());
+        assert!(git(&["check-ignore", "-q", ".hey-boss/project.json"]));
+        assert!(git(&["check-ignore", "-q", ".hey-boss.identity-backup"]));
+        fs::remove_file(dir.join("config.yaml")).unwrap();
+        fs::write(&global, ".hey-boss\n").unwrap();
+        sync().unwrap();
         let yaml = dir.join("jobs/inbox.yaml");
         let md = dir.join("jobs/inbox.md");
         fs::write(
