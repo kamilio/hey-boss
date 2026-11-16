@@ -1,7 +1,7 @@
 - “Conversations” means the Hey Boss desktop conversation chat. Start with `VoiceConversation` in `hey_boss_daemon.swift`; its end-to-end checks are in `tools/conversation_checks.sh`.
 - No PRs, straight to main
 - Commit small changes
-- Do not use GitHub Actions. Run tests locally on demand; use your judgment about what each change needs.
+- Run GitHub Actions only when the user explicitly asks. Run tests locally on demand; use your judgment about what each change needs.
 - Attention to performance
 - Keep the design slick and polished.
 - No useless params and config, it's easier to change code. 
