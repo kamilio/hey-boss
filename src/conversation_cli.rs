@@ -109,6 +109,10 @@ pub enum Chats {
         #[arg(long)]
         json: bool,
     },
+    /// Print the chat transcript without switching the desktop window.
+    Read {
+        id: String,
+    },
     Rename {
         id: String,
         title: String,
@@ -133,6 +137,7 @@ impl Chats {
             } => {
                 json!({"command":"chat_list","archived":archived,"chat_id":after})
             }
+            Self::Read { id } => json!({"command":"chat_read","chat_id":id}),
             Self::Rename { id, title } => {
                 json!({"command":"chat_rename","chat_id":id.to_string(),"title":title})
             }
@@ -151,7 +156,14 @@ impl Chats {
                     .to_owned(),
             ));
         }
-        if let Self::List { json, .. } = self {
+        if let Self::Read { .. } = self {
+            println!(
+                "{}",
+                result["transcript"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("Missing transcript"))?
+            );
+        } else if let Self::List { json, .. } = self {
             if *json {
                 println!("{result}");
             } else {

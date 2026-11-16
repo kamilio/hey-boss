@@ -8361,7 +8361,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         let pager = NSStackView(views: [previousPage, nextPage]); pager.spacing = 8
         let menu = NSMenu()
-        for (name, action) in [("Rename…", #selector(renameRow)), ("Archive or Restore", #selector(archiveRow)), ("Delete…", #selector(deleteRow))] {
+        for (name, action) in [("Copy Reference", #selector(copyChatReference)), ("Rename…", #selector(renameRow)), ("Archive or Restore", #selector(archiveRow)), ("Delete…", #selector(deleteRow))] {
             menu.addItem(withTitle: name, action: action, keyEquivalent: "").target = self
         }
         historyList.menu = menu
@@ -8425,7 +8425,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         previousPage.isEnabled = pageStart > 0; nextPage.isEnabled = page.count > limit
         previousPage.superview?.isHidden = !previousPage.isEnabled && !nextPage.isEnabled
         pageChats = Array(page.prefix(limit))
-        historyList.menu?.item(at: 1)?.title = archived ? "Restore" : "Archive"
+        historyList.menu?.items.first { $0.action == #selector(archiveRow) }?.title = archived ? "Restore" : "Archive"
         historyList.reloadData()
         if let row = pageChats.firstIndex(where: { $0.id == library.selected }) { historyList.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         else { historyList.deselectAll(nil) }
@@ -8493,6 +8493,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var menuChat: Chat? {
         let row = historyList.clickedRow
         return pageChats.indices.contains(row) ? pageChats[row] : nil
+    }
+    @objc private func copyChatReference() {
+        guard let chat = menuChat else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("hey-boss agent chats read " + chat.id.uuidString, forType: .string)
     }
     @objc private func renameRow() {
         guard let chat = menuChat else { return }
@@ -8571,6 +8576,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 }
                 guard pastCursor else { throw StorageError(description: "Page cursor no longer exists. List chats again.") }
                 reply.send(["status":"ok", "chats":rows, "next":more ? rows.last!["id"]! as Any : NSNull()])
+            } else if request.command == "chat_read" {
+                guard let id = request.chat_id, library.chats.contains(where: { $0.id == id }) else {
+                    throw StorageError(description: "Chat not found")
+                }
+                let turns = try id == library.selected ? messages : readChat(id).saved.messages
+                reply.send(["status":"ok", "transcript":turns.map { $0.speaker + ": " + $0.text }.joined(separator: "\n\n")])
             } else if request.command == "chat_exec" {
                 guard phase == .idle, pauseID == nil, terminal == nil, window.attachedSheet == nil else { throw StorageError(description: "A conversation is in progress.") }
                 guard input.stringValue.isEmpty, pendingCapture == nil, selections.isEmpty else { throw StorageError(description: "Finish the desktop draft first.") }
@@ -11412,7 +11423,7 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["chat_exec", "chat_list", "chat_rename", "chat_delete", "chat_archive", "chat_restore", "conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
+                    } else if ["chat_exec", "chat_list", "chat_read", "chat_rename", "chat_delete", "chat_archive", "chat_restore", "conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {

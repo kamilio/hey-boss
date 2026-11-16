@@ -4872,6 +4872,8 @@ func auditChatManagement(_ path: String) {
     chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
     let archived = request("chat_list", ["archived":true]).first!["chats"] as! [Object]
     precondition(archived.count == 1 && archived[0]["title"] as? String == "New title" && chat.rows.isEmpty)
+    let transcript = request("chat_read", ["chat_id":ids[0]]).first!["transcript"] as? String
+    precondition(transcript == (0..<75).map { "You: Message \($0)" }.joined(separator: "\n\n") && chat.rows.isEmpty)
     edit("chat_restore", ["chat_id":ids[0]])
     for ext in ["agent.json", "agent.jsonl"] { write(["test":true], ids[0]+"."+ext) }
     for folder in ["Recordings", "Media"] { try! FileManager.default.createDirectory(at: root.appending(path: folder+"/"+ids[0]), withIntermediateDirectories:true) }
@@ -4880,6 +4882,7 @@ func auditChatManagement(_ path: String) {
         precondition(!FileManager.default.fileExists(atPath: root.appending(path: entry).path))
     }
     precondition(request("chat_delete", ["chat_id":ids[0]]).first!["status"] as? String == "error")
+    precondition(request("chat_read", ["chat_id":ids[0]]).first!["status"] as? String == "error")
     chat.input.stringValue = "Unsent draft"
     precondition(request("chat_exec", ["question":"Test"]).first!["type"] as? String == "turn.failed" && chat.input.stringValue == "Unsent draft")
     chat.input.stringValue = ""
