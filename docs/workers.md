@@ -136,20 +136,24 @@ Cancellation gives the command process group 30 seconds to save output before fo
 Have the producer submit immediately after publishing the finished file. Use a unique, stable ID per arrival and the main Mac’s node ID from `hey-boss fleet status --records machines`:
 
 ```sh
+export HEY_BOSS_AGENT_ID=file-producer
 hey-boss exec submit --project "$project" --machine "$mac_node_id" \
   --request-id "$arrival_id" -- /absolute/path/to/process-file "$absolute_file_path"
 ```
 
 This queues one run per file without polling or uploading its contents. The path must stay accessible to the worker on that Mac until it processes the file. If the Mac has no available project worker, the command waits. Reuse the arrival ID when retrying; use a new ID if a filename is reused for another arrival.
 
-For files published by an app you cannot change, create an **Automator → Folder Action** on the main Mac. Select the inbox folder, add **Run Shell Script**, and set **Pass input** to **as arguments**. For an inbox where every finished file has a unique filename:
+For files published by an app you cannot change, create an **Automator → Folder Action** on the main Mac. Select the inbox folder, add **Run Shell Script**, and set **Pass input** to **as arguments**. For an inbox where each filename is a unique arrival ID (such as a UUID):
 
 ```sh
+export HEY_BOSS_AGENT_ID=folder-action:inbox
+failed=0
 for file in "$@"; do
   [ -f "$file" ] || continue
   /opt/homebrew/bin/hey-boss exec submit --project YOUR_PROJECT --machine MAIN_MAC_NODE_ID \
-    --request-id "inbox-${file##*/}" -- /absolute/path/to/process-file "$file" || exit 1
+    --request-id "inbox-${file##*/}" -- /absolute/path/to/process-file "$file" || failed=1
 done
+exit "$failed"
 ```
 
 Replace the project, node ID and executable paths before saving. Folder Actions report items added to the folder (including moves), not write completion. For long writes, stage outside the inbox and rename the finished file into it.
