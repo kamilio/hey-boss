@@ -137,6 +137,7 @@ pub struct Owner {
 impl Owner {
     /// Keep an existing service eligible to own the database after a peer exits.
     pub fn host(path: &Path) -> Result<Self> {
+        super::foreground_requests().map_err(|e| error(e.to_string()))?;
         let mut owner = Self::start(path)?;
         let path = path.to_owned();
         let stop = Arc::new(AtomicBool::new(false));

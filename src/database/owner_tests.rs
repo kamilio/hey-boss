@@ -372,3 +372,37 @@ fn repeated_service_statements_compile_once_and_keep_per_query_work_counts() {
         127
     );
 }
+
+#[cfg(target_os = "macos")]
+#[test]
+fn database_host_clears_inherited_background_policy() {
+    if std::env::var_os("HEY_BOSS_DB_POLICY_TEST_CHILD").is_some() {
+        assert_eq!(
+            unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, libc::PRIO_DARWIN_BG) },
+            0
+        );
+        assert_eq!(
+            unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) },
+            1
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let _owner = crate::database::Owner::host(&dir.path().join("issues.db")).unwrap();
+        assert_eq!(
+            unsafe { libc::getpriority(libc::PRIO_DARWIN_PROCESS, 0) },
+            0
+        );
+        return;
+    }
+    // Process policy is global; isolate it from concurrent tests. Setting
+    // it before exec does not reproduce launchd's post-exec throttling.
+    let status = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "database::owner::tests::database_host_clears_inherited_background_policy",
+            "--nocapture",
+        ])
+        .env("HEY_BOSS_DB_POLICY_TEST_CHILD", "1")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}

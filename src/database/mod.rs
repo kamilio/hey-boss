@@ -22,6 +22,16 @@ use std::{
 };
 use wire::{Command, Reply, SqlValue};
 
+pub(crate) fn foreground_requests() -> std::io::Result<()> {
+    // A CLI can start the shared database service from a background process.
+    // Unix socket requests do not raise its inherited macOS I/O priority.
+    #[cfg(target_os = "macos")]
+    if unsafe { libc::setpriority(libc::PRIO_DARWIN_PROCESS, 0, 0) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 static CLIENTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 thread_local! { static LOCAL: Cell<bool> = const { Cell::new(false) }; }
 /// Executable entry point opts into service-owned access. Library fixtures retain
