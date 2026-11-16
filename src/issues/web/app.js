@@ -366,8 +366,11 @@ function updateHeader() {
   $('[role="tab"][data-state="ready"]').hidden = false;
   $("#closed-count").textContent = p.closed;
   $("#deleted-count").textContent = p.deleted;
-  $(".page-description").textContent =
+  $("#issue-summary").textContent =
     `${p.unassigned} unassigned ${p.unassigned === 1 ? "issue" : "issues"}`;
+  const reviews = $("#pending-code-reviews"), destination = $("#nav-code-reviews");
+  reviews.hidden = model.route.state !== "ready" || destination.hidden;
+  reviews.href = destination.href;
   document.title =
     model.detail && model.route.issue
       ? `${model.detail.issue.title} · Hey Boss`
