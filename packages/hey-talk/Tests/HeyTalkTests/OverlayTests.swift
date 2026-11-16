@@ -223,8 +223,8 @@ final class OverlayTests: XCTestCase {
         var historyOpened = false
         overlay.onShowHistory = { historyOpened = true }
         let menu = overlay.contextMenu()
-        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "", "Chats", "Open Transcript", "New Chat", "Catch Up", "Selection Capture: Off", "", "Setup", "Paste Permissions…"])
-        let transcript = try XCTUnwrap(menu.item(withTitle: "Open Transcript"))
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "", "Chats", "Chats", "New Chat", "Catch Up", "Selection Capture: Off", "", "Setup", "Paste Permissions…"])
+        let transcript = try XCTUnwrap(menu.items.first { $0.title == "Chats" && $0.action != nil })
         var opened = false
         overlay.onOpenTranscript = { opened = true }
         XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(transcript.action), to: transcript.target, from: transcript))

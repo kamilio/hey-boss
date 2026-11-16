@@ -550,7 +550,7 @@ final class Overlay {
                 menu.addItem(withTitle: phase == "recording" ? "Stop recording" : "Stop conversation", action: #selector(stopConversation), keyEquivalent: "").target = self
             }
             menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Chats"))
-            if conversation["approval"] as? Bool != true { menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self }
+            if conversation["approval"] as? Bool != true { menu.addItem(withTitle: "Chats", action: #selector(openTranscript), keyEquivalent: "").target = self }
             if conversation["action"] as? String != "Cancel opening chat" {
                 menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
             }
@@ -579,7 +579,7 @@ final class Overlay {
         }
         menu.addItem(.separator())
         menu.addItem(.sectionHeader(title: "Chats"))
-        menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Chats", action: #selector(openTranscript), keyEquivalent: "").target = self
         menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
         let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")
         recap.target = self; recap.keyEquivalentModifierMask = [.control, .command, .option, .shift]
