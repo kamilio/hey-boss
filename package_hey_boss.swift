@@ -36,7 +36,7 @@ func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
     let rust = "assets/conversation-native"
-    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/package-smart-turn.sh", "assets/smart-turn-LICENSE", "assets/onnxruntime-LICENSE", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
+    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/chats.icns", "assets/chats-dock.swift", "assets/package-smart-turn.sh", "assets/smart-turn-LICENSE", "assets/onnxruntime-LICENSE", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
     for folder in ["assets", "assets/conversation-tools"] {
         inputs += try files.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)
             .filter { $0.hasSuffix(".md") }.map { folder + "/" + $0 }
@@ -228,5 +228,20 @@ let info: [String: Any] = [
 try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
     .write(to: contents.appendingPathComponent("Info.plist"), options: .atomic)
 try Data("APPL????".utf8).write(to: contents.appendingPathComponent("PkgInfo"), options: .atomic)
+let chats = contents.appendingPathComponent("Helpers/Chats.app")
+let chatContents = chats.appendingPathComponent("Contents")
+for folder in ["MacOS", "Resources"] { try files.createDirectory(at: chatContents.appendingPathComponent(folder), withIntermediateDirectories: true) }
+let compiler = Process()
+compiler.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+compiler.arguments = ["swiftc", "-O", root.appendingPathComponent("assets/chats-dock.swift").path, "-o", chatContents.appendingPathComponent("MacOS/Chats").path]
+try compiler.run(); compiler.waitUntilExit()
+require(compiler.terminationStatus == 0, "Could not build the Chats Dock app")
+try Data(contentsOf: root.appendingPathComponent("assets/chats.icns")).write(to: chatContents.appendingPathComponent("Resources/chats.icns"), options: .atomic)
+let chatInfo = ["CFBundleIdentifier":"local.hey-boss.chats", "CFBundleName":"Chats", "CFBundleExecutable":"Chats",
+                "CFBundlePackageType":"APPL", "CFBundleIconFile":"chats.icns", "CFBundleVersion":version,
+                "CFBundleShortVersionString":version, "LSMinimumSystemVersion":"26.0"]
+try PropertyListSerialization.data(fromPropertyList: chatInfo, format: .xml, options: 0)
+    .write(to: chatContents.appendingPathComponent("Info.plist"), options: .atomic)
+try sign(chats, identifier: "local.hey-boss.chats")
 try sign(app, identifier: "local.hey-boss.desktop")
 print(app.path)

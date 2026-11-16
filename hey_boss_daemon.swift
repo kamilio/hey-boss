@@ -8281,7 +8281,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         refreshScope(); refreshHistory(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
-        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() {
+        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid(), app.bundleIdentifier != "local.hey-boss.chats" {
             let task = Process()
             task.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-talk")
             task.arguments = ["remember-focus"]; task.standardOutput = FileHandle.nullDevice
@@ -8291,6 +8291,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         presentConversation()
     }
     private func presentConversation() {
+        if Bundle.main.bundleIdentifier == "local.hey-boss.desktop",
+           NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.chats").isEmpty {
+            let config = NSWorkspace.OpenConfiguration()
+            config.activates = false
+            NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/Chats.app"), configuration: config)
+        }
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
         if !rows.isEmpty { revealLatest() }
         scheduleVisibleMedia()
@@ -9815,6 +9822,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func windowWillClose(_ notification: Notification) {
         releaseStandby(); stop("Ready"); save()
         if Bundle.main.bundleIdentifier == "local.hey-boss.desktop" {
+            for dock in NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.chats") { dock.terminate() }
             DistributedNotificationCenter.default().postNotificationName(.init("local.hey-boss.conversation"), object: "local.hey-boss.desktop", userInfo: ["active": false], deliverImmediately: true)
         }
     }
