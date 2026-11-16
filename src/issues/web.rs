@@ -890,6 +890,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/app.js"),
             )),
+            "/review-preview.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/review-preview.js"))),
             "/assignments.js" => Some((
                 "application/javascript; charset=utf-8",
                 include_bytes!("web/assignments.js"),

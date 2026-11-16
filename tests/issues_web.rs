@@ -491,6 +491,7 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
     for (path, kind) in [
         ("/", "text/html"),
         ("/app.js", "text/javascript"),
+        ("/review-preview.js", "text/javascript"),
         ("/project-settings.js", "text/javascript"),
         ("/tags.js", "text/javascript"),
         ("/app.css", "text/css"),

@@ -98,6 +98,7 @@ async page => {
   const link=page.locator('.linked-changes .commit-target[href^="/commit-review?"]').first();
   check(await link.isVisible() && !(await link.getAttribute('target')),'Task opens the stored review inside the app, including PR-enabled projects');
   await link.click();
+  await page.getByRole("dialog").getByRole("link",{name:"Full review"}).click();
   await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
   check(errors.length===0,'No browser exceptions: '+errors.join('; '));
   return checks;

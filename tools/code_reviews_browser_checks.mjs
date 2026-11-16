@@ -275,7 +275,15 @@ try {
     assert.equal(await row.locator('a[href="https://github.com/example/time/pull/73"]').count(), 1);
     await links.click();
     await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
-    assert.equal(new URL(page.url()).pathname, "/code-review");
+    const preview = page.getByRole("dialog", {name:"Draft with inline feedback"});
+    await preview.waitFor();
+    assert.equal(new URL(page.url()).pathname, "/");
+    assert.ok(await preview.getByText(first.comments[0].body).isVisible());
+    assert.equal(await preview.locator("#preview-submit").isVisible(), false);
+    await page.keyboard.press("Escape");
+    const [solo] = await Promise.all([page.context().waitForEvent("page"), links.click({modifiers:["Shift"]})]);
+    await solo.waitForURL("**/code-review#**");
+    await solo.close();
   }
   await page.goto(issueUrl);
   const linked = page.locator("#issue-reviews");
@@ -300,6 +308,52 @@ try {
   await linked.getByRole("button",{name:"Unlink review for PR #72"}).click();
   await receipt.waitFor({state:"detached"});
   assert.equal(op({command:"view",id:approval.id}).review.stage, "published");
+  run([...issue,"pr","add",String(issueNumber),"https://github.com/example/time/pull/74"]);
+  const quick = op({...first,number:74,title:"Fix the reminder boundary",comments:[],verdict:"APPROVE"}).review;
+  await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
+  await page.getByRole("link",{name:"Open pending review for PR #74"}).click();
+  const modal = page.locator("#review-preview");
+  await modal.getByRole("heading",{name:quick.title}).waitFor();
+  await page.unroute("**/api/code-reviews/publish");
+  await page.route("**/api/code-reviews/publish", route => {
+    const {id,version,digest} = route.request().postDataJSON();
+    assert.deepEqual({id,version,digest},{id:quick.id,version:quick.version,digest:quick.digest});
+    const claim = op({command:"claim_publication",id,version,digest}).review;
+    op({command:"finish_publication",id,version:claim.version,receipt:"https://github.com/example/time/pull/74#review-3",author:"qa"});
+    return route.fulfill({json:{ok:true}});
+  });
+  for (const [width,scheme] of [[320,"dark"],[1280,"light"]]) {
+    await page.setViewportSize({width,height:768});
+    await page.emulateMedia({colorScheme:scheme});
+    const action = modal.getByRole("button",{name:"Approve and publish"});
+    assert.ok(await action.evaluate(el => {const r=el.getBoundingClientRect();return r.right<=innerWidth && r.bottom<=innerHeight}));
+    if (snap) await modal.screenshot({path:join(snap,"preview-"+scheme+".png")});
+  }
+  await modal.getByRole("button",{name:"Approve and publish"}).click();
+  await modal.waitFor({state:"hidden"});
+  assert.equal(op({command:"view",id:quick.id}).review.stage,"published");
+  const sha = "c".repeat(40), message = "Keep reminder labels when the timezone changes";
+  await page.evaluate(async ({project,issueNumber,sha,message}) => {
+    await mutate({action:"add_commit",number:issueNumber,commit:sha,review:{
+      repository:project,parent:"a".repeat(40),message,author:"QA",email:"qa@example.invalid",
+      authored_at:"2026-11-16",patch:"diff --git a/labels.rs b/labels.rs\n--- a/labels.rs\n+++ b/labels.rs\n@@ -1 +1 @@\n-clear(labels);\n+preserve(labels);\n"
+    }},project);
+  },{project,issueNumber,sha,message});
+  await page.reload();
+  const chip = page.getByRole("link",{name:/Open commit ccccccc/});
+  await chip.click();
+  await modal.getByRole("heading",{name:message}).waitFor();
+  assert.ok((await modal.locator("pre").textContent()).includes("+preserve(labels)"));
+  if (snap) await modal.screenshot({path:join(snap,"preview-commit.png")});
+  await modal.getByRole("button",{name:"Approve commit"}).click();
+  await modal.waitFor({state:"hidden"});
+  await chip.click();
+  await modal.getByText(/ccccccc · Approved/).waitFor();
+  assert.equal(await modal.locator("#preview-submit").isVisible(),false);
+  await page.keyboard.press("Escape");
+  const [commitPage] = await Promise.all([page.context().waitForEvent("page"),chip.click({modifiers:["Shift"]})]);
+  await commitPage.getByRole("heading",{name:message}).waitFor();
+  await commitPage.close();
   // A long archive must not displace pending work or invalidate an old issue link.
   const seed = spawnSync("sqlite3", [env.HEY_BOSS_ISSUE_DB], {encoding:"utf8", input:
     `WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<205)
@@ -331,6 +385,8 @@ try {
   await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
   await page.getByRole("link", {name:"Open pending review for PR #73"}).click();
   await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
+  await page.getByRole("link",{name:"Full review"}).click();
+  await page.locator("#reviews-detail").waitFor();
   assert.ok(await page.locator("#reviews-detail").evaluate(el => el.getBoundingClientRect().top < innerHeight));
   assert.equal(listRequests, 0);
   // Publishing from a standalone review leaves the receipt at the same address.

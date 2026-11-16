@@ -53,6 +53,7 @@ async function start() {
   $('#task-title').href = `/#${new URLSearchParams({project,issue:number,...(host?{host}:{})})}`;
   $('#commit-sha').textContent = snapshot.sha.slice(0,7);
   $('#commit-sha').title = snapshot.sha;
+  $('#commit-approved').hidden = !result.approved;
   $('#author').textContent = snapshot.author;
   const authored = new Date(snapshot.authored_at);
   $('#authored').textContent = Number.isNaN(authored.valueOf()) ? snapshot.authored_at : authored.toLocaleDateString(undefined,{year:'numeric',month:'short',day:'numeric'});
@@ -91,7 +92,7 @@ async function start() {
     $('#message-error').textContent = '';
     try {
       const saved = await review({command:'message',message,previous_message:snapshot.message}); snapshot.message = message;
-      renderMessage(saved.message_body_html);
+      $('#commit-approved').hidden = true; renderMessage(saved.message_body_html);
       closeEditor(); $('#status').textContent = 'Message saved'; await refreshTask();
     } catch(error) { $('#message-error').textContent = error.message; }
     finally { input.readOnly = false; for (const button of form.querySelectorAll('button')) button.disabled = false; }

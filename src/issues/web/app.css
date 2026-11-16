@@ -3157,3 +3157,24 @@ button.avatar.self:hover {
   #issue-list.search-results > .issue-row > .issue-row-end { grid-column:2; }
 }
 .issue-blockers:has(.dep-manage[open]) > .dependency-group { display: none; }
+
+#review-preview[open] { display: flex; flex-direction: column; width: min(580px, calc(100vw - 24px)); overflow: hidden; }
+#review-preview .dialog-heading { align-items: flex-start; }
+#preview-title { font-size: clamp(17px, 2.2vw, 22px); line-height: 1.25; overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+#preview-close { flex: none; }
+#preview-content { overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere; font-size: 14px; line-height: 1.55; }
+#preview-content > :first-child { margin-top: 0; }
+#preview-content > :last-child { margin-bottom: 0; }
+#preview-content p { white-space: pre-line; }
+#preview-content h3 { color: var(--muted); font-size: 12px; margin: 18px 0 8px; }
+#preview-content pre { padding: 12px; margin: 0; background: var(--bg); border-radius: 8px; overflow: auto; font-size: 12px; }
+#preview-content .added { color: var(--green); }
+#preview-content .removed { color: var(--danger); }
+#preview-content code, #preview-content small { color: var(--muted); font-size: 12px; }
+#preview-content .preview-note { margin: 2px 0 10px; }
+#review-preview .dialog-footer { flex: none; gap: 8px; flex-wrap: wrap; }
+@media (max-width: 480px) {
+  #review-preview .dialog-heading, #review-preview .dialog-content, #review-preview .dialog-footer { padding: 16px; }
+  #review-preview .button, #preview-close { min-height: 44px; }
+  #review-preview .dialog-footer .button { flex: 1 1 auto; padding-inline: 10px; justify-content: center; }
+}

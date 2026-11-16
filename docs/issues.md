@@ -523,6 +523,12 @@ it cannot be combined with `--limit` or `--offset`. The small copy button beside
 queue host, state, search, label, and assignee filters. **Assigned to me** targets
 Boss explicitly, so an agent running the copied command sees the same issues.
 
+In the Issues list or issue detail, click **Pending review** or a stored commit
+SHA for a preview. **Full review** or Shift+click opens the standalone page.
+Publishing sends the displayed verdict and comments to GitHub. **Approve commit**
+records approval of the attached patch and its current message on the issue;
+editing the message clears that approval.
+
 Every change increments an issue's `version`. Required transport guards are
 captured by the CLI; commands do not require manual revision arguments.
 
