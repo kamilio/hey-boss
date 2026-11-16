@@ -20,6 +20,7 @@
     a.rel = "noopener noreferrer";
     return a;
   };
+  const detailPage = location.pathname === "/code-review";
   const stage = HeyBossUI.codeReviewStage;
   const verdict = {
     COMMENT: "Comment",
@@ -58,34 +59,29 @@
   const picker = new HeyBossUI.ProjectPicker({
     onSelect: (id) => {
       if (!busy && leave())
-        location.hash = new URLSearchParams({
+        location.href = "/code-reviews#" + new URLSearchParams({
           project: id,
           ...(host ? { host } : {}),
         });
     },
   });
   const leave = () => !editing || confirm("Discard your unsaved edit?");
-  async function load(id, mode) {
+  async function load(append = false) {
     const seq = ++serial;
     error("");
     try {
-      const detail = id ? (await action({ command: "view", id: Number(id) })).review : null;
-      if (seq !== serial) return;
-      const archive = detail ? ["published", "outdated", "discarded"].includes(detail.stage) : archived;
-      if (mode !== "expand" || archive !== archived) {
-        const append = mode === "more" && archived === archive;
-        const v = await action({ command: "list", archived: archive, offset: append ? nextOffset : 0 });
+      if (detailPage) {
+        const id = Number(new URLSearchParams(location.hash.slice(1)).get("review"));
+        if (!Number.isSafeInteger(id) || !id) throw Error("Missing or invalid review ID.");
+        const v = await action({command: "view", id});
+        if (seq !== serial) return;
+        review = v.review;
+      } else {
+        const v = await action({command: "list", archived, offset: append ? nextOffset : 0});
         if (seq !== serial) return;
         nextOffset = v.next_offset;
         rows = append ? [...rows, ...v.reviews.filter(r => !rows.some(x => x.id === r.id))] : v.reviews;
       }
-      archived = archive;
-      if (detail && !rows.some(r => r.id === detail.id)) rows.unshift(detail);
-      review = detail;
-      const hash = new URLSearchParams(location.hash.slice(1));
-      if (archived) hash.set("view", "archive");
-      else hash.delete("view");
-      history.replaceState(null, "", "#" + hash);
       editing = false;
       render();
     } catch (err) {
@@ -101,7 +97,6 @@
       if (seq !== serial) return;
       review = v.review;
       editing = false;
-      rows = rows.map((x) => (x.id === review.id ? review : x));
       render();
       $("#reviews-status").textContent = "Saved to Code Reviews.";
     } catch (err) {
@@ -213,11 +208,11 @@
           { fallback: "Publication failed" },
         );
         if (seq !== serial) return;
-        await load(review?.id);
+        await load();
         $("#reviews-status").textContent = "Published to GitHub.";
       } catch (err) {
         if (seq === serial) {
-          await load(review?.id);
+          await load();
           error(err.message);
         }
       } finally {
@@ -229,83 +224,62 @@
     return publish;
   }
   function render() {
-    const list = $("#reviews-list"),
-      pane = e("section");
-    pane.id = "reviews-detail";
-    pane.setAttribute("aria-label", "Selected review");
+    const list = $("#reviews-list");
+    list.setAttribute("aria-label", detailPage ? "Code review" : "Review queue");
     list.replaceChildren();
-    list.classList.toggle("merge-rows", rows.length > 0);
-    $("#reviews-count").textContent = rows.length + (nextOffset != null ? "+" : "");
-    $("#reviews-pending").setAttribute("aria-pressed", String(!archived));
-    $("#reviews-archive").setAttribute("aria-pressed", String(archived));
-    $("#reviews-more").hidden = nextOffset == null;
-    const repo = /^github\.com\/[\w.-]+\/[\w.-]+$/i.test(project) && project;
-    for (const r of rows) {
-      const selected = r.id === review?.id;
-      const b = btn("", async () => {
-        if (!busy && leave()) {
-          const hash = new URLSearchParams(location.hash.slice(1));
-          if (selected) hash.delete("review");
-          else hash.set("review", r.id);
-          history.replaceState(null, "", "#" + hash);
-          if (selected) {
-            ++serial;
-            review = null;
-            editing = false;
-            render();
-          } else await load(r.id, "expand");
-          list.querySelector('[data-review-id="' + r.id + '"]')
-            ?.focus({ preventScroll: true });
+    list.classList.toggle("merge-rows", !detailPage && rows.length > 0);
+    $(".review-views").hidden = detailPage;
+    $("#reviews-count").textContent = detailPage ? "" : rows.length + (nextOffset != null ? "+" : "");
+    $("#reviews-more").hidden = detailPage || nextOffset == null;
+    const title = review?.title || (detailPage ? "Code Review" : "Code Reviews");
+    $("#reviews-title").textContent = title;
+    document.title = title + " · Hey Boss";
+    const hash = new URLSearchParams(location.hash.slice(1));
+    hash.delete("review");
+    const back = $("#reviews-back");
+    back.hidden = !detailPage;
+    back.href = "/code-reviews#" + hash;
+    if (!detailPage) {
+      $("#reviews-pending").setAttribute("aria-pressed", String(!archived));
+      $("#reviews-archive").setAttribute("aria-pressed", String(archived));
+      for (const r of rows) {
+        hash.set("review", r.id);
+        const row = e("div", undefined, "review-index-row");
+        const summary = e("a", undefined, "merge-row review-row");
+        summary.href = "/code-review#" + hash;
+        const icon = e("span", undefined, "review-pr-icon");
+        icon.innerHTML = HeyBossUI.icon("pull-request");
+        const main = e("span", undefined, "merge-main");
+        const meta = e("span", "#" + r.number + " · " + stage[r.stage], "merge-meta");
+        if (r.comment_count) meta.append(" · " + r.comment_count + " inline comment" + (r.comment_count === 1 ? "" : "s"));
+        main.append(e("strong", r.title, "merge-title"), meta);
+        if (r.body.trim()) main.append(e("span", r.body, "review-preview"));
+        if (r.first_comment) main.append(e("span", "Inline: " + r.first_comment, "review-preview"));
+        summary.append(icon, main, e("span", undefined, "review-chevron"));
+        row.append(summary);
+        if (r.stage === "submitted") {
+          const publish = publishButton(r);
+          publish.classList.add("small", "review-quick-publish");
+          row.append(publish);
         }
-      });
-      b.className = "review-toggle";
-      b.setAttribute("aria-label", (selected ? "Collapse" : "Expand") + " review for PR #" + r.number);
-      b.dataset.reviewId = r.id;
-      b.setAttribute("aria-expanded", String(selected));
-      const icon = e("span", undefined, "review-pr-icon");
-      icon.innerHTML = HeyBossUI.icon("pull-request");
-      const main = e("span", undefined, "merge-main");
-      const title = repo ? link(r.title, "https://" + repo + "/pull/" + r.number) : e("strong", r.title);
-      title.className = "merge-title";
-      main.append(
-        title,
-        e("span", "#" + r.number + " · " + stage[r.stage], "merge-meta"),
-      );
-      const count = r.comments?.length ?? r.comment_count;
-      if (!selected) {
-        const body = r.body.trim();
-        const inline = r.comments?.[0]?.body || r.first_comment;
-        if (body) main.append(e("span", body, "review-preview"));
-        if (inline) main.append(e("span", "Inline: " + inline, "review-preview"));
-        if (count) main.querySelector(".merge-meta").append(" · " + count + " inline comment" + (count === 1 ? "" : "s"));
+        list.append(row);
       }
-      const arrow = e("span", undefined, "review-chevron");
-      arrow.setAttribute("aria-hidden", "true");
-      b.append(arrow);
-      const row = e("div", undefined, "review-index-row");
-      const summary = e("div", undefined, "merge-row review-row");
-      summary.append(icon, main, b);
-      row.append(summary);
-      if (!selected && r.stage === "submitted") {
-        const publish = publishButton(r);
-        publish.classList.add("small", "review-quick-publish");
-        row.append(publish);
-      }
-      list.append(row);
-      if (selected) list.append(pane);
-    }
-    if (!review) {
       if (!rows.length)
-        list.append(
-          e("p", archived ? "No archived reviews." : "No pending reviews.", "review-empty"),
-        );
+        list.append(e("p", archived ? "No archived reviews." : "No pending reviews.", "review-empty"));
       return;
     }
+    if (!review) return;
     const r = review;
+    const pane = e("section");
+    pane.id = "reviews-detail";
+    pane.setAttribute("aria-label", "Review details");
+    list.append(pane);
+    const repo = /^github\.com\/[\w.-]+\/[\w.-]+$/i.test(project) && project;
     const url = repo ? "https://" + repo + "/pull/" + r.number : null;
 
     const meta = e("div", undefined, "review-meta");
     meta.append(
+      e("span", "#" + r.number + " · " + stage[r.stage]),
       e("strong", "Verdict: " + verdict[r.verdict]),
       e("code", r.head.slice(0, 8)),
     );
@@ -389,9 +363,6 @@
         try {
           await action({ command: "discard", id: r.id, version: r.version });
           if (seq !== serial) return;
-          const hash = new URLSearchParams(location.hash.slice(1));
-          hash.delete("review");
-          history.replaceState(null, "", "#" + hash);
           await load();
           $("#reviews-status").textContent = "Review discarded.";
         } catch (err) {
@@ -404,6 +375,10 @@
     pane.append(footer);
   }
   async function navigate() {
+    if (!detailPage && new URLSearchParams(location.hash.slice(1)).has("review")) {
+      location.replace("/code-review" + location.hash);
+      return;
+    }
     serial++;
     review = null;
     rows = [];
@@ -426,13 +401,7 @@
       error("Code Reviews is disabled for this project.");
       return;
     }
-    const id = new URLSearchParams(location.hash.slice(1)).get("review");
-    await load(id);
-    if (id && review?.id === Number(id)) {
-      const selected = $(".review-toggle[aria-expanded=true]");
-      selected.closest(".review-index-row").scrollIntoView({block: "start"});
-      selected.focus({preventScroll: true});
-    }
+    await load();
   }
   for (const [id, archive] of [["#reviews-pending", false], ["#reviews-archive", true]]) {
     $(id).onclick = () => {
@@ -445,10 +414,10 @@
     };
   }
   $("#reviews-more").onclick = () => {
-    if (!busy && leave()) load(review?.id, "more");
+    if (!busy && leave()) load(true);
   };
   $("#reviews-refresh").onclick = () => {
-    if (!busy && leave()) load(review?.id);
+    if (!busy && leave()) load();
   };
   window.addEventListener("beforeunload", (ev) => {
     if (editing) {

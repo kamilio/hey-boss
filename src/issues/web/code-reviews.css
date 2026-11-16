@@ -2,9 +2,9 @@
 #reviews-list:not(.merge-rows) { background: none; }
 .review-row {
   width: 100%; min-width: 0; align-items: center; flex-wrap: nowrap;
-  text-align: left; background: transparent;
+  text-align: left; background: transparent; color: inherit; text-decoration: none;
 }
-.review-row:hover, .review-row[aria-expanded="true"] { background: var(--hover); }
+.review-row:hover { background: var(--hover); }
 .review-row:focus-visible { outline-offset: -3px; }
 .review-row .merge-title { display: block; }
 .review-row .merge-meta { display: block; margin-top: 3px; }
@@ -13,12 +13,9 @@
   width: 7px; height: 7px; margin: 0 4px 0 8px; flex: none;
   border: solid var(--muted); border-width: 0 1.5px 1.5px 0; transform: rotate(-45deg);
 }
-[aria-expanded="true"] > .review-chevron { transform: rotate(45deg); }
-#reviews-detail {
-  padding: 0 20px 18px 52px;
-  border-bottom: 1px solid var(--line);
-}
-#reviews-detail:last-child { border-bottom: 0; }
+#reviews-back { display: inline-block; margin-bottom: 12px; }
+#reviews-detail { margin-top: 16px; }
+#reviews-title { overflow-wrap: anywhere; }
 .review-meta, .review-actions, .review-controls {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px;
 }
@@ -48,9 +45,7 @@
 .rv-line-number { display: inline-block; min-width: 3ch; margin-right: 1em; text-align: right; user-select: none; color: var(--muted); }
 .review-actions:not(:empty) { margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--line); }
 #reviews-error { color: var(--danger); margin-bottom: 12px; }
-@media (max-width: 600px) {
-  #reviews-detail { padding: 0 14px 14px; }
-}
+
 .review-index-row { display: flex; align-items: center; }
 .review-index-row + .review-index-row { border-top: 1px solid var(--line); }
 .review-index-row .review-row { flex: 1; }
@@ -66,12 +61,7 @@
   .review-index-row { display: block; }
   .review-quick-publish { margin: 0 14px 14px 42px; }
 }
-.review-toggle { display: grid; place-items: center; flex: none; width: 36px; height: 36px; padding: 0; background: transparent; border: 0; border-radius: 6px; cursor: pointer; }
-.review-toggle .review-chevron { margin: 0; }
-.review-toggle:hover { background: var(--hover); }
-.review-row .merge-title { color: var(--text); text-decoration: none; }
-.review-row a.merge-title:hover { color: var(--accent); text-decoration: underline; }
-.review-row:has([aria-expanded="true"]) { background: var(--hover); }
+.review-row:hover .merge-title { text-decoration: underline; }
 .review-discard { margin-left: auto; }
 .review-views { display: inline-flex; gap: 2px; padding: 3px; margin-bottom: 14px; background: var(--hover); border: 1px solid var(--line); border-radius: 9px; }
 .review-views button { padding: 6px 14px; font: inherit; color: var(--muted); background: transparent; border: none; border-radius: 6px; cursor: pointer; }

@@ -426,7 +426,7 @@ function date(at) {
     if (!match || match[1].toLowerCase() !== project.toLowerCase()) return "";
     return (pending[match[2]] || []).map((id, index, ids) => {
       const query = new URLSearchParams({project, review:id, ...(host ? {host} : {})});
-      return ` <a class="issue-pr-link" href="/code-reviews#${esc(query.toString())}" aria-label="Open pending review for PR #${match[2]}${ids.length > 1 ? ", review " + (index + 1) : ""}">Pending review${ids.length > 1 ? " " + (index + 1) : ""}</a>`;
+      return ` <a class="issue-pr-link" href="/code-review#${esc(query.toString())}" aria-label="Open pending review for PR #${match[2]}${ids.length > 1 ? ", review " + (index + 1) : ""}">Pending review${ids.length > 1 ? " " + (index + 1) : ""}</a>`;
     }).join("");
   }
   return {pendingReviewLinks, codeReviewStage: {

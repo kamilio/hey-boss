@@ -771,7 +771,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             )),
             "/admin.css" => Some(("text/css; charset=utf-8", crate::admin::STYLE.as_bytes())),
             "/" | "/issues" => Some(("text/html; charset=utf-8", include_bytes!("web/index.html"))),
-            "/code-reviews" => Some((
+            "/code-reviews" | "/code-review" => Some((
                 "text/html; charset=utf-8",
                 include_bytes!("web/code-reviews.html"),
             )),
@@ -946,6 +946,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                     | "/agents"
                     | "/agents/session"
                     | "/code-reviews"
+                    | "/code-review"
                     | "/merged-prs"
                     | "/jobs"
                     | "/runs"

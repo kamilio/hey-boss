@@ -1305,7 +1305,7 @@ function mountIssueReviews(value) {
   root.innerHTML = `<h2 class="side-heading">Code reviews</h2><ul class="artifact-attachment-list">${linked.map(r => {
     const query = new URLSearchParams({project,review:r.id,...(host ? {host} : {})});
     const receipt = r.stage === "published" && r.receipt.startsWith("https://" + project + "/pull/" + r.number + "#");
-    return `<li><div><a href="/code-reviews#${esc(query.toString())}">${icon("pull-request")}<span>#${r.number} · ${esc(r.title)}</span></a><small>${receipt ? `<a href="${esc(r.receipt)}" target="_blank" rel="noopener noreferrer">Published on GitHub ↗</a>` : esc(status[r.stage] || r.stage)}</small></div>${issue.deleted_at ? "" : `<button data-unlink="${r.id}" aria-label="Unlink review for PR #${r.number}">${icon("x")}</button>`}</li>`;
+    return `<li><div><a href="/code-review#${esc(query.toString())}">${icon("pull-request")}<span>#${r.number} · ${esc(r.title)}</span></a><small>${receipt ? `<a href="${esc(r.receipt)}" target="_blank" rel="noopener noreferrer">Published on GitHub ↗</a>` : esc(status[r.stage] || r.stage)}</small></div>${issue.deleted_at ? "" : `<button data-unlink="${r.id}" aria-label="Unlink review for PR #${r.number}">${icon("x")}</button>`}</li>`;
   }).join("")}</ul>${value.code_reviews_enabled && !issue.deleted_at ? '<button class="artifact-text-button" data-attach>Attach review</button>' : ""}<div data-picker></div><p role="alert" hidden></p>`;
   const report = err => { const alert = root.querySelector("[role=alert]"); alert.hidden=false; alert.textContent=err.message; };
   async function change(command,id) {

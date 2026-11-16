@@ -106,24 +106,29 @@ try {
   }).review;
   op({ ...first, number: 73, title: "Draft with inline feedback", verdict: null, body: "" });
   await page.locator("#reviews-refresh").click();
-  const indexRow = page.getByRole("button", { name: /#71/, expanded: false });
+  const indexRow = page.getByRole("link", {name: new RegExp(first.title)});
   await indexRow.waitFor();
   assert.equal(await page.locator("#reviews-detail").count(), 0);
   assert.ok((await indexRow.locator("..").textContent()).includes(first.body));
   assert.ok((await indexRow.locator("..").textContent()).includes(first.comments[0].body));
   assert.ok((await indexRow.locator("..").textContent()).includes("1 inline comment"));
   const item = page.locator(".review-index-row").filter({ has: indexRow });
-  assert.equal(await item.getByRole("link", {name:first.title}).getAttribute("href"), "https://github.com/example/time/pull/71");
-  assert.equal(await item.getByRole("link", {name:first.title}).getAttribute("target"), "_blank");
-  assert.deepEqual(await item.locator("button:not([aria-expanded])").allTextContents(), ["Publish requested changes"]);
+  assert.equal(await indexRow.getAttribute("href"), "/code-review#" + new URLSearchParams({project, review:saved.id}));
+  assert.deepEqual(await item.locator("button").allTextContents(), ["Publish requested changes"]);
   const draft = page.locator(".review-index-row").filter({hasText:"#73"});
   assert.ok((await draft.textContent()).includes(first.comments[0].body));
   assert.equal(await draft.locator(".button.primary").count(), 0);
+  await page.setViewportSize({width:320,height:844});
+  assert.ok(await item.evaluate(el => el.getBoundingClientRect().right <= innerWidth));
+  await page.setViewportSize({width:1280,height:900});
   await indexRow.click();
-  await page
-    .getByRole("button", { name: /#71/, expanded: true })
-    .waitFor();
-  assert.equal(await page.getByText(first.title, { exact: true }).count(), 1);
+  const heading = page.getByRole("heading", {name:first.title, exact:true});
+  await heading.waitFor();
+  assert.equal(new URL(page.url()).pathname, "/code-review");
+  assert.equal(await page.locator(".review-index-row").count(), 0);
+  assert.equal(await page.getByRole("link", {name:"Open PR #71 ↗"}).getAttribute("href"), "https://github.com/example/time/pull/71");
+  await page.reload();
+  await heading.waitFor();
   await page
     .getByRole("button", {
       name: "Edit comment on scheduler/reminders.rs line 42",
@@ -159,11 +164,11 @@ try {
       await page.locator(".review-comment header a").getAttribute("href")
     ).endsWith("R42"),
   );
-  const row = page.getByRole("button", { name: /#71/ });
-  await row.click();
-  assert.equal(await row.getAttribute("aria-expanded"), "false");
-  assert.equal(await page.locator("#reviews-detail").count(), 0);
-  await row.press("Enter");
+  await page.goBack();
+  await indexRow.waitFor();
+  assert.equal(page.url(), url);
+  await indexRow.press("Enter");
+  await heading.waitFor();
   await page.getByText(edited.body, { exact: true }).waitFor();
   assert.ok(await page.getByRole("button", { name: "Publish requested changes" })
     .evaluate((el) => el.matches(".button.primary")));
@@ -177,15 +182,6 @@ try {
         await page.evaluate(
           () => document.documentElement.scrollWidth <= innerWidth,
         ),
-      );
-      assert.ok(
-        await page
-          .locator("#reviews-list")
-          .evaluate(
-            (list) => [...list.querySelectorAll(".review-row")].every(row =>
-              row.getBoundingClientRect().right <= list.getBoundingClientRect().right + 1),
-          ),
-        "Queue rows must fit inside the list",
       );
       if (snap)
         await page.screenshot({
@@ -220,14 +216,16 @@ try {
   assert.equal(await page.getByRole("button",{name:"Publish requested changes"}).count(), 0);
   const archive = page.getByRole("button", {name:"Archive", exact:true});
   const pending = page.getByRole("button", {name:"Pending", exact:true});
-  assert.equal(await archive.getAttribute("aria-pressed"), "true");
+  assert.equal(await archive.isVisible(), false);
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button",{name:"Discard review"}).click();
   await page.getByText("Review discarded.", {exact:true}).waitFor();
   await page.getByText("#71 · Discarded").waitFor();
-  await pending.click();
+  await page.getByRole("link", {name:"Back to reviews"}).click();
+  await pending.waitFor();
+  assert.equal(await pending.getAttribute("aria-pressed"), "true");
   await page.getByText("#73 · Draft", {exact:false}).waitFor();
-  assert.equal(await row.count(), 0);
+  assert.equal(await indexRow.count(), 0);
   const approve = page.getByRole("button", { name: "Approve and publish" });
   const latest = op({ command:"edit", id:approval.id, version:approval.version,
     comment:null, body:"Updated approval text." }).review;
@@ -250,11 +248,18 @@ try {
   await page.getByText("Published to GitHub.", {exact:true}).waitFor();
   assert.deepEqual(requested, {project, id:latest.id, version:latest.version, digest:latest.digest});
   assert.equal(await page.locator("#reviews-detail").count(), 0);
+  assert.equal(page.url(), url);
+  assert.equal(await pending.getAttribute("aria-pressed"), "true");
   assert.equal(await approve.count(), 0);
   assert.equal(await page.getByText(latest.title,{exact:true}).count(), 0);
   await archive.click();
   await page.getByText(latest.title,{exact:true}).waitFor();
   assert.equal(await draft.count(), 0);
+  await page.getByRole("link", {name:new RegExp(latest.title)}).click();
+  await page.getByRole("link", {name:"View published review ↗"}).waitFor();
+  await page.getByRole("link", {name:"Back to reviews"}).click();
+  await page.getByText(latest.title, {exact:true}).waitFor();
+  assert.equal(await archive.getAttribute("aria-pressed"), "true");
   const issueNumber = run([...issue, "create", "--title", "Check reminder labels"]).issue.number;
   const issueUrl = info.url + "#" + new URLSearchParams({project, issue:issueNumber});
   for (const pr of ["example/time/pull/71","example/time/pull/72","example/time/pull/73","other/repo/pull/73"]) {
@@ -269,7 +274,8 @@ try {
     const row = address === issueUrl ? page.locator(".pr-link").filter({has:links}) : page.locator(".issue-row").filter({has:links});
     assert.equal(await row.locator('a[href="https://github.com/example/time/pull/73"]').count(), 1);
     await links.click();
-    await page.getByRole("button", {name:"Collapse review for PR #73"}).waitFor();
+    await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
+    assert.equal(new URL(page.url()).pathname, "/code-review");
   }
   await page.goto(issueUrl);
   const linked = page.locator("#issue-reviews");
@@ -288,7 +294,8 @@ try {
   }
   await page.goto(await savedLink.evaluate(a => a.href));
   await page.getByRole("link",{name:"View published review ↗"}).waitFor();
-  assert.equal(await archive.getAttribute("aria-pressed"), "true");
+  assert.equal(new URL(page.url()).pathname, "/code-review");
+  assert.equal(await page.locator(".review-index-row").count(), 0);
   await page.goto(issueUrl);
   await linked.getByRole("button",{name:"Unlink review for PR #72"}).click();
   await receipt.waitFor({state:"detached"});
@@ -310,17 +317,39 @@ try {
   assert.equal(await page.locator(".review-index-row").count(), 100);
   await page.goto(url + "&review=" + approval.id);
   await page.getByRole("link",{name:"View published review ↗"}).waitFor();
-  assert.equal(await archive.getAttribute("aria-pressed"), "true");
-  // Link to a review still on page one, but well below the fold.
+  assert.equal(new URL(page.url()).pathname, "/code-review");
+  assert.equal(await page.locator(".review-index-row").count(), 0);
+  // A link from another screen opens the detail without loading the queue.
+  let listRequests = 0;
+  page.on("request", req => {
+    if (req.url().endsWith("/api/action") && req.postDataJSON()?.operation?.operation?.command === "list") listRequests++;
+  });
   for (let number = 80; number < 95; number++)
     op({...first, number});
   await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
   await page.getByRole("link", {name:"Open pending review for PR #73"}).click();
-  const selected = page.getByRole("button", {name:"Collapse review for PR #73"});
-  await selected.waitFor();
-  assert.ok(await selected.evaluate(el => el === document.activeElement
-    && el.getBoundingClientRect().top >= 0 && el.getBoundingClientRect().bottom <= innerHeight));
+  await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
   assert.ok(await page.locator("#reviews-detail").evaluate(el => el.getBoundingClientRect().top < innerHeight));
+  assert.equal(listRequests, 0);
+  // Publishing from a standalone review leaves the receipt at the same address.
+  await page.goto(url);
+  await page.getByRole("link", {name:/#94 ·/}).click();
+  const detailUrl = page.url();
+  await page.unroute("**/api/code-reviews/publish");
+  await page.route("**/api/code-reviews/publish", route => {
+    const {id, version, digest} = route.request().postDataJSON();
+    const claim = op({command:"claim_publication", id, version, digest}).review;
+    op({command:"finish_publication", id, version:claim.version,
+      receipt:"https://github.com/example/time/pull/94#review-2", author:"qa"});
+    return route.fulfill({json:{ok:true}});
+  });
+  await page.getByRole("button", {name:"Publish requested changes"}).click();
+  await page.getByRole("link", {name:"View published review ↗"}).waitFor();
+  assert.equal(page.url(), detailUrl);
+  assert.equal(await page.locator(".review-index-row").count(), 0);
+  await page.getByRole("link", {name:"Back to reviews"}).click();
+  await pending.waitFor();
+  assert.equal(await pending.getAttribute("aria-pressed"), "true");
   assert.deepEqual(errors, []);
   console.log(
     "Code Reviews: disabled, empty, approval, changes requested, both edits, diff anchors, stale publication and 8 visual variants passed.",
