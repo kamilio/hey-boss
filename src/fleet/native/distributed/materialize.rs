@@ -397,17 +397,36 @@ fn apply_page(db: &Connection, blockers: &mut DependencyGraphs, tables: &[&str])
     // retried from durable facts; receipt advancement never drops their data.
     for table in tables {
         let mut rebuilt = std::collections::BTreeSet::new();
+        // Keep a partially understood entity at its last visible state.
+        let eligible = "NOT EXISTS(SELECT 1 FROM distributed_deferred h WHERE h.table_name=d.table_name AND h.entity IN ('',d.entity))";
         let mut pending = replica::rows(
             db,
-            "SELECT entity FROM distributed_dirty d WHERE table_name=?1 AND NOT EXISTS(SELECT 1 FROM distributed_rejections r WHERE r.table_name=d.table_name AND r.entity=d.entity) ORDER BY entity LIMIT 128",
+            &format!(
+                "SELECT entity FROM distributed_dirty d WHERE table_name=?1 AND {eligible} AND NOT EXISTS(SELECT 1 FROM distributed_rejections r WHERE r.table_name=d.table_name AND r.entity=d.entity) ORDER BY entity LIMIT 128"
+            ),
             &[json!(table)],
         )?;
-        if pending.is_empty() {
-            pending = replica::rows(
+        if db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM distributed_rejections WHERE table_name=?1)",
+            [table],
+            |r| r.get::<_, bool>(0),
+        )? {
+            let rejected = replica::rows(
                 db,
-                "SELECT entity FROM distributed_dirty WHERE table_name=?1 ORDER BY entity LIMIT 128",
+                &format!(
+                    "SELECT entity FROM distributed_rejections r JOIN distributed_dirty d USING(table_name,entity) WHERE r.table_name=?1 AND {eligible} AND r.entity>coalesce((SELECT entity FROM distributed_retry_cursor WHERE table_name=?1),'') ORDER BY entity LIMIT 128"
+                ),
                 &[json!(table)],
             )?;
+            if rejected.len() == 128 {
+                db.execute("INSERT INTO distributed_retry_cursor VALUES(?1,?2) ON CONFLICT(table_name) DO UPDATE SET entity=excluded.entity",params![table,rejected.last().unwrap()["entity"].as_str()])?;
+            } else {
+                db.execute(
+                    "DELETE FROM distributed_retry_cursor WHERE table_name=?1",
+                    [table],
+                )?;
+            }
+            pending.extend(rejected);
         }
         for record in pending {
             let entity = record["entity"].as_str().unwrap();

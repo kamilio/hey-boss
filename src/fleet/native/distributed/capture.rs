@@ -46,7 +46,7 @@ pub(super) const TABLES: &[&str] = &[
 
 pub(super) fn columns(db: &Connection, table: &str) -> Result<Vec<String>> {
     if !TABLES.contains(&table) {
-        return Err(replica::invalid("Unknown distributed table"));
+        return Err(deferred::Incompatible("Unknown distributed table").into());
     }
     Ok(
         replica::rows(db, &format!("PRAGMA table_info({table})"), &[])?
@@ -204,6 +204,23 @@ pub(super) fn install(db: &Connection) -> Result<()> {
         ] {
             let mut before = old.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
             let mut after = new.map(|p| row_json(&columns, p)).unwrap_or("NULL".into());
+            if *table == "commit_reviews" && operation == "UPDATE" {
+                // Moved reviews need a complete destination row for old writers.
+                let only_message = "OLD.snapshot IS NEW.snapshot AND OLD.project_id IS NEW.project_id AND OLD.issue_number IS NEW.issue_number AND OLD.sha IS NEW.sha";
+                let compact: Vec<_> = columns
+                    .iter()
+                    .filter(|c| c.as_str() != "snapshot")
+                    .cloned()
+                    .collect();
+                before = format!(
+                    "CASE WHEN {only_message} THEN {} ELSE {before} END",
+                    row_json(&compact, "OLD")
+                );
+                after = format!(
+                    "CASE WHEN {only_message} THEN {} ELSE {after} END",
+                    row_json(&compact, "NEW")
+                );
+            }
             let order_guard = if *table == "issues" && operation == "UPDATE" {
                 let unchanged = columns
                     .iter()

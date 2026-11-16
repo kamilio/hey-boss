@@ -3,6 +3,7 @@
 mod activation;
 mod archives;
 mod capture;
+mod deferred;
 pub(super) use activation::{activate, enroll, status};
 mod graph;
 pub(super) mod health;
@@ -49,8 +50,20 @@ CREATE TABLE IF NOT EXISTS distributed_meta(
  format INTEGER NOT NULL DEFAULT 2);
 CREATE TABLE IF NOT EXISTS distributed_outbox(
  clock INTEGER PRIMARY KEY,table_name TEXT NOT NULL,before_json TEXT,after_json TEXT);
+CREATE TABLE IF NOT EXISTS distributed_projection_fence(id INTEGER PRIMARY KEY CHECK(id=1),position INTEGER NOT NULL);
+INSERT OR IGNORE INTO distributed_projection_fence VALUES(1,CASE WHEN EXISTS(SELECT 1 FROM distributed_meta) THEN -1 ELSE 0 END);
+CREATE TRIGGER IF NOT EXISTS distributed_export_fence AFTER UPDATE OF exported ON distributed_meta
+ BEGIN UPDATE distributed_projection_fence SET position=-1 WHERE id=1 AND position<>-1; END;
+CREATE TABLE IF NOT EXISTS distributed_retry_cursor(table_name TEXT PRIMARY KEY,entity TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS distributed_deferred(position INTEGER PRIMARY KEY,record TEXT NOT NULL,table_name TEXT NOT NULL,entity TEXT NOT NULL,reason TEXT NOT NULL,retry_at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS distributed_deferred_entity ON distributed_deferred(table_name,entity,position);
+CREATE INDEX IF NOT EXISTS distributed_deferred_due ON distributed_deferred(retry_at,position);
+CREATE VIEW IF NOT EXISTS distributed_conflicts AS SELECT table_name,entity,reason FROM distributed_rejections
+ UNION ALL SELECT table_name,record,reason FROM distributed_deferred;
 CREATE TABLE IF NOT EXISTS distributed_baseline(
  table_name TEXT PRIMARY KEY,after_rowid INTEGER NOT NULL DEFAULT 0,complete INTEGER NOT NULL DEFAULT 0);
+CREATE TRIGGER IF NOT EXISTS distributed_baseline_fence AFTER UPDATE OF after_rowid ON distributed_baseline
+ WHEN NEW.after_rowid>OLD.after_rowid BEGIN UPDATE distributed_projection_fence SET position=-1 WHERE id=1; END;
 CREATE TABLE IF NOT EXISTS distributed_fields(
  table_name TEXT NOT NULL,entity TEXT NOT NULL,field TEXT NOT NULL,
  clock INTEGER NOT NULL,origin TEXT NOT NULL,value TEXT NOT NULL,
@@ -116,7 +129,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
     if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_job_runs') AND NOT EXISTS(SELECT 1 FROM pragma_table_info('distributed_job_runs') WHERE name='parent_run_id')", [], |r| r.get::<_,bool>(0))? {
         let tx=db.unchecked_transaction()?;
         tx.execute_batch("DROP VIEW distributed_job_runs")?;
-        tx.execute_batch(&SCHEMA[SCHEMA.find("CREATE VIEW").unwrap()..])?;
+        tx.execute_batch(&SCHEMA[SCHEMA.find("CREATE VIEW IF NOT EXISTS distributed_job_runs").unwrap()..])?;
         for operation in ["INSERT", "UPDATE", "DELETE"] {
             tx.execute_batch(&format!("DROP TRIGGER IF EXISTS distributed_capture_scheduled_job_runs_{operation}"))?;
         }
@@ -139,12 +152,14 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
         }
         identity::upgrade_shadow(db)?;
         if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_supersessions')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_supersessions') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_projection_fence')",
             [],
             |r| r.get::<_, bool>(0),
         )? {
             let tx = db.unchecked_transaction()?;
             tx.execute_batch(SCHEMA)?;
+            tx.execute_batch("DROP TRIGGER IF EXISTS distributed_capture_commit_reviews_UPDATE")?;
+            capture::install(&tx)?;
             tx.commit()?;
         }
         // Additive protocol data needs capture on already-enrolled replicas too.
@@ -233,6 +248,19 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
         }
         fact.resource = resources::capture(&tx, &fact)?;
         identity::normalize(&tx, &mut fact)?;
+        // Old outboxes also contain complete row images. A message edit must
+        // never encode two copies of an unchanged, already replicated patch.
+        if fact.table == "commit_reviews"
+            && let (Some(old), Some(new)) = (&mut fact.before, &mut fact.after)
+            && old["snapshot"] == new["snapshot"]
+            && ["project_id", "issue_number", "sha"]
+                .iter()
+                .all(|key| old[key] == new[key])
+        {
+            for row in [old, new] {
+                row.as_object_mut().unwrap().remove("snapshot");
+            }
+        }
         let payload = serde_json::to_string(&fact)?;
         if count > 0 && bytes + payload.len() > hey_boss_sync::PAGE_BYTES {
             break;
@@ -247,6 +275,12 @@ pub(super) fn export(db: &Connection, engine: &mut hey_boss_sync::Engine) -> Res
             [fact.clock],
         )?;
         count += 1;
+    }
+    if count > 0 {
+        tx.execute(
+            "UPDATE distributed_projection_fence SET position=?1 WHERE id=1",
+            [engine.head()?],
+        )?;
     }
     tx.commit()?;
     Ok(count + events)
@@ -398,7 +432,14 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
         [],
         |r| r.get(0),
     )?;
-    let facts = engine.pending(after)?;
+    let mut facts = engine.pending(after)?;
+    let incoming = facts.len();
+    // One bounded retry per page. A damaged disk or unreadable journal still
+    // fails the transaction; never acknowledge a retry we cannot recover.
+    if let Some(retry) = deferred::due(db, engine)? {
+        facts.insert(0, retry);
+    }
+
     if facts.is_empty()
         && !db.query_row(
             "SELECT active=1 AND EXISTS(SELECT 1 FROM distributed_dirty) FROM distributed_meta WHERE id=1",
@@ -437,54 +478,74 @@ pub(super) fn import(db: &Connection, engine: &hey_boss_sync::Engine) -> Result<
         }
     }
     let tx = db.unchecked_transaction()?;
+    let mut pending = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM distributed_deferred)",
+        [],
+        |r| r.get::<_, bool>(0),
+    )?;
+    let mut retried = 0;
     for (position, id, payload) in &facts {
         crate::event_log::receive(&tx, payload)?;
         if let Some(fact) = archives::revision(payload)? {
-            if fact.table.starts_with("published_") {
-                crate::pages::index_record(&tx, id, &serde_json::to_value(&fact)?)?;
-            }
-            if let Some(archive) = &fact.archive {
-                archives::remember(&tx, archive)?;
-            }
-            if !matches!(
-                fact.table.as_str(),
-                "published_chunks" | "published_page_chunks"
-            ) {
-                if let Some(resource) = &fact.resource {
-                    resources::receive(&tx, resource)?;
+            let applied = deferred::record(&tx, *position, id, &fact, &mut pending, || {
+                if fact.table.starts_with("published_") {
+                    crate::pages::index_record(&tx, id, &serde_json::to_value(&fact)?)?;
                 }
-            }
-            if !resources::retired(&tx, &fact)? {
-                projection::reduce(&tx, &fact)?;
-                materialize::discover_page(&tx, &fact)?;
-            }
-            if fact.table == "distributed_members" {
-                let key = projection::key(
-                    &tx,
-                    &fact.table,
-                    fact.after.as_ref().or(fact.before.as_ref()).unwrap(),
-                )?;
-                tx.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
-                materialize::write(
-                    &tx,
-                    &fact.table,
-                    &key,
-                    projection::row(&tx, &fact.table, &key)?,
-                )?;
-                tx.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
+                if let Some(archive) = &fact.archive {
+                    archives::remember(&tx, archive)?;
+                }
+                if !matches!(
+                    fact.table.as_str(),
+                    "published_chunks" | "published_page_chunks"
+                ) {
+                    if let Some(resource) = &fact.resource {
+                        resources::receive(&tx, resource)?;
+                    }
+                }
+                if !resources::retired(&tx, &fact)? {
+                    projection::reduce(&tx, &fact)?;
+                    materialize::discover_page(&tx, &fact)?;
+                }
+                if fact.table == "distributed_members" {
+                    let key = projection::key(
+                        &tx,
+                        &fact.table,
+                        fact.after.as_ref().or(fact.before.as_ref()).unwrap(),
+                    )?;
+                    tx.execute("UPDATE fleet_meta SET syncing=1 WHERE id=1", [])?;
+                    materialize::write(
+                        &tx,
+                        &fact.table,
+                        &key,
+                        projection::row(&tx, &fact.table, &key)?,
+                    )?;
+                    tx.execute("UPDATE fleet_meta SET syncing=0 WHERE id=1", [])?;
+                }
+                Ok(())
+            })?;
+            if *position <= after && applied {
+                retried += 1;
             }
         }
-        tx.execute(
-            "UPDATE distributed_meta SET projected=?1 WHERE id=1",
-            [position],
-        )?;
+        if *position > after {
+            tx.execute(
+                "UPDATE distributed_meta SET projected=?1 WHERE id=1",
+                [position],
+            )?;
+        }
     }
     // Do not publish an earlier remote page over local changes whose exported
     // facts are still waiting later in this journal's delivery order.
-    let ready:bool=tx.query_row("SELECT active=1 AND exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) AND projected=?1 FROM distributed_meta WHERE id=1",[engine.head()?],|r|r.get(0))?;
+    // On upgrade (or an export by an older binary) no bound is known:
+    // sample the tail once. Later remote appends cannot move this fence.
+    tx.execute(
+        "UPDATE distributed_projection_fence SET position=?1 WHERE position=-1",
+        [engine.head()?],
+    )?;
+    let ready:bool=tx.query_row("SELECT active=1 AND exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) AND projected>=(SELECT position FROM distributed_projection_fence) FROM distributed_meta WHERE id=1",[],|r|r.get(0))?;
     if ready {
         materialize::apply(&tx)?;
     }
     tx.commit()?;
-    Ok(facts.len())
+    Ok(incoming + retried)
 }

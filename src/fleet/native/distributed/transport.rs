@@ -901,12 +901,11 @@ mod tests {
         )
         .unwrap();
         let mut journal = engine(&ctx).unwrap();
-        for _ in 0..32 {
-            prepare(&ctx, &db, &mut journal, true).unwrap();
-        }
+        // Every captured table needs a baseline page before the peer is idle.
+        while !baseline(&db, &mut journal, true).unwrap() {}
         db.execute("UPDATE distributed_meta SET active=1", [])
             .unwrap();
-        prepare(&ctx, &db, &mut journal, true).unwrap();
+        while prepare(&ctx, &db, &mut journal, true).unwrap() {}
         assert_eq!(
             db.query_row("SELECT count(*) FROM distributed_dirty", [], |r| r
                 .get::<_, i64>(0))

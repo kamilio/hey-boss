@@ -276,7 +276,7 @@ pub(crate) fn collect(
     if !db.query_row("SELECT dirty=1 AND EXISTS(SELECT 1 FROM published_deletions) FROM published_storage WHERE id=1",[],|r|r.get::<_,bool>(0))? { return Ok(0); }
     let distributed = distributed(db)?;
     if distributed {
-        if engine.is_none() || db.query_row("SELECT exported<coalesce((SELECT max(clock) FROM distributed_outbox),0) OR EXISTS(SELECT 1 FROM distributed_dirty WHERE table_name LIKE 'published_%') FROM distributed_meta WHERE id=1",[],|r|r.get::<_,bool>(0))? { return Ok(0); }
+        if engine.is_none() || db.query_row("SELECT exported<coalesce((SELECT max(clock) FROM distributed_outbox),0) OR EXISTS(SELECT 1 FROM distributed_dirty WHERE table_name LIKE 'published_%') OR EXISTS(SELECT 1 FROM distributed_deferred WHERE table_name LIKE 'published_%') FROM distributed_meta WHERE id=1",[],|r|r.get::<_,bool>(0))? { return Ok(0); }
         let head = engine
             .as_ref()
             .unwrap()

@@ -162,9 +162,10 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
             !columns.contains(column)
                 && !(fact.table == "project_settings" && column == "mindmaps_enabled")
         }) {
-            return Err(replica::invalid(
+            return Err(deferred::Incompatible(
                 "Unsupported distributed column; upgrade both peers",
-            ));
+            )
+            .into());
         }
     }
     let before_key = fact
@@ -190,7 +191,7 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
             moved.after = destination;
             return reduce(db, &moved);
         }
-        return Err(replica::invalid("Distributed primary keys are immutable"));
+        return Err(deferred::Incompatible("Distributed primary keys are immutable").into());
     }
     // Cold history may predate enrollment and have no ordinary birth fact.
     // Its before-image supplies missing clock-zero fields, never a new birth

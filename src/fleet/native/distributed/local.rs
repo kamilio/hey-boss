@@ -77,7 +77,7 @@ fn status(ctx: &Context, request: &Value) -> Result<Value> {
         )?,
         "conflicts" => replica::rows(
             &db,
-            "SELECT table_name,entity,reason FROM distributed_rejections ORDER BY table_name,entity LIMIT ?1 OFFSET ?2",
+            "SELECT table_name,entity,reason FROM distributed_conflicts ORDER BY table_name,entity LIMIT ?1 OFFSET ?2",
             &[json!(limit), json!(offset)],
         )?,
         "events" => vec![],

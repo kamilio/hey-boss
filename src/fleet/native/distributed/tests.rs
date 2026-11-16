@@ -1,11 +1,11 @@
 use super::*;
 
+#[path = "event_log_tests.rs"]
+mod event_log;
 #[path = "job_summary_tests.rs"]
 mod job_summary;
 #[path = "publishing_tests.rs"]
 mod publishing;
-#[path = "event_log_tests.rs"]
-mod event_log;
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
@@ -3516,3 +3516,6 @@ fn pr_review_comments_and_edited_wording_replicate() {
         "Please cover midnight"
     );
 }
+
+#[path = "resilience_tests.rs"]
+mod resilience;

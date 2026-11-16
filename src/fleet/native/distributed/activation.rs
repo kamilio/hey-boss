@@ -97,7 +97,7 @@ pub(in crate::fleet::native) fn activate(ctx: &Context) -> Result<()> {
         )
         .optional()?
         .ok_or_else(|| replica::invalid("Enroll this machine's number namespace before cutover"))?;
-    let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM distributed_members WHERE node=(SELECT controller FROM distributed_meta WHERE id=1) AND ready=1) AND NOT EXISTS(SELECT 1 FROM distributed_baseline WHERE complete=0) AND (SELECT exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) AND projected=?1 FROM distributed_meta WHERE id=1)",[engine.head()?],|r|r.get(0))?;
+    let ready:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM distributed_members WHERE node=(SELECT controller FROM distributed_meta WHERE id=1) AND ready=1) AND NOT EXISTS(SELECT 1 FROM distributed_baseline WHERE complete=0) AND NOT EXISTS(SELECT 1 FROM distributed_deferred) AND (SELECT exported>=coalesce((SELECT max(clock) FROM distributed_outbox),0) AND projected=?1 FROM distributed_meta WHERE id=1)",[engine.head()?],|r|r.get(0))?;
     if !ready {
         return Err(replica::invalid(
             "Initial capture and SSH transfer must finish before cutover",
@@ -132,7 +132,7 @@ pub(in crate::fleet::native) fn activate(ctx: &Context) -> Result<()> {
     if pending > 0 {
         let errors = replica::rows(
             &tx,
-            "SELECT table_name,entity,reason FROM distributed_rejections ORDER BY table_name,entity LIMIT 5",
+            "SELECT table_name,entity,reason FROM distributed_conflicts ORDER BY table_name,entity LIMIT 5",
             &[],
         )?;
         return Err(replica::invalid(&format!(
@@ -153,7 +153,7 @@ pub(in crate::fleet::native) fn status(ctx: &Context) -> Result<Value> {
     )? {
         return Ok(json!({"mode":"legacy"}));
     }
-    let mut status=replica::rows(&db,"SELECT origin,active,slot,exported,projected,(SELECT count(*) FROM distributed_outbox WHERE clock>m.exported) AS pending_local,(SELECT count(*) FROM distributed_dirty) AS pending_projection,(SELECT count(*) FROM distributed_rejections) AS conflicts,(SELECT count(*) FROM distributed_baseline WHERE complete=0) AS baseline_remaining FROM distributed_meta m WHERE id=1",&[])?.remove(0);
+    let mut status=replica::rows(&db,"SELECT origin,active,slot,exported,projected,(SELECT count(*) FROM distributed_outbox WHERE clock>m.exported) AS pending_local,(SELECT count(*) FROM distributed_dirty) AS pending_projection,(SELECT count(*) FROM distributed_conflicts) AS conflicts,(SELECT count(*) FROM distributed_baseline WHERE complete=0) AS baseline_remaining FROM distributed_meta m WHERE id=1",&[])?.remove(0);
     let pending: i64 = db.query_row("SELECT count(*) FROM operational_event_outbox", [], |r| {
         r.get(0)
     })?;
@@ -173,7 +173,7 @@ pub(in crate::fleet::native) fn status(ctx: &Context) -> Result<Value> {
     status["legacy_pending"] = json!(db.query_row("SELECT count(*) FROM fleet_outbox WHERE seq<=(SELECT legacy_cutoff FROM distributed_meta WHERE id=1)", [], |r|r.get::<_,i64>(0))?);
     status["projection_errors"] = json!(replica::rows(
         &db,
-        "SELECT table_name,entity,reason FROM distributed_rejections ORDER BY table_name,entity LIMIT 20",
+        "SELECT table_name,entity,reason FROM distributed_conflicts ORDER BY table_name,entity LIMIT 20",
         &[]
     )?);
     Ok(status)
