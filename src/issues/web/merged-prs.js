@@ -19,7 +19,7 @@ const HeyBossMergedPRs = (() => {
       const label = match ? `${match[1]}/${match[2]}#${match[3]}` : 'Pull request';
       const time = pr.merged_at || pr.observed_at;
       const title = pr.title || label;
-      return `<article class="merge-row"><span class="merge-mark" data-icon="pr-merged" role="img" aria-label="Merged"></span><div class="merge-main">${match?`<a class="merge-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`:`<span class="merge-title">${esc(title)}</span>`}<div class="merge-meta"><span>${esc(label)}</span>${(pr.issues||[]).map(issue=>`<a href="/#${esc(new URLSearchParams({project:context.project,issue:issue.number,...(context.host?{host:context.host}:{})}))}" title="${esc(issue.title)}">#${issue.number} ${esc(issue.title)}</a>`).join('')}</div></div><span class="merge-time">${time?`${pr.merged_at?'':'Observed '}<time datetime="${new Date(time).toISOString()}" title="${esc(new Date(time).toLocaleString())}">${esc(new Date(time).toLocaleString(undefined,pr.merged_at?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',year:'numeric'}))}</time>`:'Date unavailable'}</span></article>`;
+      return `<article class="merge-row"><span class="merge-mark" data-icon="pr-merged" role="img" aria-label="Merged"></span><div class="merge-main">${match?`<a class="merge-title" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${esc(title)}</a>`:`<span class="merge-title">${esc(title)}</span>`}<div class="merge-meta"><span>${esc(label)}</span>${HeyBossUI.pendingReviewLinks(pr.url,context.project,context.host,context.pendingReviews)}${(pr.issues||[]).map(issue=>`<a href="/#${esc(new URLSearchParams({project:context.project,issue:issue.number,...(context.host?{host:context.host}:{})}))}" title="${esc(issue.title)}">#${issue.number} ${esc(issue.title)}</a>`).join('')}</div></div><span class="merge-time">${time?`${pr.merged_at?'':'Observed '}<time datetime="${new Date(time).toISOString()}" title="${esc(new Date(time).toLocaleString())}">${esc(new Date(time).toLocaleString(undefined,pr.merged_at?{hour:'numeric',minute:'2-digit'}:{month:'short',day:'numeric',year:'numeric'}))}</time>`:'Date unavailable'}</span></article>`;
     }).join('')}</div></section>`).join('');
   }
   async function start() {
@@ -49,6 +49,7 @@ const HeyBossMergedPRs = (() => {
         for(let page=0;page<pages;page++){
           const value=await request({action:'merged_pull_requests',limit:100,offset},current.project,current.host);
           if(seq!==generation)return;
+          current.pendingReviews=value.pending_reviews;
           collected.push(...value.pull_requests);pending||=value.authorship_pending;offset=value.next_offset;
           if(offset===null)break;
         }

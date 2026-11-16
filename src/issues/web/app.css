@@ -2037,11 +2037,12 @@ details[open] > .activity-summary .activity-chevron { transform: rotate(90deg); 
 }
 .pr-link-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
   margin-bottom: 6px;
 }
-.pr-link-heading a { flex: 1; }
+.pr-link-heading > a:first-child { flex: 1; }
 .pr-purpose-field {
   display: flex;
   align-items: center;

@@ -147,6 +147,9 @@ impl Store {
             actor_labels::enrich(&tx, &mut result)?;
         }
         let settings = registry::project_settings(&tx, &project)?;
+        if !options.compact && settings["code_reviews_enabled"] == true {
+            result["pending_reviews"] = super::super::code_reviews::pending_links(&tx, &project.id)?;
+        }
         for key in ["prs_enabled", "drafts_enabled", "artifacts_enabled"] {
             result[key] = settings[key].clone();
         }

@@ -21,7 +21,7 @@ const IssueBlockers = (() => {
     if (!prs.length) return "";
     const pr = prs[0];
     const num = (pr.url || "").match(/\/pull\/(\d+)/)?.[1];
-    return `<a class="dep-pr-badge" href="${esc(pr.url)}" target="_blank" rel="noopener" title="Attached PR ${esc(pr.url)}">${icon("pull-request")}${num ? `PR #${num}` : "PR"}</a>`;
+    return `<a class="dep-pr-badge" href="${esc(pr.url)}" target="_blank" rel="noopener" title="Attached PR ${esc(pr.url)}">${icon("pull-request")}${num ? `PR #${num}` : "PR"}</a>${pendingReviewLinks(pr.url)}`;
   };
   function list(issue) {
     const active = issue.blocked_by || [];

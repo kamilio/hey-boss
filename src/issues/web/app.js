@@ -366,11 +366,8 @@ function updateHeader() {
   $('[role="tab"][data-state="ready"]').hidden = false;
   $("#closed-count").textContent = p.closed;
   $("#deleted-count").textContent = p.deleted;
-  $("#issue-summary").textContent =
+  $(".page-description").textContent =
     `${p.unassigned} unassigned ${p.unassigned === 1 ? "issue" : "issues"}`;
-  const reviews = $("#pending-code-reviews"), destination = $("#nav-code-reviews");
-  reviews.hidden = model.route.state !== "ready" || destination.hidden;
-  reviews.href = destination.href;
   document.title =
     model.detail && model.route.issue
       ? `${model.detail.issue.title} · Hey Boss`
@@ -838,6 +835,9 @@ function prStatus(pr, label = false) {
   const title = name + (stale ? " · Update delayed" : "") + (pr.checked_at ? " · Checked " + new Date(pr.checked_at).toLocaleString() : "");
   return `<span class="pr-status pr-status-${status}${stale ? " pr-status-stale" : ""}" role="img" aria-label="${esc(title)}" title="${esc(title)}">${icon(stale ? "clock" : {open:"pull-request",closed:"pr-closed",merged:"pr-merged",unknown:"clock"}[status])}${label ? `<span>${esc(name)}${stale ? " · Update delayed" : ""}</span>` : ""}</span>`;
 }
+function pendingReviewLinks(url) {
+  return HeyBossUI.pendingReviewLinks(url, model.project.id, model.route.host, model.pendingReviews);
+}
 function listPullRequests(issue) {
   return (issue.pull_requests || [])
     .filter(pr => !["prerequisite", "supporting-evidence"].includes(pr.purpose))
@@ -856,7 +856,7 @@ function listPullRequests(issue) {
       const classified = purpose !== PR_PURPOSES.unspecified;
       const statusLabel = {open:"Open",closed:"Closed without merge",merged:"Merged"}[pr.status];
       const suffix = (classified ? ` · ${purpose}` : "") + (statusLabel ? ` · ${statusLabel}` : "");
-      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${prStatus(pr)}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>`;
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${prStatus(pr)}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>${pendingReviewLinks(pr.url)}`;
     })
     .join("");
 }
@@ -917,7 +917,8 @@ function renderList(result) {
   if (result.assignment_machines) model.assignmentMachines = result.assignment_machines;
   model.deletedLabels = model.route.state === "deleted" ? [...new Set(result.issues.flatMap(i => i.labels))] : [];
   IssueFilters.render();
-  model.signature = JSON.stringify(result.issues);
+  model.pendingReviews = result.pending_reviews;
+  model.signature = JSON.stringify([result.issues, result.pending_reviews]);
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueFilters.matches(issue, model.route))};
@@ -1241,7 +1242,7 @@ async function refresh(quiet = true) {
       if (model.detail && result.issue.version === model.detail.issue.version &&
           JSON.stringify(result.issue.assignment) === JSON.stringify(model.detail.issue.assignment)) {
         const overview = $(".github-fetch-overview");
-        const html = IssueAssignments.fetchOverview(result.issue);
+        const html = IssueAssignments.fetchOverview(result.issue, pendingReviewLinks);
         if (overview && !overview.contains(document.activeElement)) {
           const template = document.createElement("template");
           template.innerHTML = html;
@@ -1249,14 +1250,14 @@ async function refresh(quiet = true) {
         }
         if (JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status)) {
           const status = $(".github-watch-status");
-          if (status) status.outerHTML = IssueAssignments.status(result.issue, {icon});
+          if (status) status.outerHTML = IssueAssignments.status(result.issue, {icon, pendingReviewLinks});
           model.detail.issue.github_status = result.issue.github_status;
           detailCache.delete(detailKey(project, result.issue.number));
         }
       }
       if (
         model.detail &&
-        (result.boss?.name !== model.detail.boss?.name || result.prs_enabled !== model.detail.prs_enabled || JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || JSON.stringify(result.issue.commits) !== JSON.stringify(model.detail.issue.commits) || result.issue.version !== model.detail.issue.version || result.comment_count !== model.detail.comment_count || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.code_reviews) !== JSON.stringify(model.detail.code_reviews) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
+        (result.boss?.name !== model.detail.boss?.name || result.prs_enabled !== model.detail.prs_enabled || JSON.stringify(result.actor_models) !== JSON.stringify(model.detail.actor_models) || JSON.stringify(result.issue.github_status) !== JSON.stringify(model.detail.issue.github_status) || JSON.stringify(result.issue.assignment) !== JSON.stringify(model.detail.issue.assignment) || JSON.stringify(result.issue.pull_requests) !== JSON.stringify(model.detail.issue.pull_requests) || JSON.stringify(result.issue.commits) !== JSON.stringify(model.detail.issue.commits) || result.issue.version !== model.detail.issue.version || result.comment_count !== model.detail.comment_count || allocationSignature(result) !== allocationSignature(model.detail) || JSON.stringify(result.pending_reviews) !== JSON.stringify(model.detail.pending_reviews) || JSON.stringify(result.code_reviews) !== JSON.stringify(model.detail.code_reviews) || JSON.stringify(result.artifacts) !== JSON.stringify(model.detail.artifacts) || IssueSubtasks.signature(result) !== IssueSubtasks.signature(model.detail))
       ) {
         // Let an open editor or pending submission finish before replacing its controls.
         if (quiet && $("dialog[open], .issue-overflow[open], .pr-add[open], #issue-tag-picker, .artifact-attachment-picker, #issue-attachments[data-busy=true], #comment-body[readonly]")) return;
@@ -1266,7 +1267,7 @@ async function refresh(quiet = true) {
     } else {
       model.orderVersion = result.order_version;
       model.drafts_enabled = result.drafts_enabled;
-      if (JSON.stringify(result.issues) !== model.signature) renderList(result);
+      if (JSON.stringify([result.issues, result.pending_reviews]) !== model.signature) renderList(result);
       else renderSearchStatus(result.search);
     }
     connection(true);
@@ -1486,8 +1487,8 @@ function allocationSignature(value) {
 
 function renderIssueWork(value) {
   const i = value.issue;
-  const assignment=IssueAssignments.render(value,{actorName,bossName:model.boss.name,icon});
-  return `<section class="issue-work" aria-label="Work"><h2 class="issue-section-heading">Work</h2>${assignment}${renderReadiness(value)}${IssueAssignments.status(i,{icon})}${renderTagSidebar(i)}${IssueBlockers.card(i)}</section>`;
+  const assignment=IssueAssignments.render(value,{actorName,bossName:model.boss.name,icon,pendingReviewLinks});
+  return `<section class="issue-work" aria-label="Work"><h2 class="issue-section-heading">Work</h2>${assignment}${renderReadiness(value)}${IssueAssignments.status(i,{icon,pendingReviewLinks})}${renderTagSidebar(i)}${IssueBlockers.card(i)}</section>`;
 }
 function renderIssueContext(i) {
   const lastCommit = i.commits?.at(-1);
@@ -1543,6 +1544,7 @@ function renderDetail(value) {
     toast("This issue moved to " + destination.project.name);
     return;
   }
+  model.pendingReviews = value.pending_reviews;
   model.detail = value;
   model.orderVersion = value.order_version ?? model.orderVersion;
   const i = value.issue;
@@ -2649,7 +2651,7 @@ function renderPullRequests(issue, prsEnabled) {
   if (!prsEnabled) return "";
   return `<details class="side-section pr-section"${issue.pull_requests?.length ? " open" : ""}><summary class="commit-summary">${icon("pull-request")}Pull requests <span class="commit-count">${issue.pull_requests?.length || 0}</span><span class="commit-chevron" aria-hidden="true">›</span></summary><div class="pr-links">${(issue.pull_requests || []).map((pr) => {
     const trace = traceLinkForOrigin(pr.origin, issue.number, pr.added_by);
-    return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
+    return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${pendingReviewLinks(pr.url)}${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
   }).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</details>`;
 }
 async function changePullRequest(action, url, purpose, control) {

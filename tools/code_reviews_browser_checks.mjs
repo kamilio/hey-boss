@@ -257,6 +257,20 @@ try {
   assert.equal(await draft.count(), 0);
   const issueNumber = run([...issue, "create", "--title", "Check reminder labels"]).issue.number;
   const issueUrl = info.url + "#" + new URLSearchParams({project, issue:issueNumber});
+  for (const pr of ["example/time/pull/71","example/time/pull/72","example/time/pull/73","other/repo/pull/73"]) {
+    run([...issue, "pr", "add", String(issueNumber), "https://github.com/" + pr]);
+  }
+  for (const address of [info.url + "#" + new URLSearchParams({project,state:"all"}), issueUrl]) {
+    await page.goto(address);
+    const links = page.getByRole("link", {name:/^Open pending review for PR/});
+    await links.first().waitFor();
+    assert.equal(await links.count(), 1, "Only the matching, unpublished PR has a review link");
+    assert.equal(await links.innerText(), "Pending review");
+    const row = address === issueUrl ? page.locator(".pr-link").filter({has:links}) : page.locator(".issue-row").filter({has:links});
+    assert.equal(await row.locator('a[href="https://github.com/example/time/pull/73"]').count(), 1);
+    await links.click();
+    await page.getByRole("button", {name:"Collapse review for PR #73"}).waitFor();
+  }
   await page.goto(issueUrl);
   const linked = page.locator("#issue-reviews");
   await linked.getByRole("button", {name:"Attach review"}).click();

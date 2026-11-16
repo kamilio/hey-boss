@@ -60,13 +60,13 @@
       editable && !hasPr ? "Attach a PR to enable the GitHub PR watcher." : ""].filter(Boolean).join(" ");
     const detail = issue.attempt_hold ? "Pickup paused" : issue.draft ? "Draft" : a.actor ? description.detail : a.kind === "machine" ? "Waiting for an agent" : a.kind === "github" && !a.waiting && issue.state !== "closed" && !issue.deleted_at ? "Agent queued" : "";
     const quick = a.kind === "boss" ? ["unassigned", "Unassign"] : a.kind === "unassigned" ? ["boss", "Assign to me"] : null;
-    return `<div class="side-section issue-assignment"><div class="side-heading"><h2>Assignment</h2>${HeyBossUI.infoTip("assignment-help", "About assignment", help)}</div><div class="assignment-row"><strong>${esc(description.label)}</strong>${editable && quick ? `<button type="button" class="assignment-link" data-assignment-target="${quick[0]}">${quick[1]}</button>` : ""}${editable ? '<button type="button" class="icon-button" data-change-assignment aria-label="Change assignment" title="Change assignment" aria-expanded="false" aria-controls="issue-assignment">' + helpers.icon("edit") + '</button>' : ""}</div>${editable ? `<select id="issue-assignment" data-assignment-select aria-label="Assignment" aria-describedby="assignment-help" hidden>${options}</select>` : ""}${detail ? `<p class="assignment-detail">${esc(detail)}</p>` : ""}${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Agent conversation →</a></p>` : ""}${fetchOverview(issue)}</div>`;
+    return `<div class="side-section issue-assignment"><div class="side-heading"><h2>Assignment</h2>${HeyBossUI.infoTip("assignment-help", "About assignment", help)}</div><div class="assignment-row"><strong>${esc(description.label)}</strong>${editable && quick ? `<button type="button" class="assignment-link" data-assignment-target="${quick[0]}">${quick[1]}</button>` : ""}${editable ? '<button type="button" class="icon-button" data-change-assignment aria-label="Change assignment" title="Change assignment" aria-expanded="false" aria-controls="issue-assignment">' + helpers.icon("edit") + '</button>' : ""}</div>${editable ? `<select id="issue-assignment" data-assignment-select aria-label="Assignment" aria-describedby="assignment-help" hidden>${options}</select>` : ""}${detail ? `<p class="assignment-detail">${esc(detail)}</p>` : ""}${trace ? `<p class="assignment-trace"><a href="${esc(trace)}">Agent conversation →</a></p>` : ""}${fetchOverview(issue, helpers.pendingReviewLinks)}</div>`;
   }
   function fetchTime(value) {
     const date = typeof value === "number" && value > 0 ? new Date(value) : null;
     return date && Number.isFinite(date.getTime()) ? `<time datetime="${date.toISOString()}" data-absolute title="${esc(date.toLocaleString())}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit",second:"2-digit"}))}</time>` : "";
   }
-  function fetchOverview(issue) {
+  function fetchOverview(issue, reviewLinks) {
     if (current(issue).kind !== "github") return "";
     const watch = issue.github_status || {}, now = Date.now();
     const active = watch.monitoring !== false && issue.state !== "closed" && !issue.deleted_at && !issue.draft;
@@ -80,7 +80,7 @@
       const delayed = f.next_at > now;
       const label = !active ? "Monitoring stopped" : fetching ? "Fetching GitHub…" : queued ? "Fetch queued" : interrupted ? "Fetch interrupted" : error ? "Fetch needs retry" : !f.finished_at ? "Awaiting first fetch" : "Watching";
       const lastFetch = fetchTime(f.finished_at);
-      return {busy:fetching || queued, html:`<div class="github-fetch"><p class="github-fetch-state" role="status">${prs.length > 1 ? link(pr.url, "PR #" + pr.url.split("/").filter(Boolean).pop()) + " · " : ""}${esc(label)}</p>${lastFetch ? `<p class="assignment-hint">Last fetch ${lastFetch}</p>` : ""}${active && delayed && (error || queued) ? `<p class="assignment-hint">Retry after ${fetchTime(f.next_at)}</p>` : ""}${error ? `<p class="github-status-error">${esc(error)}</p>` : ""}</div>`};
+      return {busy:fetching || queued, html:`<div class="github-fetch"><p class="github-fetch-state" role="status">${prs.length > 1 ? link(pr.url, "PR #" + pr.url.split("/").filter(Boolean).pop()) + (reviewLinks?.(pr.url) || "") + " · " : ""}${esc(label)}</p>${lastFetch ? `<p class="assignment-hint">Last fetch ${lastFetch}</p>` : ""}${active && delayed && (error || queued) ? `<p class="assignment-hint">Retry after ${fetchTime(f.next_at)}</p>` : ""}${error ? `<p class="github-status-error">${esc(error)}</p>` : ""}</div>`};
     });
     return `<div class="github-fetch-overview">${rows.map(row => row.html).join("")}${active && prs.length ? `<button type="button" class="github-fetch-now" data-action="refresh_github"${rows.some(row => row.busy) ? " disabled" : ""}>Fetch now</button>` : ""}</div>`;
   }
@@ -114,7 +114,7 @@
       const summary = evidence.truncated ? `<p class="assignment-hint">Summary shown${omitted ? `; ${esc(omitted)} omitted` : ""}. View the PR on GitHub for full details.</p>` : "";
       const date = typeof snapshot.checked_at === "number" && Number.isFinite(snapshot.checked_at) && snapshot.checked_at > 0 ? new Date(snapshot.checked_at) : null;
       const observed = date && Number.isFinite(date.getTime()) ? `<p class="github-observed">Observed <time datetime="${date.toISOString()}">${esc(date.toLocaleString(undefined, {month:"short",day:"numeric",hour:"numeric",minute:"2-digit"}))}</time></p>` : "";
-      return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}</h4><p class="github-check-summary${(failureCount || conflicts) && !terminal && !changed ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${sourceErrors}${checks ? `<details><summary>${changed ? "Last recorded required checks" : "Required checks"}</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${summary}${observed}</article>`;
+      return `<article class="github-pr-status"><h4>${link(url, evidence.repository && evidence.number ? `${evidence.repository} #${evidence.number}` : "Pull request")}${helpers.pendingReviewLinks?.(url) || ""}</h4><p class="github-check-summary${(failureCount || conflicts) && !terminal && !changed ? " failed" : ""}">${esc(label)}</p>${snapshot.error ? `<p class="github-status-error" role="status">${esc(snapshot.error)}</p>` : ""}${sourceErrors}${checks ? `<details><summary>${changed ? "Last recorded required checks" : "Required checks"}</summary><ul class="github-checks">${checks}</ul></details>` : ""}${reviews}${summary}${observed}</article>`;
     }).join("");
     return `<section class="side-section github-watch-status" aria-label="GitHub status"><h3 class="side-heading">GitHub status${helpers.icon("pull-request")}</h3>${paused}${error}${entries}${omittedPrs}</section>`;
   }
@@ -128,11 +128,12 @@
     const content = dialog.querySelector("[data-watcher-content]"), error = dialog.querySelector("[data-error]");
     let active = null;
     const valid = ctx => active === ctx && dialog.open;
-    function renderWatcher(ctx, issue) {
+    function renderWatcher(ctx, result) {
+      const issue = result.issue, reviewLinks = url => HeyBossUI.pendingReviewLinks(url, ctx.project, ctx.host, result.pending_reviews);
       const description = describe(issue, {actorName, bossName:bossName()});
       const actor = current(issue).actor;
       const trace = actor ? '/agents/session#' + new URLSearchParams({project:ctx.project, issue:ctx.number, agent:actor}) : null;
-      const html = `<p class="assignment-detail">${esc(description.detail)}</p>${trace ? `<p><a href="${esc(trace)}">Open agent conversation</a></p>` : ""}${fetchOverview(issue)}${status(issue, {icon})}`;
+      const html = `<p class="assignment-detail">${esc(description.detail)}</p>${trace ? `<p><a href="${esc(trace)}">Open agent conversation</a></p>` : ""}${fetchOverview(issue, reviewLinks)}${status(issue, {icon,pendingReviewLinks:reviewLinks})}`;
       if (html === ctx.html) return;
       const detailKey = el => `${el.closest("article")?.querySelector("h4 a")?.href}:${el.querySelector("summary")?.textContent}`;
       const expanded = new Set([...content.querySelectorAll("details[open]")].map(detailKey));
@@ -161,7 +162,7 @@
           if (valid(ctx)) {
             // Force a render after a manually disabled button, even on an unchanged response.
             if (force) ctx.html = null;
-            renderWatcher(ctx, result.issue);
+            renderWatcher(ctx, result);
           }
         } catch (failure) {
           if (valid(ctx)) {

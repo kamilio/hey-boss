@@ -420,7 +420,16 @@ function date(at) {
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||fallback);
       return value;
     }
-  return {codeReviewStage: {
+  function pendingReviewLinks(url, project, host, pending) {
+    if (!pending) return "";
+    const match = /^https?:\/\/(github\.com\/[\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)(?:[/?#]|$)/i.exec(url);
+    if (!match || match[1].toLowerCase() !== project.toLowerCase()) return "";
+    return (pending[match[2]] || []).map((id, index, ids) => {
+      const query = new URLSearchParams({project, review:id, ...(host ? {host} : {})});
+      return ` <a class="issue-pr-link" href="/code-reviews#${esc(query.toString())}" aria-label="Open pending review for PR #${match[2]}${ids.length > 1 ? ", review " + (index + 1) : ""}">Pending review${ids.length > 1 ? " " + (index + 1) : ""}</a>`;
+    }).join("");
+  }
+  return {pendingReviewLinks, codeReviewStage: {
     draft: "Draft",
     submitted: "Awaiting approval",
     publishing: "Publication pending",

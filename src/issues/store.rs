@@ -1508,7 +1508,7 @@ impl Store {
         provenance::migrate(&db)?;
         super::commits::migrate(&db)?;
         if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='issue_code_reviews')",
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='pr_code_reviews_pending')",
             [],
             |r| r.get::<_, bool>(0),
         )? {
@@ -2782,6 +2782,18 @@ impl Store {
             .or_insert_with(|| project_settings["prs_enabled"].clone());
         result["drafts_enabled"] = project_settings["drafts_enabled"].clone();
         result["code_reviews_enabled"] = project_settings["code_reviews_enabled"].clone();
+        if project_settings["code_reviews_enabled"] == true
+            && matches!(
+                r.operation,
+                Operation::List { .. }
+                    | Operation::View { .. }
+                    | Operation::RefreshGithub { .. }
+                    | Operation::MergedPullRequests { .. }
+            )
+        {
+            result["pending_reviews"] =
+                super::code_reviews::pending_links(&tx, &response_project.id)?;
+        }
         result["artifacts_enabled"] = project_settings["artifacts_enabled"].clone();
         result["paused"] = project_settings["paused"].clone();
         result["pause_reason"] = project_settings["pause_reason"].clone();
