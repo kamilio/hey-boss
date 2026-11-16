@@ -48,6 +48,12 @@ textarea { width: 100%; padding: 10px 12px; resize: vertical; }
 .split-pair > div + div { border-left: 1px solid var(--line); }
 .split-view, .split .unified-view { display: none; }
 .split .split-view { display: block; }
+@supports (content-visibility: hidden) {
+  .file .unified-view, .file .split-view { display: block; contain: layout style; }
+  body:not(.split) .file .split-view, .split .file .unified-view {
+    content-visibility: hidden; visibility: hidden; height: 0; overflow: hidden;
+  }
+}
 .diff-row {
   display: grid; grid-template-columns: 32px repeat(2,max(4ch,calc(var(--git-line-number-digits,1) * 1ch + 14px))) 1fr;
   min-width: 100%; width: max-content; min-height: 26px;
