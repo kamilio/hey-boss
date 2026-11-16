@@ -42,6 +42,9 @@ struct Revision {
     pub archive: Option<archives::Manifest>,
 }
 
+const ARCHIVE_INDEXES: &str = "CREATE UNIQUE INDEX IF NOT EXISTS distributed_archive_complete ON distributed_archives(key,complete);
+CREATE INDEX IF NOT EXISTS issue_archive_keys ON issues(archive_key,project_id,number) WHERE archive_key IS NOT NULL;";
+
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS distributed_meta(
  id INTEGER PRIMARY KEY CHECK(id=1),origin TEXT NOT NULL,clock INTEGER NOT NULL DEFAULT 0,
@@ -151,6 +154,9 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
             ));
         }
         identity::upgrade_shadow(db)?;
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('issue_archive_keys','distributed_archive_complete')", [], |r| r.get::<_, i64>(0))? != 2 {
+            db.execute_batch(ARCHIVE_INDEXES)?;
+        }
         if !db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_failures') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_archive_supersessions') AND EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_projection_fence')",
             [],
@@ -183,6 +189,7 @@ pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
     }
     let tx = db.unchecked_transaction()?;
     tx.execute_batch(SCHEMA)?;
+    tx.execute_batch(ARCHIVE_INDEXES)?;
     tx.execute("INSERT OR IGNORE INTO distributed_meta(id,origin,controller) SELECT 1,?1,CASE WHEN role='agent' THEN NULL ELSE ?1 END FROM fleet_meta WHERE id=1", [origin])?;
     tx.execute("UPDATE distributed_meta SET legacy_cutoff=coalesce((SELECT max(seq) FROM fleet_outbox),0) WHERE id=1 AND controller IS NULL", [])?;
     let saved: String =

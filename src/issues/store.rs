@@ -1466,7 +1466,7 @@ impl Store {
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='fleet_worker_deadline_updated' AND type='trigger')", [], |r| r.get::<_, bool>(0))? {
             db.execute_batch(super::fleet::SCHEMA)?;
         }
-        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery','worker_control_status','issue_timeline_events','issue_timeline_comments','issue_timeline_comment_models')", [], |r| r.get::<_, i64>(0))? < 14 {
+        if db.query_row("SELECT count(*) FROM sqlite_master WHERE type='index' AND name IN ('issue_pr_canonical_url','worker_issue_history','worker_finished_history','issue_redirect','worker_project_queue','worker_legacy_runtime','issue_pr_origin','issue_pr_origin_url','issue_comment_resolution','issue_attempt_recovery','worker_control_status','issue_timeline_events','issue_timeline_comments','issue_timeline_comment_models','issue_retained_worktree_holds')", [], |r| r.get::<_, i64>(0))? < 15 {
             db.execute_batch("CREATE INDEX IF NOT EXISTS issue_pr_canonical_url ON issue_pull_requests(rtrim(url,'/'),project_id,issue_number);")?;
             db.execute_batch(workers::HISTORY_INDEX)?;
             db.execute_batch(workers::CONTROL_INDEX)?;
@@ -1477,6 +1477,7 @@ impl Store {
             db.execute_batch(COMMENT_RESOLUTION_INDEX)?;
             db.execute_batch(timeline::INDEXES)?;
             db.execute_batch(attempts::INDEX)?;
+            db.execute_batch("CREATE INDEX IF NOT EXISTS issue_retained_worktree_holds ON issues(attempt_hold) WHERE attempt_hold IS NOT NULL;")?;
             db.execute_batch(transfer::INDEX)?;
         }
         // An early updater persisted runtime state inside strict Settings JSON.
