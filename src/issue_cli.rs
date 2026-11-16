@@ -847,6 +847,9 @@ enum SettingsAction {
         code_reviews_enabled: bool,
         #[arg(long)]
         no_code_reviews: bool,
+        /// Make project config, prompts and job definitions available to Git.
+        #[arg(long)]
+        track_config: Option<bool>,
     },
 }
 #[derive(Subcommand)]
@@ -1078,6 +1081,7 @@ impl Options {
                     no_artifacts,
                     code_reviews_enabled,
                     no_code_reviews,
+                    track_config,
                 } => {
                     if boss_name.is_none()
                         && worker_model.is_none()
@@ -1095,6 +1099,7 @@ impl Options {
                         && !no_drafts
                         && !artifacts_enabled
                         && !code_reviews_enabled
+                        && track_config.is_none()
                         && !no_code_reviews
                         && !no_artifacts
                     {
@@ -1117,6 +1122,7 @@ impl Options {
                         subtask_scheduling: None,
                         chief_enabled: None,
                         chief_prompt: None,
+                        track_config: *track_config,
                         code_reviews_enabled: if *code_reviews_enabled {
                             Some(true)
                         } else if *no_code_reviews {
@@ -2218,6 +2224,7 @@ pub(crate) fn print_text(value: &Value) {
         for (key, label) in [
             ("drafts_enabled", "Drafts enabled"),
             ("artifacts_enabled", "Artifacts enabled"),
+            ("track_config", "Track project config in Git"),
             ("code_reviews_enabled", "Code Reviews enabled"),
         ] {
             if let Some(enabled) = value[key].as_bool() {

@@ -241,6 +241,7 @@ const ADDITIVE_COLUMNS: &[(&str, &str, &str)] = &[
     ),
     ("issues", "draft", "INTEGER NOT NULL DEFAULT 0"),
     ("issues", "plan", "TEXT"),
+    ("project_settings", "track_config", "INTEGER NOT NULL DEFAULT 0"),
     (
         "project_settings",
         "code_reviews_enabled",

@@ -47,6 +47,9 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     }
     migrate_worker_runs(db)?;
     migrate_fanout(db)?;
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_job_definitions')", [], |r|r.get::<_,bool>(0))? {
+        db.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_definitions ON scheduled_jobs(project_id,id) WHERE deleted_at IS NULL AND json_extract(snapshot,'$.definition.execution') IS NULL")?;
+    }
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='scheduled_job_calendar')",[],|r|r.get::<_,bool>(0))? {
         let tx=crate::database::Transaction::new_unchecked(db,TransactionBehavior::Immediate)?;
         tx.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_calendar ON scheduled_job_runs(project_id,scheduled_at,id); CREATE INDEX IF NOT EXISTS scheduled_job_calendar_job ON scheduled_job_runs(project_id,job_id,scheduled_at,id);")?;
@@ -427,7 +430,7 @@ impl Store {
         self.job_instructions(&snapshot)?;
         Ok(snapshot)
     }
-    fn job_root(&self) -> Result<PathBuf> {
+    pub(crate) fn job_root(&self) -> Result<PathBuf> {
         Ok(Path::new(
             self.db
                 .path()

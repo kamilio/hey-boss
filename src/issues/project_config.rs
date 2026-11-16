@@ -65,6 +65,7 @@ const FIELDS: &[&str] = &[
     "drafts_enabled",
     "artifacts_enabled",
     "code_reviews_enabled",
+    "track_config",
 ];
 
 pub(super) fn snapshot(settings: &Value) -> Value {
@@ -231,8 +232,11 @@ pub(crate) fn execute(
             let row: Option<(String,String)> = db.query_row("SELECT before_json,after_json FROM project_config_revisions WHERE project_id=?1 AND id=?2", params![project.id,revision], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
             let (before, after) =
                 row.ok_or_else(|| Error::new("not_found", "Configuration revision was not found"))?;
-            let before: Value = serde_json::from_str(&before)?;
-            let after: Value = serde_json::from_str(&after)?;
+            let mut before: Value = serde_json::from_str(&before)?;
+            let mut after: Value = serde_json::from_str(&after)?;
+            for snapshot in [&mut before, &mut after] {
+                if snapshot.get("track_config").is_none() { snapshot["track_config"] = json!(false); }
+            }
             let delta = changes(&before, &after);
             let inverse = Value::Object(
                 delta

@@ -16,6 +16,8 @@ use std::{
 };
 
 type Files = BTreeMap<String, Option<String>>;
+#[path = "config_jobs.rs"]
+mod jobs;
 
 fn read(path: &Path) -> Result<Option<String>> {
     let file = match OpenOptions::new()
@@ -39,9 +41,17 @@ fn read(path: &Path) -> Result<Option<String>> {
         )));
     }
     let mut text = String::new();
-    file.take(64_001).read_to_string(&mut text)?;
-    if text.len() > 64_000 {
-        return Err(Error::invalid(format!("{} exceeds 64 KB", path.display())));
+    let limit = if path.parent().is_some_and(|p| p.ends_with(".hey-boss/jobs")) {
+        super::BODY_LIMIT
+    } else {
+        64_000
+    };
+    file.take(limit as u64 + 1).read_to_string(&mut text)?;
+    if text.len() > limit {
+        return Err(Error::invalid(format!(
+            "{} exceeds {limit} bytes",
+            path.display()
+        )));
     }
     Ok(Some(text))
 }
@@ -83,7 +93,24 @@ fn write(path: &Path, text: &str) -> Result<()> {
     result
 }
 
-fn write_optional(path: &Path, text: Option<&str>) -> Result<()> {
+fn job_markdown(path: &Path) -> bool {
+    path.extension().is_some_and(|s| s == "md")
+        && path.parent().is_some_and(|p| p.ends_with(".hey-boss/jobs"))
+}
+fn journal_value(path: &Path) -> Result<Option<String>> {
+    let text = read(path)?;
+    Ok(if job_markdown(path) {
+        text.map(|s| crate::jobs::files::digest(&s))
+    } else {
+        text
+    })
+}
+fn write_optional(store: &Store, path: &Path, text: Option<&str>) -> Result<()> {
+    if let Some(digest) = text
+        && job_markdown(path)
+    {
+        return write(path, &crate::jobs::files::load(&store.job_root()?, digest)?);
+    }
     match text {
         Some(text) => write(path, text),
         None => {
@@ -92,6 +119,52 @@ fn write_optional(path: &Path, text: Option<&str>) -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn git_visibility(root: &Path, tracked: bool) -> Result<()> {
+    let out = std::process::Command::new("git")
+        .current_dir(root)
+        .args([
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "info/exclude",
+        ])
+        .output()?;
+    if !out.status.success() {
+        return Err(Error::invalid("Cannot locate Git's local exclude file"));
+    }
+    let path = PathBuf::from(
+        std::str::from_utf8(&out.stdout)
+            .map_err(|_| Error::invalid("Non-UTF8 Git path"))?
+            .trim_end_matches('\n'),
+    );
+    let parent = path
+        .parent()
+        .ok_or_else(|| Error::invalid("Invalid Git exclude path"))?;
+    directory(parent)?;
+    let old = read(&path)?.unwrap_or_default();
+    const START: &str = "# Hey Boss project config\n";
+    const END: &str = "# End Hey Boss project config\n";
+    let mut next = old.clone();
+    if let Some(pos) = next.find(START) {
+        let end = next[pos..]
+            .find(END)
+            .ok_or_else(|| Error::invalid("Incomplete Hey Boss block in Git excludes"))?;
+        next.replace_range(pos..pos + end + END.len(), "");
+    }
+    if !next.is_empty() && !next.ends_with('\n') {
+        next.push('\n');
+    }
+    next.push_str(START);
+    next.push_str(if tracked {
+        "!/.hey-boss/\n/.hey-boss/*\n!/.hey-boss/config.yaml\n!/.hey-boss/prompts/\n/.hey-boss/prompts/*\n!/.hey-boss/prompts/*.md\n!/.hey-boss/jobs/\n/.hey-boss/jobs/*\n!/.hey-boss/jobs/*.yaml\n!/.hey-boss/jobs/*.md\n"
+    } else { "/.hey-boss/\n" });
+    next.push_str(END);
+    if next != old {
+        write(&path, &next)?;
+    }
+    Ok(())
 }
 
 fn root(cwd: &Path) -> Result<PathBuf> {
@@ -154,6 +227,7 @@ fn materialize_identity(root: &Path, project: &Project) -> Result<PathBuf> {
         )?;
     }
     directory(&dir.join("prompts"))?;
+    directory(&dir.join("jobs"))?;
     Ok(dir)
 }
 
@@ -164,8 +238,11 @@ fn config(settings: &Value) -> Value {
     value
 }
 fn parse_config(text: &str) -> Result<Value> {
-    let value: Value =
+    let mut value: Value =
         serde_yaml_ng::from_str(text).map_err(|e| Error::invalid(format!("config.yaml: {e}")))?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.entry("track_config").or_insert(json!(false));
+    }
     let expected = config(&json!({}));
     let object = value
         .as_object()
@@ -183,7 +260,10 @@ fn desired(settings: &Value, existing: &Files) -> Result<Files> {
     let yaml = existing
         .get("config.yaml")
         .and_then(|v| v.as_ref())
-        .filter(|text| parse_config(text).ok().as_ref() == Some(&config))
+        .filter(|text| {
+            text.lines().any(|line| line.starts_with("track_config:"))
+                && parse_config(text).ok().as_ref() == Some(&config)
+        })
         .cloned()
         .unwrap_or(serde_yaml_ng::to_string(&config).map_err(|e| Error::invalid(e.to_string()))?);
     files.insert("config.yaml".into(), Some(yaml));
@@ -270,13 +350,13 @@ fn migrate_prompt_names(dir: &Path) -> Result<()> {
 fn observed(dir: &Path, template: &Files) -> Result<Files> {
     template
         .keys()
-        .map(|key| Ok((key.clone(), read(&working_path(dir, key))?)))
+        .map(|key| Ok((key.clone(), journal_value(&working_path(dir, key))?)))
         .collect()
 }
 fn edit(before: &Files, after: &Files) -> Result<Value> {
     let mut changes = serde_json::Map::new();
     for (key, text) in after {
-        if before.get(key) == Some(text) {
+        if key.starts_with("jobs/") || before.get(key) == Some(text) {
             continue;
         }
         if key == "config.yaml" {
@@ -372,8 +452,12 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         ));
     }
     migrate_prompt_names(&dir)?;
-    let template = desired(&settings, &Files::new())?;
-    let mut disk = observed(&dir, &template)?;
+    let mut template = desired(&settings, &Files::new())?;
+    let mut schedules = jobs::Jobs::load(&store, project)?;
+    schedules.files(&mut template)?;
+    let mut keys = template.clone();
+    jobs::discover(&dir, &mut keys)?;
+    let mut disk = observed(&dir, &keys)?;
     // Recreate an emptied working copy from the saved configuration, including
     // after an interrupted directory recreation.
     let saved = saved.filter(|_| disk.values().any(Option::is_some));
@@ -384,7 +468,7 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         None => {
             // Existing files are user edits. Missing files on initial setup are
             // populated from the database rather than resetting saved overrides.
-            let files: Files = template
+            let files: Files = keys
                 .iter()
                 .map(|(key, value)| {
                     (
@@ -405,11 +489,11 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         let previous: Files = serde_json::from_value(base["files"].clone())?;
         let pending: Files = serde_json::from_value(base["pending"].clone())?;
         for (key, text) in &pending {
-            if template.contains_key(key)
+            if keys.contains_key(key)
                 && disk.get(key) == previous.get(key)
                 && disk.get(key) != Some(text)
             {
-                write_optional(&working_path(&dir, key), text.as_deref())?;
+                write_optional(&store, &working_path(&dir, key), text.as_deref())?;
                 disk.insert(key.clone(), text.clone());
             }
         }
@@ -417,6 +501,9 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         base.as_object_mut().unwrap().remove("pending");
     }
     let previous: Files = serde_json::from_value(base["files"].clone())?;
+    let jobs_changed = schedules.apply(
+        &mut store, project, actor, &dir, &previous, &disk, &template,
+    )?;
     let changes = edit(&previous, &disk)?;
     let changed = !changes.as_object().unwrap().is_empty();
     if changed {
@@ -437,27 +524,55 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
         store.execute(&req)?;
         settings = store.execute(&request(project, actor, Operation::ProjectSettings))?;
     }
-    let next = desired(&settings, &disk)?;
+    let mut next = desired(&settings, &disk)?;
+    if jobs_changed {
+        schedules = jobs::Jobs::load(&store, project)?;
+        schedules.files(&mut next)?;
+    } else {
+        next.extend(
+            template
+                .into_iter()
+                .filter(|(key, _)| key.starts_with("jobs/")),
+        );
+    }
+    for (key, text) in &disk {
+        if key.starts_with("jobs/") && !next.contains_key(key) && text.is_some() {
+            if previous.get(key) != Some(text) {
+                return Err(Error::conflict(format!(
+                    "No job owns {key}; its contents were preserved"
+                )));
+            }
+            next.insert(key.clone(), None);
+        }
+    }
     let revision: Option<String> = store.db.query_row("SELECT id FROM project_config_revisions WHERE project_id=?1 ORDER BY sequence DESC,id DESC LIMIT 1", [&project.id], |r| r.get(0)).optional()?;
-    let pending = json!({"files":disk,"pending":next,"revision":revision});
+    let tracking = settings["track_config"] == true;
+    if root.join(".git").exists() && base["tracking"] != json!(tracking) {
+        git_visibility(root, tracking)?;
+    }
+    let pending = json!({"files":disk,"pending":next,"revision":revision,"tracking":tracking});
     let root_string = root.to_string_lossy();
     if disk != next
         || base["revision"] != json!(revision)
         || initial
         || recovering
         || base["files"] != json!(next)
+        || base["tracking"] != json!(tracking)
     {
         store.db.execute("INSERT INTO project_config_checkouts(path,project_id,base,updated_at) VALUES(?1,?2,?3,?4) ON CONFLICT(path) DO UPDATE SET base=excluded.base,error=NULL,updated_at=excluded.updated_at", params![root_string,project.id,pending.to_string(),worker::now()])?;
         for (key, text) in &next {
-            if disk.get(key) != Some(text) && read(&working_path(&dir, key))? == disk[key] {
-                write_optional(&working_path(&dir, key), text.as_deref())?;
+            if disk.get(key) != Some(text)
+                && journal_value(&working_path(&dir, key))?.as_ref()
+                    == disk.get(key).and_then(Option::as_ref)
+            {
+                write_optional(&store, &working_path(&dir, key), text.as_deref())?;
             }
         }
         store.db.execute(
             "UPDATE project_config_checkouts SET base=?2,error=NULL WHERE path=?1",
             params![
                 root_string,
-                json!({"files":next,"revision":revision}).to_string()
+                json!({"files":next,"revision":revision,"tracking":tracking}).to_string()
             ],
         )?;
     } else if had_error {
@@ -466,7 +581,9 @@ fn sync_root(path: &Path, root: &Path, project: &Project) -> Result<Value> {
             [&*root_string],
         )?;
     }
-    Ok(json!({"ok":true,"project":project,"directory":dir,"revision":revision,"changed":changed}))
+    Ok(
+        json!({"ok":true,"project":project,"directory":dir,"revision":revision,"changed":changed || jobs_changed}),
+    )
 }
 
 fn automatic_copy(configs: &Path, project: &Project) -> PathBuf {
@@ -496,7 +613,7 @@ pub(super) fn prompt_file(path: &Path, project: &Project, key: &str) -> Result<P
     Ok(file)
 }
 
-pub(crate) fn reconcile(path: &Path) -> Result<()> {
+pub(crate) fn reconcile(path: &Path, checkouts: &Value) -> Result<()> {
     let store = Store::open(path)?;
     let mut rows = store.db.prepare("SELECT c.path,p.id,p.name,c.error FROM project_config_checkouts c JOIN projects p ON p.id=c.project_id")?
         .query_map([], |r| Ok((PathBuf::from(r.get::<_,String>(0)?), (Project {id:r.get(1)?,name:r.get(2)?},r.get::<_,Option<String>>(3)?))))?.collect::<rusqlite::Result<BTreeMap<_,_>>>()?;
@@ -511,6 +628,15 @@ pub(crate) fn reconcile(path: &Path) -> Result<()> {
         root.parent() != Some(&configs) || visible.contains(&project.id)
     });
     for project in projects.into_iter().filter(|p| visible.contains(&p.id)) {
+        if let Some(path) = checkouts[&project.id]["path"].as_str() {
+            let checkout = PathBuf::from(path);
+            if !rows.contains_key(&checkout)
+                && checkout.join(".git").exists()
+                && worker::checkout_matches_project(&checkout, &project.id)?
+            {
+                rows.insert(checkout, (project.clone(), None));
+            }
+        }
         let root = automatic_copy(&configs, &project);
         rows.entry(root).or_insert((project, None));
     }
@@ -564,7 +690,7 @@ mod tests {
                 params![legacy.id, legacy.name],
             )
             .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let configs = root.join("project-configs");
         assert!(
             !configs.exists(),
@@ -577,7 +703,7 @@ mod tests {
         fs::create_dir(&old_copy).unwrap();
         sync_root(&path, &old_copy, &legacy).unwrap();
         fs::remove_dir_all(&old_copy).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert!(!old_copy.exists());
 
         let project = Project {
@@ -590,7 +716,7 @@ mod tests {
         )
         .unwrap();
         store.execute(&request(&project, &actor, init)).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let copies = fs::read_dir(&configs)
             .unwrap()
             .map(|e| e.unwrap().path())
@@ -614,7 +740,7 @@ mod tests {
                 .replace("prs_enabled: false", "prs_enabled: true"),
         )
         .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert!(
             !copy.exists(),
             "Hidden automatic copies must not be recreated"
@@ -629,7 +755,7 @@ mod tests {
         store
             .execute(&request(&project, &actor, Operation::RestoreProject))
             .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert!(
             fs::read_to_string(copy.join(".hey-boss/config.yaml"))
                 .unwrap()
@@ -656,7 +782,7 @@ mod tests {
             serde_json::from_value(json!({"action":"project_init","settings":{"prs_enabled":false,"worktree_enabled":false,"if_version":0}})).unwrap()
         };
         store.execute(&request(&project, &actor, init())).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let directories = fs::read_dir(root.join("project-configs"))
             .unwrap()
             .map(|entry| entry.unwrap().path())
@@ -693,7 +819,7 @@ mod tests {
             original.replace("prs_enabled: false", "prs_enabled: true"),
         )
         .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert_eq!(
             store
                 .execute(&request(&project, &actor, Operation::ProjectSettings))
@@ -704,7 +830,7 @@ mod tests {
             serde_json::from_value(json!({"action":"configure_project","worktree_enabled":true}))
                 .unwrap();
         store.execute(&request(&project, &actor, change)).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert!(
             fs::read_to_string(&yaml)
                 .unwrap()
@@ -718,7 +844,7 @@ mod tests {
             })
             .unwrap();
         fs::remove_dir_all(copy).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert_eq!(fs::read_to_string(&yaml).unwrap(), saved);
         assert_eq!(
             store
@@ -737,7 +863,7 @@ mod tests {
             name: "Second".into(),
         };
         store.execute(&request(&second, &actor, init())).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert_eq!(
             fs::read_dir(root.join("project-configs")).unwrap().count(),
             2
@@ -754,12 +880,12 @@ mod tests {
             1
         );
         fs::write(&yaml, original).unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let before: i64 = store
             .db
             .query_row("PRAGMA data_version", [], |r| r.get(0))
             .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert_eq!(
             store
                 .db
@@ -790,7 +916,7 @@ mod tests {
         let yaml = root.join(".hey-boss/config.yaml");
         let original = fs::read_to_string(&yaml).unwrap();
         fs::write(&yaml, "invalid: [").unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let error: Option<String> = store
             .db
             .query_row(
@@ -805,7 +931,7 @@ mod tests {
             original.replace("prs_enabled: false", "prs_enabled: true"),
         )
         .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         let settings = store
             .execute(&request(&project, &actor, Operation::ProjectSettings))
             .unwrap();
@@ -825,7 +951,7 @@ mod tests {
             .db
             .query_row("PRAGMA data_version", [], |r| r.get(0))
             .unwrap();
-        reconcile(&path).unwrap();
+        reconcile(&path, &Value::Null).unwrap();
         assert_eq!(
             store
                 .db

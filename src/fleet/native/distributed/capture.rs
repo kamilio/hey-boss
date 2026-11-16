@@ -119,7 +119,7 @@ pub(super) fn upgrade_ordering(db: &Connection) -> Result<()> {
 
 pub(super) fn upgrade_worker_execution(db: &Connection) -> Result<()> {
     let current = |db: &Connection| {
-        db.query_row("SELECT count(*)=3 FROM sqlite_master WHERE type='trigger' AND name IN ('distributed_capture_project_settings_INSERT','distributed_capture_project_settings_UPDATE','distributed_capture_project_settings_DELETE') AND instr(sql,'''worker_execution''')>0", [], |r| r.get::<_, bool>(0))
+        db.query_row("SELECT count(*)=3 FROM sqlite_master WHERE type='trigger' AND name IN ('distributed_capture_project_settings_INSERT','distributed_capture_project_settings_UPDATE','distributed_capture_project_settings_DELETE') AND instr(sql,'''worker_execution''')>0 AND instr(sql,'''track_config''')>0", [], |r| r.get::<_, bool>(0))
     };
     if current(db)? {
         return Ok(());
@@ -135,7 +135,7 @@ pub(super) fn upgrade_worker_execution(db: &Connection) -> Result<()> {
         ))?;
     }
     install(&tx)?;
-    // Repair choices saved before the trigger upgrade. Publish only this field,
+    // Repair choices saved before the trigger upgrade. Publish only the selected fields,
     // preserving concurrent prompt edits and deletion. Unconfigured peers must
     // not publish their migration default over another machine's saved choice.
     let rows = replica::rows(
@@ -143,7 +143,8 @@ pub(super) fn upgrade_worker_execution(db: &Connection) -> Result<()> {
         "SELECT project_id,worker_execution FROM project_settings s WHERE worker_execution<>'{}' AND NOT EXISTS(SELECT 1 FROM distributed_fields WHERE table_name='project_settings' AND entity=json_object('project_id',s.project_id) AND field='worker_execution')",
         &[],
     )?;
-    for row in rows {
+    let tracked = replica::rows(&tx, "SELECT project_id,track_config FROM project_settings s WHERE track_config=1 AND NOT EXISTS(SELECT 1 FROM distributed_fields WHERE table_name='project_settings' AND entity=json_object('project_id',s.project_id) AND field='track_config')", &[])?;
+    for row in rows.into_iter().chain(tracked) {
         let before = serde_json::json!({"project_id": row["project_id"]});
         tx.execute("UPDATE distributed_meta SET clock=clock+1 WHERE id=1", [])?;
         tx.execute("INSERT INTO distributed_outbox SELECT clock,'project_settings',?1,?2 FROM distributed_meta WHERE id=1", [before.to_string(), row.to_string()])?;

@@ -13,7 +13,7 @@ pub struct Options {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Create or reconcile .hey-boss/config.yaml and prompts/*.md; enable automatic sync.
+    /// Reconcile project config, prompts and scheduled jobs; enable automatic sync.
     Sync,
     /// Show configuration activity, newest first.
     Log {

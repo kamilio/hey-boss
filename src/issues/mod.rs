@@ -429,6 +429,8 @@ pub enum Operation {
         artifacts_enabled: Option<bool>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         code_reviews_enabled: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        track_config: Option<bool>,
         if_version: Option<i64>,
     },
     PullRequests {

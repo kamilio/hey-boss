@@ -512,7 +512,9 @@ pub(in crate::fleet::native) fn start(ctx: Context, controller: bool) {
     let config = ctx.clone();
     std::thread::spawn(move || {
         while !config.stopped() {
-            if let Err(error) = crate::issues::config_files::reconcile(&config.path) {
+            if let Err(error) = super::super::projects::resolved(&config).and_then(|checkouts| {
+                crate::issues::config_files::reconcile(&config.path, &checkouts).map_err(Into::into)
+            }) {
                 eprintln!("Project configuration sync: {error}");
             }
             config.wait(Duration::from_secs(2));
