@@ -5,6 +5,17 @@ import XCTest
 
 final class T3ToolsTests: XCTestCase {
     @MainActor
+    func testLiveVisibleThreadTarget() throws {
+        guard ProcessInfo.processInfo.environment["HEY_TALK_T3_WINDOW_TEST"] == "1" else { throw XCTSkip("Requires a visible T3 thread") }
+        _ = NSApplication.shared
+        let app = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.t3tools.t3code").first)
+        let thread = try XCTUnwrap(VisibleT3Thread.read(app))
+        XCTAssertEqual(thread.isCurrent(in: app), FocusedInput.keyboardApp == app)
+        let other = thread.link.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        XCTAssertFalse(VisibleT3Thread(window: thread.window, link: other).isCurrent(in: app))
+    }
+
+    @MainActor
     func testLiveThreadSwitchKeepsVoiceConversation() async throws {
         guard ProcessInfo.processInfo.environment["HEY_TALK_T3_VOICE_TEST"] == "1" else { throw XCTSkip("Requires a running voice conversation and a focused T3 composer") }
         func checkVoice() throws {

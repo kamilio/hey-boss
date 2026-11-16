@@ -1,5 +1,23 @@
 import AppKit
 
+struct VisibleT3Thread {
+    let window: AXUIElement
+    let link: URL
+
+    static func read(_ app: NSRunningApplication?) -> Self? {
+        guard let app, app.bundleIdentifier == "com.t3tools.t3code",
+              let window = ConversationContext.focusedWindow(app),
+              let page = BrowserPage.page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.1),
+              let link = FocusedInput.threadLink(page.url.absoluteString) else { return nil }
+        return Self(window: window, link: link)
+    }
+
+    func isCurrent(in app: NSRunningApplication?) -> Bool {
+        guard let app, FocusedInput.keyboardApp == app, let current = Self.read(app) else { return false }
+        return CFEqual(window, current.window) && link == current.link
+    }
+}
+
 struct T3ThreadRow {
     let title: String
     let label: String

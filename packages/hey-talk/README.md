@@ -97,7 +97,7 @@ reads the current sidebar first and resolves the title among positions 1–9. If
 After a T3 action, a check slides out to the left and the pill glows softly green for three seconds. A failed thread action shows a red glow, a cross, and a short explanation for five seconds. Paste, clear, and sidebar lookups stay quiet.
 Catch Up, rename, pin/unpin, and settle use [hey-t3](../hey-t3/README.md). Remote threads use the machine connections already open in Hey Boss.
 Named navigation uses T3’s deep links; numbered navigation uses its ⌘1–9 shortcuts.
-These tools are grouped under `t3_` and available only in a T3 thread composer. The model receives the destination app's
+Pin, unpin, rename, and settle also work while reading a T3 thread with the message field unfocused. Navigation and new-thread commands require the composer. The model receives the destination app's
 name and bundle identifier, plus the current T3 thread title, refreshed after navigation. Auto Dictation resumes listening
 after switching, pinning, unpinning, or settling.
 In the Slack desktop app, say “open the engineering channel”, “open my chat with Jane Smith and Lee Park”, or “list Slack users”. Slack opens the matching conversation, including group DMs, without posting a message. Ambiguous names need a full name or handle. The people directory can also filter by a spoken name. These tools reuse the local login from `wire slack login`; the directory stays on this Mac. To keep ordinary Slack dictation manual, use `hey-talk enter-exceptions add com.tinyspeck.slackmacgap`.

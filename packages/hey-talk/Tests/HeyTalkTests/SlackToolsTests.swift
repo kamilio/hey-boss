@@ -4,11 +4,15 @@ import XCTest
 
 final class SlackToolsTests: XCTestCase {
     func testOnlySelectedPackageIsOffered() throws {
-        for package: ToolPackage? in [.slack, .t3, nil] {
+        for package: ToolPackage? in [.slack, .t3, .visibleT3Thread, nil] {
             let request = try Correction.request(text: "list users", vocabulary: [], package: package)
             let json = try XCTUnwrap(JSONSerialization.jsonObject(with: request.httpBody!) as? [String: Any])
             let names = (json["tools"] as! [[String: Any]]).compactMap { $0["name"] as? String }
             XCTAssertEqual(names.filter { $0.hasPrefix("slack_") }, package == .slack ? ["slack_list_users", "slack_open_chat", "slack_open_channel"] : [])
+            if package == .visibleT3Thread {
+                XCTAssertEqual(Set(names.filter { $0.hasPrefix("t3_") }), ["t3_pin_thread", "t3_unpin_thread", "t3_rename_thread", "t3_settle_thread"])
+                XCTAssertThrowsError(try package?.action("t3_next_thread", values: [:]))
+            }
             XCTAssertEqual(names.contains("t3_new_thread"), package == .t3)
         }
     }

@@ -63,6 +63,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var targetName: String?
     private typealias ContextSnapshot = Task<(text: String?, milliseconds: Double), Never>
     private var recordingContext: ContextSnapshot?
+    private var visibleThread: VisibleT3Thread?
     private var startingInput: FocusedInput?
     private var waitingPaste: (timer: Timer, text: String)? { didSet { oldValue?.timer.invalidate() } }
     private var paste = true
@@ -897,6 +898,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             startingInput = focusedInput ?? FocusedInput.read(app: target, forAuto: false)
             if paste && returnToField { startingInput?.rememberCmuxTab() }
         } else { startingInput = nil }
+        visibleThread = paste && correctionSettings.enabled && startingInput?.canUseThreadActions != true ? VisibleT3Thread.read(target) : nil
         if paste {
             Paste.log.notice("Capture: target=\(self.target?.bundleIdentifier ?? "none", privacy: .public), field=\(self.startingInput != nil), return=\(self.returnToField)")
         }
@@ -929,13 +931,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if self.correctionSettings.enabled, let target = self.target {
             let pid = target.processIdentifier
             let isT3 = target.bundleIdentifier == "com.t3tools.t3code"
-            self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput] in
+            self.recordingContext = Task.detached(priority: .userInitiated) { [startingInput = self.startingInput, visibleThread = self.visibleThread] in
                 guard !Task.isCancelled, FocusedInput.keyboardApp?.processIdentifier == pid,
-                      !isT3 || startingInput?.isFocused() == true else { return (nil, 0) }
+                      !isT3 || startingInput?.isFocused() == true || visibleThread?.isCurrent(in: target) == true else { return (nil, 0) }
                 let started = ProcessInfo.processInfo.systemUptime
                 let text = AppContext.capture(pid: pid)
                 let elapsed = (ProcessInfo.processInfo.systemUptime - started) * 1000
-                guard !isT3 || startingInput?.isFocused() == true else { return (nil, elapsed) }
+                guard !isT3 || startingInput?.isFocused() == true || visibleThread?.isCurrent(in: target) == true else { return (nil, elapsed) }
                 return (text, elapsed)
             }
         }
@@ -1022,6 +1024,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         var id = generation
         var started = ProcessInfo.processInfo.systemUptime
         let target = self.target, host = recordingHost, automatic = autoTarget
+        let visibleThread = self.visibleThread
         var field = automatic ?? startingInput
         let needsField = target?.bundleIdentifier == "com.t3tools.t3code" || returnToField || automatic != nil
         let current = { self.session.generation == id && self.session.phase == .processing }
@@ -1130,7 +1133,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     return
                 }
                 Paste.deliver(action, target: target, originalField: originalField,
-                              shouldPressEnter: allowsSubmit,
+                              visibleThread: visibleThread, shouldPressEnter: allowsSubmit,
                               returnToField: self.returnToField ? originalField : nil, needsField: needsField,
                               onWait: lastDelivery == nil && (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = (timer, action.text)
@@ -1161,7 +1164,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                                }
                                return app
                            },
-                           package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : slackTeam != nil ? .slack : nil, canClear: paste && field != nil, canAddVocabularyTerm: paste,
+                           package: !paste || transcriptionSource != "microphone" ? nil : field?.canUseThreadActions == true ? .t3 : visibleThread != nil ? .visibleT3Thread : slackTeam != nil ? .slack : nil, canClear: paste && field != nil, canAddVocabularyTerm: paste,
                            recent: transcriptionSource == "microphone" ? previousCommands : [],
                            perform: paste ? perform : nil) { result in
             guard current() else { return }

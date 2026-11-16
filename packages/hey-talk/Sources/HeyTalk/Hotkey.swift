@@ -123,11 +123,17 @@ enum Paste {
         retry.invalidate()
         return true
     }
-    static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
+    static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, visibleThread: VisibleT3Thread? = nil, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         needsField: Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil, listedThreads: [T3ThreadRow]? = nil,
                         completion: @escaping (String, PasteBlockReason?) -> Void) {
+        let windowThread: VisibleT3Thread?
+        switch action {
+        case .pinThread, .settleThread, .rename: windowThread = visibleThread
+        default: windowThread = nil
+        }
         var previousState: String?
+
         func check() -> PasteBlockReason? {
             let front = FocusedInput.keyboardApp
             var reason = PasteBlockReason.check(trusted: AXIsProcessTrusted(), targetAlive: target.map { !$0.isTerminated } ?? false,
@@ -198,13 +204,15 @@ enum Paste {
                 return
             case .pinThread, .settleThread, .rename:
                 Task { @MainActor in
-                    guard isCurrent(), check() == nil, let field = originalField,
-                          let id = field.t3ThreadID, let environment = field.t3EnvironmentID else {
+                    func stillOnThread() -> Bool {
+                        isCurrent() && (windowThread?.isCurrent(in: target) ?? (originalField?.isFocused() == true))
+                    }
+                    guard stillOnThread(), let link = windowThread?.link ?? originalField?.document.flatMap(FocusedInput.threadLink) else {
                         completion("history", .t3Unavailable); return
                     }
                     do {
-                        try await T3Server.shared.apply(action, thread: id, environment: environment, isCurrent: { isCurrent() && field.isFocused() })
-                        if case .rename(let title) = action {
+                        try await T3Server.shared.apply(action, thread: link.lastPathComponent, environment: link.pathComponents[1], isCurrent: stillOnThread)
+                        if case .rename(let title) = action, windowThread == nil, let field = originalField {
                             var renamed: FocusedInput?
                             for _ in 0..<40 {
                                 guard isCurrent(), field.app.isActive else { break }
@@ -277,7 +285,7 @@ enum Paste {
             RunLoop.main.add(timer, forMode: .common)
             onWait(timer)
         }
-        if let onWait, check() == .focusChanged {
+        if windowThread == nil, let onWait, check() == .focusChanged {
             retry(onWait, restoring: returnToField)
             returnToField?.restoreFocus()
         } else { paste() }
