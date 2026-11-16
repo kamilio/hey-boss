@@ -33,6 +33,7 @@ pub struct Comment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
+    History,
     List {
         archived: Option<bool>,
         #[serde(default)]
@@ -94,7 +95,7 @@ impl Operation {
     pub fn writes(&self) -> bool {
         !matches!(
             self,
-            Self::List { .. } | Self::View { .. } | Self::ForPr { .. }
+            Self::History | Self::List { .. } | Self::View { .. } | Self::ForPr { .. }
         )
     }
 }
@@ -138,6 +139,17 @@ fn valid_text(s: &str) -> bool {
 pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) -> Result<Value> {
     if !matches!(op, Operation::Unlink { .. }) && !db.query_row("SELECT coalesce((SELECT code_reviews_enabled FROM project_settings WHERE project_id=?1),0)",[&p.id],|r|r.get::<_,bool>(0))?{return Err(Error::invalid("Code Reviews is disabled for this project"))}
     let id = match op {
+        Operation::History => {
+            let comments = db.query_collect(
+                "SELECT number,verdict,body FROM pr_code_reviews
+                 WHERE project_id=?1 AND stage NOT IN ('draft','discarded')
+                   AND trim(body, char(9,10,11,12,13,32)) != ''
+                 ORDER BY updated_at DESC,id DESC LIMIT 20",
+                [&p.id],
+                |r| Ok::<_,rusqlite::Error>(json!({"number":r.get::<_,i64>(0)?,"verdict":r.get::<_,String>(1)?,"body":r.get::<_,String>(2)?})),
+            )?;
+            return Ok(json!({"ok":true,"verdict_comments":comments}));
+        }
         Operation::List { archived, offset } => {
             let filter = match archived {
                 Some(true) => "stage IN ('published','outdated','discarded')",

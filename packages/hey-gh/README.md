@@ -1071,6 +1071,8 @@ PR review submissions and inline review comments for an enabled GitHub repositor
 go to its private review queue. Use the usual `gh pr review` and `gh api`
 commands; no checkout, review-start command, or agent-specific flag is required.
 PR conversation and issue comments keep their normal behavior.
+Use `hey-boss issue review history` in the checkout to read the project's last
+20 verdict comments before writing another.
 
 Open **Code Reviews** in the project's navigation to edit a summary or inline
 comment and publish the submitted review with your personal GitHub login.

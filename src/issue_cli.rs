@@ -279,10 +279,10 @@ enum Action {
     CodeReview,
     #[command(hide = true)]
     CodeReviewProjects,
-    /// Link a saved code review to an issue, or remove its link.
+    /// Read recent verdict comments or link a saved code review to an issue.
     Review {
         #[command(subcommand)]
-        command: ReviewLink,
+        command: ReviewAction,
     },
     /// Attach, list, or remove first-class pull request links.
     Pr {
@@ -763,9 +763,17 @@ enum CommitAction {
 }
 
 #[derive(Subcommand)]
-enum ReviewLink {
-    Add { number: i64, id: i64 },
-    Remove { number: i64, id: i64 },
+enum ReviewAction {
+    /// Show the project's last 20 nonempty verdict comments, newest first.
+    History,
+    Add {
+        number: i64,
+        id: i64,
+    },
+    Remove {
+        number: i64,
+        id: i64,
+    },
 }
 #[derive(Subcommand)]
 enum PrAction {
@@ -1029,14 +1037,17 @@ impl Options {
             },
             Action::Review { command } => Operation::CodeReview {
                 operation: match command {
-                    ReviewLink::Add { number, id } => issues::code_reviews::Operation::Link {
+                    ReviewAction::History => issues::code_reviews::Operation::History,
+                    ReviewAction::Add { number, id } => issues::code_reviews::Operation::Link {
                         issue: *number,
                         id: *id,
                     },
-                    ReviewLink::Remove { number, id } => issues::code_reviews::Operation::Unlink {
-                        issue: *number,
-                        id: *id,
-                    },
+                    ReviewAction::Remove { number, id } => {
+                        issues::code_reviews::Operation::Unlink {
+                            issue: *number,
+                            id: *id,
+                        }
+                    }
                 },
             },
             Action::CodeReview => Operation::CodeReview {
@@ -1900,6 +1911,20 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if let Some(history) = value["verdict_comments"].as_array() {
+        if history.is_empty() {
+            println!("No verdict comments yet.");
+        }
+        for entry in history {
+            println!(
+                "PR #{} · {}\n{}\n",
+                entry["number"],
+                text(&entry["verdict"]),
+                text(&entry["body"])
+            );
+        }
+        return;
+    }
     if let Some(patch) = value["patch"].as_str() {
         print!("{patch}");
         return;
