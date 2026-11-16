@@ -14,6 +14,9 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_MANAGEMENT"] {
+        app.finishLaunching(); auditChatManagement(root); return
+    }
     if #available(macOS 26, *), let folder = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SELECTION_CHAT"] {
         let url = URL(fileURLWithPath: folder).appendingPathComponent("current.json")
         let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
@@ -4770,6 +4773,80 @@ func auditDictationHandoff(_ root: String) {
     precondition(chat.rows.map(\.stringValue) == history && !chat.resumeSession(speech))
     chat.stop("Done")
     print("PASS: same chat resumed listening and mid-passage playback at frame \(before); stale resumes and paused input ignored")
+}
+
+@available(macOS 26, *)
+func auditChatManagement(_ path: String) {
+    typealias Object = [String:Any]
+    let root = URL(fileURLWithPath: path), index = root.appendingPathComponent("current.json")
+    let ids = (0..<65).map { _ in UUID().uuidString }
+    let chats: [Object] = ids.enumerated().map { ["id":$0.element,"title":"Chat \($0.offset)","workspace":"GPT-6.1 Sol","updated":0,"generatedTitle":true] }
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    func write(_ object: Any, _ name: String) {
+        try! JSONSerialization.data(withJSONObject: object).write(to: root.appendingPathComponent(name))
+    }
+    write(["chats":chats,"selected":ids[0]], "current.json")
+    write(["messages":(0..<75).map { ["speaker":"You","text":"Message \($0)"] }], ids[0]+".json")
+    var chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+    func request(_ command: String, _ fields: Object = [:]) -> [Object] {
+        var body = fields; body["command"] = command; body["sync"] = true
+        let req = try! JSONDecoder().decode(Request.self, from: JSONSerialization.data(withJSONObject: body))
+        var pair = [Int32](repeating: 0, count: 2)
+        precondition(socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0)
+        let client = FileHandle(fileDescriptor: pair[0], closeOnDealloc: true)
+        shutdown(pair[0], SHUT_WR)
+        chat.handleChat(req, Reply(pair[1]))
+        let deadline = Date().addingTimeInterval(120)
+        var bytes = Data()
+        while Date() < deadline {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.01))
+            var descriptor = pollfd(fd: pair[0], events: Int16(POLLIN), revents: 0)
+            guard poll(&descriptor, 1, 0) > 0 else { continue }
+            let chunk = client.availableData
+            if chunk.isEmpty { return bytes.split(separator: 10).map { try! JSONSerialization.jsonObject(with: $0) as! Object } }
+            bytes.append(chunk)
+        }
+        fatalError("No terminal event: " + String(decoding: bytes, as: UTF8.self))
+    }
+    func edit(_ command: String, _ fields: Object) {
+        let response = request(command, fields).first!
+        precondition(response["status"] as? String == "ok", String(describing: response))
+    }
+    precondition(chat.historyList.numberOfRows == 30 && chat.rows.count == 30 && chat.rows.first?.stringValue == "Message 45")
+    while let earlier = chat.turns.arrangedSubviews.first as? NSButton {
+        earlier.performClick(nil)
+    }
+    precondition(chat.rows.map(\.stringValue) == (0..<75).map { "Message \($0)" } && chat.conversationHistory.count == 75)
+    var found: [String] = [], cursor: String?
+    repeat {
+        let page = request("chat_list", cursor.map { ["chat_id":$0] } ?? [:]).first!
+        let rows = page["chats"] as! [Object]; precondition(rows.count <= 30)
+        found += rows.map { $0["id"] as! String }; cursor = page["next"] as? String
+    } while cursor != nil
+    precondition(found == ids)
+    edit("chat_rename", ["chat_id":ids[0],"title":"New title"])
+    edit("chat_archive", ["chat_id":ids[0]])
+    chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+    let archived = request("chat_list", ["archived":true]).first!["chats"] as! [Object]
+    precondition(archived.count == 1 && archived[0]["title"] as? String == "New title" && chat.rows.isEmpty)
+    edit("chat_restore", ["chat_id":ids[0]])
+    for ext in ["agent.json", "agent.jsonl"] { write(["test":true], ids[0]+"."+ext) }
+    for folder in ["Recordings", "Media"] { try! FileManager.default.createDirectory(at: root.appending(path: folder+"/"+ids[0]), withIntermediateDirectories:true) }
+    edit("chat_delete", ["chat_id":ids[0]])
+    for entry in [ids[0]+".json",ids[0]+".jsonl",ids[0]+".agent.json",ids[0]+".agent.jsonl","Recordings/"+ids[0],"Media/"+ids[0]] {
+        precondition(!FileManager.default.fileExists(atPath: root.appending(path: entry).path))
+    }
+    precondition(request("chat_delete", ["chat_id":ids[0]]).first!["status"] as? String == "error")
+    chat.input.stringValue = "Unsent draft"
+    precondition(request("chat_exec", ["question":"Test"]).first!["type"] as? String == "turn.failed" && chat.input.stringValue == "Unsent draft")
+    chat.input.stringValue = ""
+    let fixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent().appending(path: "tests/fixtures/conversation_resume.md")
+    let questions = try! String(contentsOf: fixture, encoding: .utf8).components(separatedBy: "\n\n")
+    let first = request("chat_exec", ["question":questions[0]])
+    guard let id = first.first?["thread_id"] as? String, first.last?["type"] as? String == "turn.completed" else { fatalError("Sol turn failed: \(first.last ?? [:])") }
+    let second = request("chat_exec", ["question":questions[1],"chat_id":id])
+    precondition(second.last?["type"] as? String == "turn.completed" && chat.rows.last?.stringValue.localizedCaseInsensitiveContains("pineapple") == true, String(describing: second.last))
+    print("PASS 65 chats, 75 messages, rename/archive/restore/delete, draft protection, live Sol exec and resume")
 }
 
 @available(macOS 26, *)

@@ -7,6 +7,7 @@ mod broker;
 mod cli_request;
 mod companion;
 mod config_cli;
+mod conversation_cli;
 mod event_cli;
 mod exec_cli;
 mod health_cli;
@@ -193,7 +194,7 @@ enum Command {
         after_help = "Add named commands to utils in ~/.hey-boss/fleet.yaml on the supervisor:\n  pbcopy: {command: pbcopy, destination: macbook}\nRun: hey-boss utils NAME [ARGS...]\nArguments are forwarded unchanged, including --help. Omit destination to run here."
     )]
     Utils(utils_cli::Action),
-    /// List agents, open their overview, configure access, and control threads.
+    /// Run conversations, manage chats, or inspect and configure agents.
     #[command(subcommand)]
     Agent(AgentAction),
     /// Notifications, questions, secret requests, and Inbox.
@@ -324,6 +325,11 @@ enum Command {
 
 #[derive(Subcommand)]
 enum AgentAction {
+    /// Run a turn in a desktop Sol conversation.
+    Exec(conversation_cli::Exec),
+    /// List and manage saved desktop conversations.
+    #[command(subcommand)]
+    Chats(conversation_cli::Chats),
     /// Discover logical models using the configured harness (JSON, no inference).
     Models {
         #[arg(long, value_enum)]
@@ -495,6 +501,8 @@ fn run() -> std::io::Result<()> {
     let cli = Cli::parse_from(args).canonicalize();
     // Dispatch utilities and private review captures before database service setup.
     match &cli.command {
+        Command::Agent(AgentAction::Exec(exec)) => return exec.run(),
+        Command::Agent(AgentAction::Chats(action)) => return action.run(),
         Command::WorkspaceChat { resume } => {
             if let Err(error) = workspace_chat::run(resume.clone()) {
                 println!("{}", serde_json::json!({"error":error.to_string()}));

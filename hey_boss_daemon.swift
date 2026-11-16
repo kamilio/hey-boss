@@ -39,6 +39,8 @@ struct IssueReference: Codable, Equatable {
 
 struct Request: Codable {
     let command: String
+    let chat_id: UUID?
+    let archived: Bool?
     let selection_chat: UUID?
     let selection_time: Double?
     let selection_text, selection_source: String?
@@ -291,7 +293,16 @@ final class Reply {
         self.fd = fd
         channel = DispatchIO(type: .stream, fileDescriptor: fd, queue: .global(qos: .userInitiated)) { _ in Darwin.close(fd) }
     }
+    func event(_ response: [String: Any], final: Bool = false) {
+        guard var bytes = try? JSONSerialization.data(withJSONObject: response) else { channel.close(); return }
+        bytes.append(10)
+        let data = bytes.withUnsafeBytes { DispatchData(bytes: $0) }
+        channel.write(offset: 0, data: data, queue: .global(qos: .userInitiated)) { [self] done, _, error in
+            if done && (final || error != 0) { channel.close() }
+        }
+    }
     func send(_ response: [String: Any]) {
+
         guard let bytes = try? JSONSerialization.data(withJSONObject: response) else { channel.close(); return }
         let data = bytes.withUnsafeBytes { DispatchData(bytes: $0) }
         channel.write(offset: 0, data: data, queue: .global(qos: .userInitiated)) { [self] done, _, _ in
@@ -7934,6 +7945,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let workspace: String
         let updated: Date
         var generatedTitle: Bool?
+        var archived: Bool?
     }
     private struct Library: Codable {
         var selected = UUID()
@@ -7943,7 +7955,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var draftText: String?
         var chats: [Chat] = []
     }
-    private var library = Library()
+    private var libraryDirty = true
+    private var library = Library() { didSet { libraryDirty = true } }
+    private static let pageSize = 30
+    private var pageStart = 0
+    private var pageChats: [Chat] = []
+    private let historyScope = NSSegmentedControl(labels: ["Chats", "Archived"], trackingMode: .selectOne, target: nil, action: nil)
+    private let previousPage = NSButton(), nextPage = NSButton()
+    private var terminal: Reply?
+
     var titleTask: Task<Void, Never>?
     private var refreshingHistory = false
     let status = NSTextField(wrappingLabelWithString: "")
@@ -7963,6 +7983,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let send = NSButton()
     let scroll = NSScrollView()
     let turns = FlippedStack()
+    private var firstRendered = 0
+    private var insertion: Int?
+    private lazy var earlier = NSButton(title: "Show earlier messages", target: self, action: #selector(showEarlier))
     var rows: [ConversationText] = []
     var tools: [String: NSButton] = [:]
     var details: [NSButton: String] = [:]
@@ -8226,7 +8249,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             meter.topAnchor.constraint(equalTo: input.bottomAnchor, constant: 10), meter.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10), voiceStatus.trailingAnchor.constraint(lessThanOrEqualTo: send.trailingAnchor)
         ])
         caption.media.close.target = self; caption.media.close.action = #selector(hideMedia)
-        refreshScope(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
+        refreshScope(); refreshHistory(); state(.idle, "Voice off"); window.initialFirstResponder = input; window.center(); restore()
     }
     func show() {
         if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() {
@@ -8293,19 +8316,33 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         sidebar.canCollapse = true
         let content = NSSplitViewItem(viewController: main); content.minimumThickness = 360
         split.addSplitViewItem(sidebar); split.addSplitViewItem(content)
-        let title = NSTextField(labelWithString: "Chats")
-        title.font = .systemFont(ofSize: 13, weight: .semibold); title.textColor = .secondaryLabelColor
+        let title = historyScope
+        title.selectedSegment = 0; title.controlSize = .small
+        title.target = self; title.action = #selector(switchHistory)
+        for (button, icon, help) in [(previousPage, "chevron.left", "Newer chats"), (nextPage, "chevron.right", "Older chats")] {
+            button.image = NSImage(systemSymbolName: icon, accessibilityDescription: help)
+            button.bezelStyle = .accessoryBarAction; button.toolTip = help
+            button.target = self; button.action = #selector(changePage(_:))
+        }
+        let pager = NSStackView(views: [previousPage, nextPage]); pager.spacing = 8
+        let menu = NSMenu()
+        for (name, action) in [("Rename…", #selector(renameRow)), ("Archive or Restore", #selector(archiveRow)), ("Delete…", #selector(deleteRow))] {
+            menu.addItem(withTitle: name, action: action, keyEquivalent: "").target = self
+        }
+        historyList.menu = menu
+
         emptyHistory.font = .systemFont(ofSize: 12); emptyHistory.textColor = .tertiaryLabelColor
         let column = NSTableColumn(identifier: .init("chat")); column.resizingMask = .autoresizingMask
         historyList.addTableColumn(column); historyList.headerView = nil; historyList.style = .sourceList
         historyList.rowHeight = 46; historyList.usesAutomaticRowHeights = false; historyList.backgroundColor = .clear
         historyList.delegate = self; historyList.dataSource = self; historyList.setAccessibilityLabel("Chat history")
         let list = NSScrollView(); list.drawsBackground = false; list.hasVerticalScroller = true; list.autohidesScrollers = true; list.documentView = historyList
-        for view in [title, list, emptyHistory] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
+        for view in [title, list, emptyHistory, pager] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 18), title.topAnchor.constraint(equalTo: side.view.safeAreaLayoutGuide.topAnchor, constant: 14),
             list.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 4),
-            list.trailingAnchor.constraint(equalTo: side.view.trailingAnchor, constant: -4), list.bottomAnchor.constraint(equalTo: side.view.bottomAnchor),
+            list.trailingAnchor.constraint(equalTo: side.view.trailingAnchor, constant: -4), list.bottomAnchor.constraint(equalTo: pager.topAnchor, constant: -4),
+            pager.centerXAnchor.constraint(equalTo: side.view.centerXAnchor), pager.bottomAnchor.constraint(equalTo: side.view.bottomAnchor, constant: -8),
             emptyHistory.topAnchor.constraint(equalTo: list.topAnchor, constant: 8), emptyHistory.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             emptyHistory.trailingAnchor.constraint(lessThanOrEqualTo: side.view.trailingAnchor, constant: -12)
         ])
@@ -8316,9 +8353,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func windowDidResize(_ notification: Notification) {
         if window.isVisible, window.frame.width < 580, let sidebar = split.splitViewItems.first, !sidebar.isCollapsed { sidebar.isCollapsed = true }
     }
-    func numberOfRows(in tableView: NSTableView) -> Int { library.chats.count }
+    func numberOfRows(in tableView: NSTableView) -> Int { pageChats.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        let chat = library.chats[row], id = NSUserInterfaceItemIdentifier("chat-row")
+        let chat = pageChats[row], id = NSUserInterfaceItemIdentifier("chat-row")
         let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? NSTableCellView()
         if cell.identifier == nil {
             cell.identifier = id
@@ -8341,16 +8378,29 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func refreshHistory() {
         refreshingHistory = true; defer { refreshingHistory = false }
+        let archived = historyScope.selectedSegment == 1
+        let matching = library.chats.lazy.filter { ($0.archived == true) == archived }
+        let limit = Self.pageSize
+        var page = Array(matching.dropFirst(pageStart).prefix(limit + 1))
+        if page.isEmpty && pageStart > 0 {
+            pageStart = max(0, pageStart - limit)
+            page = Array(matching.dropFirst(pageStart).prefix(limit + 1))
+        }
+        previousPage.isEnabled = pageStart > 0; nextPage.isEnabled = page.count > limit
+        previousPage.superview?.isHidden = !previousPage.isEnabled && !nextPage.isEnabled
+        pageChats = Array(page.prefix(limit))
+        historyList.menu?.item(at: 1)?.title = archived ? "Restore" : "Archive"
         historyList.reloadData()
-        if let row = library.chats.firstIndex(where: { $0.id == library.selected }) { historyList.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
+        if let row = pageChats.firstIndex(where: { $0.id == library.selected }) { historyList.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false) }
         else { historyList.deselectAll(nil) }
-        emptyHistory.isHidden = !library.chats.isEmpty
+        emptyHistory.stringValue = archived ? "No archived chats." : "Your conversations appear here."
+        emptyHistory.isHidden = !pageChats.isEmpty
     }
     private func rememberTurn() {
         guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
         let previous = library.chats.first { $0.id == library.selected }
         let chat = Chat(id: library.selected, title: previous?.title ?? String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
-                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date(), generatedTitle: previous?.generatedTitle)
+                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date(), generatedTitle: previous?.generatedTitle, archived: previous?.archived)
         library.chats.removeAll { $0.id == chat.id }; library.chats.insert(chat, at: 0); refreshHistory()
     }
     func generateTitle() {
@@ -8358,7 +8408,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
               let url = Bundle.main.url(forResource: "conversation-title", withExtension: "md"),
               let instruction = try? String(contentsOf: url, encoding: .utf8), !instruction.isEmpty else { return }
         if !messages.isEmpty, !library.chats.contains(where: { $0.id == library.selected }) { rememberTurn(); save() }
-        let pending = library.chats.filter { $0.generatedTitle != true }
+        let pending = pageChats.filter { $0.generatedTitle != true }
         guard !pending.isEmpty else { return }
         titleTask = Task { @MainActor [weak self] in
             guard let self else { return }
@@ -8376,7 +8426,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     guard !Task.isCancelled else { return }
                     let title = response.content.title.trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\"“”")))
                         .split(whereSeparator: \.isWhitespace).prefix(3).joined(separator: " ")
-                    guard !title.isEmpty, let index = library.chats.firstIndex(where: { $0.id == chat.id }) else { continue }
+                    guard !title.isEmpty, let index = library.chats.firstIndex(where: { $0.id == chat.id && $0.generatedTitle != true }) else { continue }
                     library.chats[index].title = title; library.chats[index].generatedTitle = true
                     try writeLibrary(); refreshHistory()
                 } catch { /* Keep the existing title when the local model is unavailable or refuses. */ }
@@ -8385,17 +8435,135 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     func tableViewSelectionDidChange(_ notification: Notification) {
         let row = historyList.selectedRow
-        guard !refreshingHistory, library.chats.indices.contains(row) else { return }
-        let id = library.chats[row].id
+        guard !refreshingHistory, pageChats.indices.contains(row) else { return }
+        let id = pageChats[row].id
         guard id != library.selected else { return }
+        do { try openChat(id) }
+        catch { refreshHistory(); status.isHidden = false; status.stringValue = error.localizedDescription }
+    }
+    private func openChat(_ id: UUID, _ snapshot: Checkpoint? = nil) throws {
+        let loaded = try snapshot ?? readChat(id)
+        stop("Ready")
+        guard restoreError != nil || save() else { throw StorageError(description: status.stringValue) }
+        restoreError = nil
+        library.selected = id; clearTurns(); input.stringValue = ""
+        checkpoint = loaded; apply(loaded.saved); try writeLibrary(); refreshHistory()
+    }
+    @objc private func switchHistory() { pageStart = 0; refreshHistory() }
+    @objc private func changePage(_ button: NSButton) {
+        pageStart = max(0, pageStart + (button === nextPage ? Self.pageSize : -Self.pageSize))
+        refreshHistory(); historyList.scrollRowToVisible(0)
+    }
+    private var menuChat: Chat? {
+        let row = historyList.clickedRow
+        return pageChats.indices.contains(row) ? pageChats[row] : nil
+    }
+    @objc private func renameRow() {
+        guard let chat = menuChat else { return }
+        let alert = NSAlert(); alert.messageText = "Rename chat"
+        let field = NSTextField(string: chat.title); field.frame.size = NSSize(width: 280, height: 24)
+        alert.accessoryView = field; alert.window.initialFirstResponder = field
+        alert.addButton(withTitle: "Rename"); alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { result in
+            if result == .alertFirstButtonReturn { self.editRow("chat_rename", chat, field.stringValue) }
+        }
+    }
+    @objc private func archiveRow() {
+        if let chat = menuChat { editRow(chat.archived == true ? "chat_restore" : "chat_archive", chat) }
+    }
+    @objc private func deleteRow() {
+        guard let chat = menuChat else { return }
+        let alert = NSAlert(); alert.messageText = "Delete “" + chat.title + "”?"
+        alert.informativeText = "Its saved messages, images, and local recordings will be permanently removed."
+        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: "Delete").hasDestructiveAction = true
+        alert.beginSheetModal(for: window) { result in
+            if result == .alertSecondButtonReturn { self.editRow("chat_delete", chat) }
+        }
+    }
+    private func editRow(_ action: String, _ chat: Chat, _ title: String? = nil) {
+        do { try editChat(action, chat.id, title) }
+        catch { NSAlert(error: error).beginSheetModal(for: window) }
+    }
+    private func editChat(_ action: String, _ id: UUID?, _ title: String?) throws {
+        guard let id, library.chats.contains(where: { $0.id == id }) else { throw StorageError(description: "Chat not found") }
+        if id == library.selected && (action == "chat_archive" || action == "chat_delete") {
+            guard phase == .idle && pauseID == nil else { throw StorageError(description: "Stop the active chat first.") }
+            guard selectDirectory(nil) else { throw StorageError(description: status.stringValue) }
+        }
+        guard let i = library.chats.firstIndex(where: { $0.id == id }) else { throw StorageError(description: "Chat not found") }
+        let before = library.chats[i]
+        switch action {
+        case "chat_rename":
+            guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty,
+                  title.count <= 200, title.rangeOfCharacter(from: .controlCharacters) == nil else {
+                throw StorageError(description: "Use a single-line title of 1–200 characters.")
+            }
+            library.chats[i].title = title; library.chats[i].generatedTitle = true
+        case "chat_archive", "chat_restore": library.chats[i].archived = action == "chat_archive"
+        case "chat_delete":
+            let base = chatURL(id).deletingPathExtension(), root = base.deletingLastPathComponent()
+            for path in ["json", "jsonl", "agent.json", "agent.jsonl"].map({ base.appendingPathExtension($0) }) +
+                [root.appending(path: "Media/" + id.uuidString), recordingsURL.appendingPathComponent(id.uuidString)] {
+                do { try FileManager.default.removeItem(at: path) }
+                catch let e as CocoaError where e.code == .fileNoSuchFile { continue }
+                catch { throw StorageError(description: "Could not delete " + path.path + ": " + error.localizedDescription) }
+            }
+            library.chats.remove(at: i)
+        default: throw StorageError(description: "Unknown chat action")
+        }
+        do { try writeLibrary() } catch {
+            if action == "chat_delete" { library.chats.insert(before, at: i) } else { library.chats[i] = before }
+            throw error
+        }
+        refreshHistory()
+    }
+    private func failTerminal(_ message: String) {
+        terminal?.event(["type":"turn.failed","error":["message":message]], final: true); terminal = nil
+    }
+    func handleChat(_ request: Request, _ reply: Reply) {
         do {
-            let loaded = try readChat(id)
-            stop("Ready")
-            if restoreError == nil && !save() { refreshHistory(); return }
-            restoreError = nil
-            library.selected = id; clearTurns(); input.stringValue = ""
-            checkpoint = loaded; apply(loaded.saved); try writeLibrary(); refreshHistory()
-        } catch { refreshHistory(); status.isHidden = false; status.stringValue = "Couldn’t open that conversation: " + error.localizedDescription }
+            if let restoreError { throw StorageError(description: restoreError) }
+            if request.command == "chat_list" {
+                let matching = library.chats.lazy.filter { ($0.archived == true) == (request.archived == true) }
+                var rows: [[String:String]] = [], pastCursor = request.chat_id == nil
+                var more = false
+                for chat in matching {
+                    if !pastCursor { pastCursor = chat.id == request.chat_id; continue }
+                    if rows.count == Self.pageSize { more = true; break }
+                    rows.append(["id":chat.id.uuidString,"title":chat.title,"workspace":chat.workspace])
+                }
+                guard pastCursor else { throw StorageError(description: "Page cursor no longer exists. List chats again.") }
+                reply.send(["status":"ok", "chats":rows, "next":more ? rows.last!["id"]! as Any : NSNull()])
+            } else if request.command == "chat_exec" {
+                guard phase == .idle, pauseID == nil, terminal == nil, window.attachedSheet == nil else { throw StorageError(description: "A conversation is in progress.") }
+                guard input.stringValue.isEmpty, pendingCapture == nil, selections.isEmpty else { throw StorageError(description: "Finish the desktop draft first.") }
+                guard let question = request.question, !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw StorageError(description: "Missing message") }
+                guard instructions?.isEmpty == false else { throw StorageError(description: "The conversation prompt is missing. Reinstall Hey Boss.") }
+                if let id = request.chat_id {
+                    guard let chat = library.chats.first(where: { $0.id == id }) else { throw StorageError(description: "Chat not found") }
+                    guard chat.archived != true else { throw StorageError(description: "Restore the archived chat first.") }
+                    let loaded = try readChat(id)
+                    guard loaded.saved.directory == nil else { throw StorageError(description: "Only Sol conversations support agent exec.") }
+                    guard (loaded.saved.draftText ?? "").isEmpty, loaded.saved.pendingCapture == nil, (loaded.saved.selections ?? []).isEmpty else { throw StorageError(description: "Finish the desktop draft first.") }
+                    if id != library.selected { try openChat(id, loaded) }
+                } else {
+                    guard selectDirectory(nil) else { throw StorageError(description: status.stringValue) }
+                }
+                guard beginSession() else { throw StorageError(description: status.stringValue) }
+                historyScope.selectedSegment = 0; pageStart = 0
+                terminal = reply
+                reply.event(["type":"thread.started","thread_id":library.selected.uuidString])
+                reply.event(["type":"turn.started"])
+                respond(question)
+            } else {
+                try editChat(request.command, request.chat_id, request.title)
+                reply.send(["status":"ok"])
+            }
+        } catch {
+            if request.command == "chat_exec" { reply.event(["type":"turn.failed","error":["message":error.localizedDescription]], final: true) }
+            else { reply.send(["status":"error","error":error.localizedDescription]) }
+        }
     }
     private var recordingsURL: URL { saveURL.deletingLastPathComponent().appendingPathComponent("Recordings") }
     @objc private func showRecordings() {
@@ -8437,6 +8605,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         return save()
     }
     func clearTurns() {
+        firstRendered = 0
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
         selections = []; checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
@@ -8834,8 +9003,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         func cancel() { input.finish(); result.cancel() }
     }
     func append(_ text: String, from speaker: String, capture: Capture? = nil) {
+        messages.append(Message(text: text, speaker: speaker, capture: capture))
+        rows.append(renderMessage(messages.count - 1))
+    }
+    private func placeTurn(_ view: NSView) {
+        if let index = insertion {
+            turns.insertArrangedSubview(view, at: index); insertion = index + 1
+        } else { turns.addArrangedSubview(view) }
+    }
+    private func renderMessage(_ index: Int) -> ConversationText {
+        let message = messages[index], text = message.text, speaker = message.speaker, capture = message.capture
         let mine = speaker == "You"
-        let follow = mine || atEndOfChat
+        let follow = insertion == nil && (mine || atEndOfChat)
         let row = NSView(), card = NSBox()
         card.boxType = .custom; card.cornerRadius = 12; card.borderWidth = 0
         card.fillColor = mine ? .controlAccentColor.withAlphaComponent(0.11) : .clear
@@ -8846,7 +9025,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             label.allowsEditingTextAttributes = true
             label.attributedStringValue = markdown(text, size: 15, color: .labelColor)
         }
-        turns.addArrangedSubview(row); rows.append(label); messages.append(Message(text: text, speaker: speaker, capture: capture))
+        placeTurn(row)
         for v in [card,label] { v.translatesAutoresizingMaskIntoConstraints = false; row.addSubview(v) }
         let inset: CGFloat = mine ? 12 : 0
         NSLayoutConstraint.activate([
@@ -8859,7 +9038,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         ])
         if let capture, let snapshot = capture.text {
             let source = NSButton(title: capture.source, target: self, action: #selector(inspectCapture))
-            source.tag = messages.count - 1; source.isBordered = false; source.font = .systemFont(ofSize: 12, weight: .medium)
+            source.tag = index; source.isBordered = false; source.font = .systemFont(ofSize: 12, weight: .medium)
             source.image = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil); source.imagePosition = .imageLeading
             source.contentTintColor = .controlAccentColor; source.toolTip = "View full captured context"
             let preview = NSTextField(wrappingLabelWithString: snapshot)
@@ -8874,9 +9053,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             ])
         } else { label.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: mine ? -9 : 0).isActive = true }
         if follow { revealLatest() }
+        return label
     }
     private var atEndOfChat: Bool { turns.bounds.maxY <= scroll.documentVisibleRect.maxY + 2 }
     private func revealLatest() {
+        guard insertion == nil else { return }
         welcome.isHidden = true
         guard window.isVisible else { return }
         window.contentView?.layoutSubtreeIfNeeded()
@@ -8945,6 +9126,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private var agentStateURL: URL { chatURL(library.selected).deletingPathExtension().appendingPathExtension("agent.json") }
     func generationFailed(_ error: Error) {
+        failTerminal(error.localizedDescription)
         reply = nil
         if !stream.isEmpty { finishMessage(stream) }
         else if input.stringValue.isEmpty, let last = messages.last, last.speaker == "You" {
@@ -9062,7 +9244,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func finishTurn(_ text: String) {
         if !text.isEmpty && (lastMessage != text || !stream.isEmpty) { finishMessage(text) }
-        dismissApprovals(); turnDone = true; updateComposerActions(); save(); playNext(); generateTitle()
+        dismissApprovals(); turnDone = true; updateComposerActions()
+        if !save() { failTerminal(status.stringValue) }
+        playNext(); generateTitle()
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -9190,7 +9374,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         media.close.isHidden = true
         let card = ConversationMediaView()
         media = card
-        turns.addArrangedSubview(card)
+        placeTurn(card)
         card.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
         let height = card.heightAnchor.constraint(equalToConstant: visual.cardHeight ?? 340)
         height.isActive = true
@@ -9269,6 +9453,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
         let id = data["id"] as? String ?? ""
+        if let terminal {
+            if !terminal.isConnected { stop("CLI disconnected"); return }
+            if kind == "Message", let text = data["text"] as? String {
+                terminal.event(["type":"item.completed", "item":["id":UUID().uuidString, "type":"agent_message", "text":text]])
+            } else if kind == "ToolStarted" || kind == "ToolCompleted", let item = (data["input"] ?? data["output"]) as? [String:Any] {
+                let start = kind == "ToolStarted"
+                terminal.event(["type": start ? "item.started" : "item.completed", "item":["id":id, "type":"command_execution", "command":item["command"] ?? "", "aggregated_output":item["aggregatedOutput"] ?? "", "exit_code":item["exit_code"] ?? NSNull(), "status":start ? "in_progress" : data["failed"] as? Bool == true ? "failed" : "completed"]])
+            }
+        }
         switch kind {
         case "ConversationMedia":
             var result = ["id": id]
@@ -9331,7 +9524,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             approvals.removeAll { $0.0 == id }
             if showing, let sheet = approvalSheet { approvalSheet = nil; window.endSheet(sheet.window); presentApproval() }
         case "TurnCompleted":
-            if data["status"] as? String == "Completed" { finishTurn(data["output"] as? String ?? "") }
+            if data["status"] as? String == "Completed" {
+                finishTurn(data["output"] as? String ?? "")
+                terminal?.event(["type":"turn.completed", "usage":data["usage"] ?? NSNull()], final: true); terminal = nil
+            }
             else { workspaceFailed("The agent did not finish this turn.") }
         default: break
         }
@@ -9351,7 +9547,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if tools[activity.id] == nil {
             tools[activity.id] = button
             let group = NSStackView(); group.orientation = .vertical; group.alignment = .leading; group.spacing = 5
-            group.addArrangedSubview(button); turns.addArrangedSubview(group)
+            group.addArrangedSubview(button); placeTurn(group)
             group.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
             button.widthAnchor.constraint(lessThanOrEqualTo: group.widthAnchor).isActive = true
         }
@@ -9432,6 +9628,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        failTerminal(failure ?? "Reply stopped")
         for index in activities.indices where activities[index].state == "Running" {
             activities[index].state = "Interrupted"; renderTool(activities[index])
         }
@@ -9501,11 +9698,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private func chatURL(_ id: UUID) -> URL { saveURL.deletingLastPathComponent().appendingPathComponent(id.uuidString + ".json") }
     private func writeLibrary() throws {
-        library.draftDirectory = messages.isEmpty ? directory : nil
-        library.draftSelections = messages.isEmpty && !selections.isEmpty ? selections : nil
-        library.draftCapture = messages.isEmpty ? pendingCapture : nil
-        library.draftText = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
+        let folder = messages.isEmpty ? directory : nil
+        let notes = messages.isEmpty && !selections.isEmpty ? selections : nil
+        let capture = messages.isEmpty ? pendingCapture : nil
+        let text = messages.isEmpty && !input.stringValue.isEmpty ? input.stringValue : nil
+        guard libraryDirty || library.draftDirectory != folder || library.draftSelections != notes ||
+                library.draftCapture != capture || library.draftText != text else { return }
+        library.draftDirectory = folder; library.draftSelections = notes
+        library.draftCapture = capture; library.draftText = text
         try JSONEncoder().encode(library).write(to: saveURL, options: .atomic)
+        libraryDirty = false
     }
     @discardableResult private func save(unfinishedWorkspace: Bool = false) -> Bool {
         guard restoreError == nil else { return false }
@@ -9529,27 +9731,43 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return value
         }
         visuals = saved.visuals ?? []
-        let byMessage = Dictionary(grouping: visuals, by: \.afterMessage)
-        let toolsByMessage = Dictionary(grouping: activities, by: \.afterMessage)
-        func restoreVisuals(after count: Int) {
-            for visual in byMessage[count] ?? [] { appendVisual(visual) }
-        }
-        restoreVisuals(after: 0)
-        for message in saved.messages {
-            append(message.text, from: message.speaker, capture: message.capture)
-            messages[messages.count - 1].interruptedAfter = message.interruptedAfter
-            for activity in toolsByMessage[messages.count] ?? [] { renderTool(activity) }
-            restoreVisuals(after: messages.count)
-        }
+        messages = saved.messages; firstRendered = messages.count
+        showEarlier()
+        if !messages.isEmpty { revealLatest() }
         refreshScope()
         state(.idle, messages.last?.speaker == "You" ? "No reply was saved for the last message." : "Voice off")
+    }
+    @objc private func showEarlier() {
+        let end = firstRendered, start = max(0, end - Self.pageSize)
+        let anchor = turns.arrangedSubviews.first { $0 !== earlier }
+        let offset = anchor.map { $0.frame.minY - scroll.contentView.bounds.minY }
+        earlier.removeFromSuperview()
+        insertion = 0
+        if start > 0 { placeTurn(earlier) }
+        let images = Dictionary(grouping: visuals.filter { ($0.afterMessage > start && $0.afterMessage <= end) || (start == 0 && $0.afterMessage == 0) }, by: \.afterMessage)
+        let actions = Dictionary(grouping: activities.filter { $0.afterMessage > start && $0.afterMessage <= end }, by: \.afterMessage)
+        let latestMedia = media
+        if start == 0 { for image in images[0] ?? [] { appendVisual(image) } }
+        var labels: [ConversationText] = []
+        for i in start..<end {
+            labels.append(renderMessage(i))
+            for action in actions[i+1] ?? [] { renderTool(action) }
+            for image in images[i+1] ?? [] { appendVisual(image) }
+        }
+        if anchor != nil { media = latestMedia }
+        rows.insert(contentsOf: labels, at: 0); firstRendered = start; insertion = nil
+        if let anchor, let offset {
+            window.contentView?.layoutSubtreeIfNeeded()
+            scroll.contentView.scroll(to: NSPoint(x: 0, y: anchor.frame.minY - offset))
+            scroll.reflectScrolledClipView(scroll.contentView)
+        }
     }
     private func restore() {
         guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
         do {
             let data = try Data(contentsOf: saveURL)
             if let index = try? JSONDecoder().decode(Library.self, from: data) {
-                library = index; refreshHistory()
+                library = index; libraryDirty = false; refreshHistory()
                 if library.chats.contains(where: { $0.id == library.selected }) {
                     let loaded = try readChat(library.selected); checkpoint = loaded; apply(loaded.saved)
                 } else {
@@ -11157,10 +11375,22 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
+                    } else if ["chat_exec", "chat_list", "chat_rename", "chat_delete", "chat_archive", "chat_restore", "conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {
+                                if request.command.hasPrefix("chat_") {
+                                    // The same socket is forwarded over SSH to companions. Only the installed local CLI owns desktop chats.
+                                    var pid: pid_t = 0, length = socklen_t(MemoryLayout<pid_t>.size)
+                                    var path = [CChar](repeating: 0, count: 4096)
+                                    guard let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"],
+                                          getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0,
+                                          proc_pidpath(pid, &path, UInt32(path.count)) > 0,
+                                          String(cString: path) == URL(fileURLWithPath: cli).resolvingSymlinksInPath().path else {
+                                        reply.send(["status":"error","error":"Use the installed CLI on this Mac."]); return
+                                    }
+                                    overview.currentConversation().handleChat(request, reply); return
+                                }
                                 if request.command == "conversation_pause" || request.command == "conversation_resume" {
                                     reply.send(overview.currentConversation().handleSessionRequest(request)); return
                                 }
