@@ -20,9 +20,12 @@ function taskBar() {
   $('#task-state').textContent = issue.state[0].toUpperCase() + issue.state.slice(1);
   $('#task-state').className = 'state-pill ' + issue.state;
   $('#task-owner').textContent = issue.assignee ? (issue.assignee_name || (issue.assignee === 'human:boss' ? 'You' : issue.assignee)) : 'Unassigned';
-  $('#unassign').disabled = busy || !issue.assignee || !['open','ready'].includes(issue.state);
-  $('#assign-me').disabled = busy || issue.assignee === 'human:boss' || !['open','ready'].includes(issue.state);
-  $('#rework').disabled = busy || (issue.state === 'open' && issue.assignee === 'human:boss');
+  const mine = issue.assignee === 'human:boss', assignable = ['open','ready'].includes(issue.state);
+  $('#unassign').hidden = !issue.assignee || !assignable;
+  $('#assign-me').hidden = mine || !assignable;
+  $('#rework').hidden = issue.state === 'open';
+  $('#rework').textContent = mine ? 'Reopen task' : 'Reopen and assign to me';
+  for (const id of ['#unassign','#assign-me','#rework']) $(id).disabled = busy;
   $('#make-ready').hidden = issue.state === 'ready'; $('#make-ready').disabled = busy;
   $('#refresh-task').disabled = busy;
 }
@@ -34,10 +37,10 @@ async function action(operation) {
   catch (error) { showError(error); }
   finally { busy = false; taskBar(); }
 }
-function renderMessage() {
-  const [subject,...lines] = snapshot.message.split('\n'), body = lines.join('\n').trim();
+function renderMessage(bodyHtml) {
+  const subject = snapshot.message.split('\n',1)[0];
   $('h1').textContent = subject; document.title = `${subject} · Hey Boss`;
-  $('#message-body').textContent = body; $('#full-message').hidden = !body;
+  $('#message-body').innerHTML = bodyHtml; $('#full-message').hidden = !bodyHtml.trim();
 }
 async function start() {
   if (!project || !Number.isSafeInteger(number) || number < 1 || !commit) throw new Error('Open a commit from its task to review it.');
@@ -58,7 +61,7 @@ async function start() {
   $('#files').innerHTML = renderGitFiles({files});
   $('#file-count').textContent = files.length;
   HeyBossUI.icons($('#review'));
-  renderMessage();
+  renderMessage(result.message_body_html);
   $('#loading').remove(); $('#review').hidden = false;
   taskBar(); mountGitFiles(); mountGitComments({comments:result.comments,request:review}); mountGitLayout();
   $('#rework').onclick = () => action({action:'rework',number,if_version:issue.version});
@@ -66,18 +69,32 @@ async function start() {
   $('#assign-me').onclick = () => action({action:'assign',number,target:'boss',if_version:issue.version});
   $('#make-ready').onclick = () => action({action:'ready',number,force:false,guard:readyGuard});
   $('#refresh-task').onclick = () => action({action:'view',number});
-  $('#edit-message').onclick = () => { $('#message-form').hidden = false; $('#commit-message').value = snapshot.message; $('#commit-message').focus(); $('#edit-message').hidden = true; };
-  $('#cancel-message').onclick = () => { $('#message-form').hidden = true; $('#edit-message').hidden = false; $('#message-error').textContent = ''; $('#edit-message').focus(); };
-  $('#message-form').onsubmit = async event => {
-    event.preventDefault(); const form = event.currentTarget, message = $('#commit-message').value;
+  const form = $('#message-form'), input = $('#commit-message');
+  function closeEditor() {
+    form.hidden = true; $('#message-reader').hidden = false;
+    $('#message-error').textContent = ''; $('#edit-message').focus();
+  }
+  $('#edit-message').onclick = () => {
+    $('#message-reader').hidden = true; form.hidden = false; input.value = snapshot.message;
+    input.setSelectionRange(0,0); input.focus();
+  };
+  $('#cancel-message').onclick = closeEditor;
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !form.hidden && !$('#cancel-message').disabled) {
+      event.preventDefault(); closeEditor();
+    }
+  });
+  form.onsubmit = async event => {
+    event.preventDefault(); const message = input.value;
+    input.readOnly = true;
     for (const button of form.querySelectorAll('button')) button.disabled = true;
     $('#message-error').textContent = '';
     try {
-      await review({command:'message',message,previous_message:snapshot.message}); snapshot.message = message;
-      renderMessage();
-      $('#message-form').hidden = true; $('#edit-message').hidden = false; $('#status').textContent = 'Message saved'; $('#edit-message').focus(); await refreshTask();
+      const saved = await review({command:'message',message,previous_message:snapshot.message}); snapshot.message = message;
+      renderMessage(saved.message_body_html);
+      closeEditor(); $('#status').textContent = 'Message saved'; await refreshTask();
     } catch(error) { $('#message-error').textContent = error.message; }
-    finally { for (const button of form.querySelectorAll('button')) button.disabled = false; }
+    finally { input.readOnly = false; for (const button of form.querySelectorAll('button')) button.disabled = false; }
   };
   $('#download-patch').onclick = async () => {
     const button = $('#download-patch'); button.disabled = true; showError(null);

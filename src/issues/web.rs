@@ -1275,12 +1275,28 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "Issue status updates use the terminal workflow",
             ));
         }
+        let commit_message = matches!(
+            &action.operation,
+            Operation::CommitReview {
+                operation: super::commit_reviews::Operation::View
+                    | super::commit_reviews::Operation::Message { .. },
+                ..
+            }
+        );
         let mut result = app.execute_at(
             Some(action.project),
             action.operation,
             action.request_id,
             action.host.as_deref(),
         )?;
+        if commit_message {
+            let message = result["review"]["message"]
+                .as_str()
+                .or_else(|| result["message"].as_str())
+                .unwrap_or_default();
+            let body = message.split_once('\n').map_or("", |(_, body)| body);
+            result["message_body_html"] = json!(crate::markdown::render_fragment(body));
+        }
         if let Some(issue) = result.get_mut("issue")
             && let Some(body) = issue["body"].as_str()
         {

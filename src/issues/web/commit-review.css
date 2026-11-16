@@ -4,14 +4,15 @@
 }
 .review-byline, #task-owner, #count, #status { color: var(--muted); font-size: 12px; }
 .review-byline time::before { content: "·"; margin-right: 8px; }
-.review-byline .message-actions, .task-actions { margin-left: auto; color: var(--text); }
-#full-message { margin-top: 12px; }
-#full-message summary { width: fit-content; color: var(--accent); cursor: pointer; font-size: 12px; }
-#message-body { white-space: pre-wrap; max-width: 85ch; overflow-wrap: anywhere; }
+.review-byline .message-actions { margin-left: auto; color: var(--text); }
+#full-message { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--control-radius); background: var(--surface); }
+#full-message > summary { padding: 12px 14px; min-height: 44px; cursor: pointer; font-weight: 600; }
+#full-message > summary:hover { background: var(--hover); }
+#message-body { padding: 0 14px 14px; max-width: 85ch; overflow-wrap: anywhere; }
 #message-form { margin-top: 16px; }
 #message-form label { font-weight: 600; }
 textarea { color: var(--text); background: var(--solid); border: 1px solid var(--line); border-radius: var(--control-radius); }
-#commit-message { display: block; margin: 6px 0 10px; min-height: 10em; font: 13px/1.6 ui-monospace, monospace; }
+#commit-message { display: block; margin: 6px 0 10px; min-height: 10em; field-sizing: content; font: 13px/1.6 ui-monospace, monospace; }
 #message-form .message-actions { justify-content: flex-end; }
 #message-error, #review-error { color: var(--danger); }
 .task-strip { margin-top: 22px; padding: 12px 0; border-block: 1px solid var(--line); }
@@ -86,7 +87,7 @@ textarea { width: 100%; padding: 10px 12px; resize: vertical; }
 .empty, .outside-comments, .git-activity { padding: 12px; }
 .git-file-comments { margin: 8px 12px; }
 @media (max-width: 700px) {
-  .review-byline .message-actions, .task-actions { width: 100%; margin-left: 0; }
+  .review-byline .message-actions { width: 100%; margin-left: 0; }
   .split-pair { grid-template-columns: minmax(0,1fr); }
   .split-pair > div + div { border-left: 0; }
   [data-diff-side]::before { content: attr(data-diff-side) " side"; position: sticky; left: 0; display: block; padding: 4px 12px; color: var(--muted); background: var(--bg); }

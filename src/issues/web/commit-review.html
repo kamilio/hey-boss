@@ -28,15 +28,17 @@
       <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
       <header>
         <div class="eyebrow">Commit <code id="commit-sha"></code></div>
-        <div class="detail-top"><h1></h1></div>
-        <div class="review-byline">
-          <span id="author"></span><time id="authored"></time>
-          <div class="message-actions">
-            <button class="button small" id="edit-message">Edit commit message</button>
-            <button class="button small" id="download-patch">Download patch</button>
+        <div id="message-reader">
+          <div class="detail-top"><h1></h1></div>
+          <div class="review-byline">
+            <span id="author"></span><time id="authored"></time>
+            <div class="message-actions">
+              <button class="button small" id="edit-message">Edit commit message</button>
+              <button class="button small" id="download-patch">Download patch</button>
+            </div>
           </div>
+          <details id="full-message"><summary>Full commit message</summary><div id="message-body" class="markdown"></div></details>
         </div>
-        <details id="full-message"><summary>Full commit message</summary><p id="message-body"></p></details>
         <form id="message-form" hidden>
           <label for="commit-message">Commit message</label>
           <textarea id="commit-message" required maxlength="65536" spellcheck="false"></textarea>
@@ -46,9 +48,9 @@
       <section class="task-strip" aria-label="Task actions">
         <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
         <div class="task-actions">
-          <button class="button small" id="rework">Not Ready · Assign to me</button>
+          <button class="button small" id="rework">Reopen and assign to me</button>
           <button class="button small" id="assign-me">Assign to me</button>
-          <button class="button small" id="make-ready">Ready</button>
+          <button class="button small" id="make-ready">Mark ready</button>
           <button class="button small" id="unassign">Unassign</button>
           <button class="icon-button" id="refresh-task" title="Refresh task status" aria-label="Refresh task status"><span data-icon="refresh"></span></button>
         </div>

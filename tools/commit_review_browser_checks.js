@@ -46,16 +46,28 @@ async page => {
   check(await page.getByText('Handle validation failures here.',{exact:true}).last().isVisible(),'Comment appears in split layout');
   await page.getByRole('button',{name:'Unified',exact:true}).click();
   await page.getByRole('button',{name:'Edit commit message',exact:true}).click();
-  await page.getByLabel('Commit message',{exact:true}).fill('Preserve leading whitespace\n\nCheck validation before saving.');
+  const editor = page.getByLabel('Commit message',{exact:true});
+  check(!await page.locator('#message-reader').isVisible(),'Editing replaces the whole message');
+  await editor.fill('Unsaved\n'+('Long message line\n').repeat(80));
+  check(await editor.evaluate(el=>el.clientHeight>=el.scrollHeight-1),'Editor grows with its content');
+  await editor.press('Escape');
+  await page.getByRole('heading',{name:'Preserve whitespace when parsing',exact:true}).waitFor();
+  await page.getByRole('button',{name:'Edit commit message',exact:true}).click();
+  check(!(await editor.inputValue()).includes('Unsaved'),'Escape discards the edit');
+  await editor.fill('Preserve leading whitespace\n\n**Check validation** before saving.');
   await page.getByRole('button',{name:'Save message',exact:true}).click();
   await page.getByRole('heading',{name:'Preserve leading whitespace',exact:true}).waitFor();
+  const toggle = page.locator('#full-message > summary'), target = await toggle.boundingBox();
+  check(target.height>=44,'Commit message toggle has a large hit area');
+  await toggle.click({position:{x:target.width-12,y:20}});
+  check(await page.locator('#message-body strong').innerText()==='Check validation','Saved Markdown renders inside the disclosure');
   const exported = await review({command:'patch'});
   check(exported.patch.includes('Subject: [PATCH] Preserve leading whitespace\n\nCheck validation before saving.'),'Patch export uses edited message');
-  await page.getByRole('button',{name:'Not Ready · Assign to me',exact:true}).click();
+  await page.getByRole('button',{name:/^Reopen (task|and assign to me)$/}).click();
   await page.waitForFunction(()=>document.querySelector('#task-state')?.textContent === 'Open');
   let task = (await view()).issue;
   check(task.state==='open' && task.assignee==='human:boss','Rework sets Open + Boss together');
-  await page.getByRole('button',{name:'Ready',exact:true}).click();
+  await page.getByRole('button',{name:'Mark ready',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#task-state')?.textContent === 'Ready');
   await page.getByRole('button',{name:'Unassign',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('#task-owner')?.textContent === 'Unassigned');
@@ -69,7 +81,7 @@ async page => {
     for (const width of [1440,768,390,320]) {
       await page.setViewportSize({width,height:1000});
       check(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),`No page overflow ${scheme}/${width}`);
-      check(await page.getByRole('button',{name:'Not Ready · Assign to me',exact:true}).isVisible(),`Rework action visible ${scheme}/${width}`);
+      check(await page.getByRole('button',{name:/^Reopen (task|and assign to me)$/}).isVisible(),`Rework action visible ${scheme}/${width}`);
       await page.screenshot({path:`.qa/review-${scheme}-${width}.png`,fullPage:true});
     }
   }
