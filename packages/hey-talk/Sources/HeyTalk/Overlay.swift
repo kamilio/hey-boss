@@ -554,7 +554,7 @@ final class Overlay {
             if conversation["action"] as? String != "Cancel opening chat" {
                 menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
             }
-            menu.addItem(selectionCapture.menuItem())
+            menu.addItem(selectionCapture.menuItem(.conversation))
             return menu
         }
         let history = menu.addItem(withTitle: "Dictation History…", action: #selector(showHistory), keyEquivalent: "")
@@ -583,7 +583,7 @@ final class Overlay {
         menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
         let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")
         recap.target = self; recap.keyEquivalentModifierMask = [.control, .command, .option, .shift]
-        menu.addItem(selectionCapture.menuItem())
+        menu.addItem(selectionCapture.menuItem(.dictation))
         menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Setup"))
         let item = NSMenuItem(title: "Paste Permissions…", action: #selector(openAccessibility), keyEquivalent: "")
         item.target = self; menu.addItem(item)

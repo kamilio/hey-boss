@@ -312,7 +312,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     func applyConversation(_ state: [String: Any]?) {
         conversationRevision += 1
-        selectionCapture.conversation = state?["selection_chat"] as? String
         let next = state?["active"] as? Bool == true ? state : nil
         if next != nil, waitingPaste != nil || session.phase == .processing || (session.phase == .recording && autoTarget == nil) {
             if next?["microphone"] as? Bool == true && resumedDuringProcessing != session.generation {
@@ -329,6 +328,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             conversationFocus = ConversationFocus(app: app)
         }
         let previous = conversation != nil
+        selectionCapture.setConversation(next)
         conversation = next; conversationLevel = 0
         if next != nil || previous {
             overlay?.showConversation(next)

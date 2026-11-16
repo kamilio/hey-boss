@@ -7,48 +7,63 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
     private var session = UUID()
     private let queue = DispatchQueue(label: "hey-talk.selection", qos: .userInitiated)
     private var terminalHintShown = false
-    private var manual = false
-    private var mutedChat: String?
-    var conversation: String? {
-        didSet {
-            guard oldValue != conversation else { return }
-            mutedChat = nil
-            session = UUID()
-            updateMonitor()
-        }
+    enum Mode: String {
+        case dictation = "dictationSelectionCapture", conversation = "conversationSelectionCapture"
     }
-    var enabled: Bool { monitor != nil }
+    private let defaults: UserDefaults
+    private var mode = Mode.dictation
+    private var chat: String?
 
-    func menuItem() -> NSMenuItem {
-        let item = NSMenuItem(title: enabled ? "Selection Capture: On" : "Selection Capture: Off", action: #selector(toggle(_:)), keyEquivalent: "")
-        item.target = self
-        item.state = enabled ? .on : .off
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        super.init()
+        defaults.register(defaults: [Mode.conversation.rawValue: true])
+    }
+
+    func setConversation(_ state: [String: Any]?) {
+        let nextMode: Mode = state == nil ? .dictation : .conversation
+        let nextChat = state?["selection_chat"] as? String
+        if nextMode != mode || nextChat != chat {
+            session = UUID(); down = nil
+        }
+        mode = nextMode; chat = nextChat
+        updateMonitor()
+    }
+
+    func menuItem(_ mode: Mode? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: #selector(toggle(_:)), keyEquivalent: "")
+        item.target = self; item.representedObject = mode?.rawValue
+        _ = validateMenuItem(item)
         return item
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        let enabled = defaults.bool(forKey: item.representedObject as? String ?? mode.rawValue)
         item.title = enabled ? "Selection Capture: On" : "Selection Capture: Off"
         item.state = enabled ? .on : .off
         return true
     }
 
     @objc private func toggle(_ sender: NSMenuItem) {
-        if enabled { manual = false; mutedChat = conversation }
-        else if AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) {
-            manual = conversation == nil; mutedChat = nil
+        let key = sender.representedObject as? String ?? mode.rawValue
+        let enable = !defaults.bool(forKey: key)
+        if enable && !AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) {
+            toast("Selection Capture is off", "Allow Hey Talk in Accessibility, then turn capture on.")
+            return
         }
+        defaults.set(enable, forKey: key)
         updateMonitor()
         _ = validateMenuItem(sender)
-        if !enabled && !AXIsProcessTrusted() {
-            toast("Selection Capture is off", "Allow Hey Talk in Accessibility, then turn capture on.")
-        } else if enabled {
+        if enable {
             toast("Selection Capture is on", "Highlight text in your browser, cmux, T3, or Slack.")
         }
     }
 
+    var shouldMonitor: Bool { defaults.bool(forKey: mode.rawValue) && (mode == .dictation || chat != nil) }
+
     private func updateMonitor() {
-        guard manual || (conversation != nil && mutedChat != conversation) else { if enabled { stop() }; return }
-        guard !enabled, AXIsProcessTrusted() else { return }
+        guard shouldMonitor else { if monitor != nil { stop() }; return }
+        guard monitor == nil, AXIsProcessTrusted() else { return }
         monitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .keyUp]) { [weak self] in self?.event($0) }
     }
 
@@ -95,7 +110,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             guard app.isActive else { return }
             let capture = Self.read(app, at: point, addressOnly: addressOnly)
             DispatchQueue.main.async {
-                guard self.session == id, insert || self.enabled else { return }
+                guard self.session == id, insert || self.monitor != nil else { return }
                 guard let capture else {
                     if insert { self.toast("Selection not added", "No selected text in the focused window.") }
                     return
@@ -109,7 +124,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
                 }
                 let stamp = time.formatted(date: .omitted, time: .standard)
                 var request = Self.notice(app: app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), text: capture.text)
-                request["selection_chat"] = self.conversation
+                request["selection_chat"] = self.chat
                 request["selection_time"] = time.timeIntervalSince1970
                 if insert { request["command"] = "selection_insert" }
                 self.send(request)

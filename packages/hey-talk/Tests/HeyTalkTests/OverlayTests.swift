@@ -42,7 +42,7 @@ final class OverlayTests: XCTestCase {
         }
         XCTAssertEqual(requests, [true, false, true, false])
         overlay.showConversation(["phase": "thinking", "message": "Needs approval", "action": "Open chat", "approval": true])
-        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "", "Chats", "New Chat", "Selection Capture: Off"])
+        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "", "Chats", "New Chat", "Selection Capture: On"])
         overlay.showConversation(["phase": "speaking", "message": "Speaking", "action": "Stop voice", "interrupt": true])
         let interrupt = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "Listen for next message" })
         var interrupted = false; overlay.onInterruptConversation = { interrupted = true }
