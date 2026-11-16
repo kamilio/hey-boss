@@ -74,6 +74,7 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
     field(args, "description")?;
     let id = Uuid::new_v4().to_string();
     emit(json!({"ToolStarted":{"id":id,"input":args}}))?;
+    let mut exit_code = None;
     let result: Result<String> = async {
         let mut child = Command::new(login)
             .args(["-ilc", &format!("set +m; trap 'exit 143' TERM;\n{cmd}")])
@@ -92,6 +93,7 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
         })
         .await
         .context("Command timed out after 120 seconds")??;
+        exit_code = s.code();
         std::mem::forget(group);
         let combined = [o.trim_end(), e.trim_end()]
             .into_iter()
@@ -107,6 +109,7 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
     }
     .await;
     let mut out = args.clone();
+    out["exit_code"] = json!(exit_code);
     out["aggregatedOutput"] = json!(match &result {
         Ok(s) => s.clone(),
         Err(e) => e.to_string(),

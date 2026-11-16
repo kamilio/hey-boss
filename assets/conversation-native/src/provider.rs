@@ -54,7 +54,7 @@ pub async fn complete(
     messages: &[Value],
     tools: &[Value],
     speak: bool,
-) -> Result<Value> {
+) -> Result<(Value, Value)> {
     let body = json!({"model":"gpt-6.1-sol","instructions":prompt,"input":input(messages)?,"tools":tools,"stream":true,"store":false,"reasoning":{"effort":"low"},"text":{"verbosity":"low"}});
     let res = client.post(url).bearer_auth(key).json(&body).send().await?;
     if !res.status().is_success() {
@@ -118,7 +118,7 @@ pub async fn complete(
                     if !calls.is_empty() {
                         msg["tool_calls"] = json!(calls);
                     }
-                    return Ok(msg);
+                    return Ok((msg, event["response"]["usage"].clone()));
                 }
                 Some("error" | "response.failed" | "response.incomplete") => bail!(
                     "Conversation provider: {}",

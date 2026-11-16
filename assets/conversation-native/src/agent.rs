@@ -41,8 +41,27 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         .unwrap_or(json!("unavailable"));
     book.push(json!({"role":"user","content":format!("Observed pre-focus desktop context: {observed}\n\n{turn}")}))?;
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
+    let mut usage = Value::Null;
+    let mut add_usage = |reported: &Value| {
+        if reported.is_object() {
+            for (key, path) in [
+                ("input_tokens", "/input_tokens"),
+                ("cached_input_tokens", "/input_tokens_details/cached_tokens"),
+                ("output_tokens", "/output_tokens"),
+                (
+                    "reasoning_output_tokens",
+                    "/output_tokens_details/reasoning_tokens",
+                ),
+            ] {
+                usage[key] = json!(
+                    usage[key].as_u64().unwrap_or(0)
+                        + reported.pointer(path).and_then(Value::as_u64).unwrap_or(0)
+                );
+            }
+        }
+    };
     loop {
-        let msg = provider::complete(
+        let (msg, reported) = provider::complete(
             tools.http,
             url,
             key,
@@ -52,6 +71,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
             true,
         )
         .await?;
+        add_usage(&reported);
         let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
         let text = msg["content"].as_str().unwrap_or("").to_owned();
         book.push(msg)?;
@@ -69,7 +89,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         }
         if let Some(cut) = compact_at(&book.messages) {
             emit(json!({"AgentStatus":{"text":"Remembering the conversation…"}}))?;
-            let msg = provider::complete(
+            let (msg, reported) = provider::complete(
                 tools.http,
                 url,
                 key,
@@ -79,6 +99,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                 false,
             )
             .await?;
+            add_usage(&reported);
             let summary = msg["content"].as_str().context("Missing summary")?.trim();
             ensure!(
                 !summary.is_empty(),
@@ -90,7 +111,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
             book.compact(cut,json!({"role":"system","name":"compaction","content":String::from_utf16(&formatted)?}))?;
         }
         if calls.is_empty() {
-            emit(json!({"TurnCompleted":{"status":"Completed","output":text}}))?;
+            emit(json!({"TurnCompleted":{"status":"Completed","output":text,"usage":usage}}))?;
             return Ok(());
         }
     }
