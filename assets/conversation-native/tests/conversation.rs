@@ -70,11 +70,42 @@ async fn mock(items: Vec<Value>) -> Result<(String, tokio::task::JoinHandle<Resu
         }),
     ))
 }
+#[test]
+fn agent_requires_a_configured_root_before_opening_chat_history() -> Result<()> {
+    let tmp = scratch();
+    let home = tmp.path();
+    let state = home.join("session.json");
+    let journal = state.with_extension("jsonl");
+    for resume in [false, true] {
+        if resume {
+            fs::create_dir(home.join(".hey-boss"))?;
+            fs::write(home.join(".hey-boss/config.yaml"), "conversation: {}\n")?;
+            fs::write(&journal, "existing history\n")?;
+        }
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_conversation-agent"))
+            .arg(&state)
+            .env("HOME", home)
+            .output()?;
+        assert!(!output.status.success());
+        let event: Value = serde_json::from_slice(&output.stdout)?;
+        assert!(
+            event["error"]
+                .as_str()
+                .unwrap()
+                .contains("set conversation.root in ~/.hey-boss/config.yaml")
+        );
+        if resume {
+            assert_eq!(fs::read_to_string(&journal)?, "existing history\n");
+        } else {
+            assert!(!journal.exists());
+        }
+    }
+    Ok(())
+}
 #[tokio::test]
 async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
     let tmp = scratch();
     let home = tmp.path();
-    assert_eq!(context::settings(home)?.0, home.join("Workspace/root"));
     fs::create_dir(home.join(".hey-boss"))?;
     fs::write(
         home.join(".hey-boss/config.yaml"),

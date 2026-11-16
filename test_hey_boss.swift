@@ -5839,6 +5839,7 @@ func auditConversationAgent(_ root: String) {
     }
     defer { try? files.removeItem(at: sandboxHome.appendingPathComponent(".hey-boss/proxy/config.access-keys.json")) }
     let work = sandboxHome.appendingPathComponent("Workspace/root")
+    try! Data("conversation:\n  root: ~/Workspace/root\n".utf8).write(to: sandboxHome.appendingPathComponent(".hey-boss/config.yaml"))
     try! files.createDirectory(at: work, withIntermediateDirectories: true)
     try! Data(contentsOf: home.appendingPathComponent("Workspace/root/AGENTS.md")).write(to: work.appendingPathComponent("AGENTS.md"))
     let prompts = try! String(contentsOf: URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_AGENT_PROMPTS"]!), encoding: .utf8).components(separatedBy: "\n---\n")

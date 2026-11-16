@@ -422,7 +422,7 @@ Ask Sol to show an image or draw a diagram. It can open an image URL or a local 
 
 **… → Show Voice Recordings** opens local diagnostic WAVs for the five most recently recorded chats. Each chat keeps its latest twelve 30-second segments (about six minutes, at most 116 MB across all chats). Left is the active microphone; right is assistant playback. Foreground microphone warm-up is excluded. Segment names are Unix timestamps in milliseconds; their parent folder matches the chat ID in the macOS Console voice logs (subsystem `local.hey-boss.desktop`).
 
-Sol starts in `~/Workspace/root`. To change this, set `conversation.root` in `~/.hey-boss/config.yaml`, then reopen the conversation:
+New and resumed Sol chats require a working folder. Set `conversation.root` in `~/.hey-boss/config.yaml`, then reopen the conversation:
 
 ```yaml
 conversation:

@@ -17,17 +17,19 @@ pub fn optional(path: &Path) -> Result<Option<String>> {
 }
 pub fn settings(home: &Path) -> Result<(PathBuf, PathBuf)> {
     let mut cfg = Value::Null;
+    let mut config_path = ".hey-boss/config.yaml";
     for p in [".hey-boss/config.yaml", ".hey-boss/config.json"] {
         if let Some(s) = optional(&home.join(p))? {
             cfg = serde_yaml_ng::from_str(&s)?;
+            config_path = p;
             break;
         }
     }
     let c = &cfg["conversation"];
-    let root = match c.get("root") {
-        None => "~/Workspace/root",
-        Some(v) => v.as_str().context("Invalid conversation.root")?,
-    };
+    let root = c["root"]
+        .as_str()
+        .filter(|s| !s.trim().is_empty())
+        .with_context(|| format!("Orchestrator, configure your root folder: set conversation.root in ~/{config_path}."))?;
     let root = root
         .strip_prefix("~/")
         .map(|p| home.join(p))
