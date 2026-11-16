@@ -129,7 +129,7 @@ export function mountGitFiles(createActivity = createGitActivity) {
     const entry = entries.get(event.target); if (!entry) return;
     const { count } = event.detail;
     if (!entry.comments && count) {
-      entry.comments = document.createElement("button"); entry.comments.type = "button"; entry.comments.className = "git-file-comments";
+      entry.comments = document.createElement("button"); entry.comments.type = "button"; entry.comments.className = "button small git-file-comments";
       entry.comments.setAttribute("aria-controls", entry.content.id); entry.file.querySelector("header").after(entry.comments);
     }
     if (!entry.comments) return;

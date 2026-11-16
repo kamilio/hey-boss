@@ -14,12 +14,20 @@
   <script type="module" src="/commit-review.js"></script>
 </head>
 <body>
-  <main>
+  <a class="skip-link" href="#review-main">Skip to commit review</a>
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="/"><img src="/icon.png" alt="" width="30" height="30">Hey Boss</a>
+      <span class="header-divider" aria-hidden="true"></span>
+      <span class="review-label">Commit review</span>
+    </div>
+  </header>
+  <main id="review-main" tabindex="-1">
     <p role="status" id="loading">Loading commit review…</p>
     <div id="review" hidden>
       <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
       <header>
-        <div class="eyebrow">Commit review <span aria-hidden="true">/</span> <code id="commit-sha"></code></div>
+        <div class="eyebrow">Commit <code id="commit-sha"></code></div>
         <div class="detail-top"><h1></h1></div>
         <div class="review-byline">
           <span id="author"></span><time id="authored"></time>

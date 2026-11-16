@@ -41,7 +41,7 @@ export function mountGitComments({ legacy = false, comments: initialComments = [
   };
   let comments = initialComments, rangeAnchor = null, pendingWrites = 0, loading = false;
   const loadStatus = document.createElement("div"); loadStatus.className = "comment-load-status"; loadStatus.hidden = true;
-  loadStatus.innerHTML = '<span role="status" aria-live="polite"></span><button class="retry-comments" type="button">Retry comments</button>';
+  loadStatus.innerHTML = '<span role="status" aria-live="polite"></span><button class="button small retry-comments" type="button">Retry comments</button>';
   root.prepend(loadStatus);
   const loadMessage = loadStatus.querySelector("span"), retry = loadStatus.querySelector("button");
   const outside = document.createElement("details"); outside.className = "outside-comments"; outside.id = "git-outside-comments"; outside.hidden = true; outside.open = true;
@@ -81,7 +81,7 @@ export function mountGitComments({ legacy = false, comments: initialComments = [
     return entry.thread;
   };
   const trimThread = (entry) => { if (entry.thread && !entry.thread.children.length) { entry.thread.remove(); entry.thread = null; } };
-  const toolsHtml = '<button type="button" class="edit-comment edit">Edit</button><button type="button" class="delete-comment delete">Delete</button>';
+  const toolsHtml = '<button type="button" class="button small edit-comment edit">Edit</button><button type="button" class="button small delete-comment delete">Delete</button>';
   const editorPoint = (form) => JSON.parse(form.dataset.location);
   const formEntry = new WeakMap();
   root.addEventListener("git-show-file-comments", event => {
@@ -154,7 +154,7 @@ export function mountGitComments({ legacy = false, comments: initialComments = [
     }
     form = document.createElement("form"); form.className = "comment-form"; form.dataset.location = JSON.stringify(point);
     if (comment) { form.dataset.id = comment.id; form.dataset.commentId = comment.id; editors.set(comment.id, form); }
-    form.innerHTML = `<div class="comment-location">${escape(entryLabel(entry, point))} · ${entry === outsideEntry ? "Original location kept" : "Shift-click another + to select a range"}</div><textarea required maxlength="10000" aria-label="Comment text" placeholder="Leave a clear, actionable comment…">${escape(comment?.body ?? "")}</textarea><div class="comment-actions actions"><span class="comment-error form-error" role="alert"></span><span class="comment-shortcut">Ctrl+Enter to save</span><button type="button" class="cancel-comment cancel">Cancel</button><button class="submit-comment save-comment" aria-busy="false">${comment ? "Save changes" : "Add comment"}</button></div>`;
+    form.innerHTML = `<div class="comment-location">${escape(entryLabel(entry, point))} · ${entry === outsideEntry ? "Original location kept" : "Shift-click another + to select a range"}</div><textarea required maxlength="10000" aria-label="Comment text" placeholder="Leave a clear, actionable comment…">${escape(comment?.body ?? "")}</textarea><div class="comment-actions actions"><span class="comment-error form-error" role="alert"></span><span class="comment-shortcut">Ctrl+Enter to save</span><button type="button" class="button small cancel-comment cancel">Cancel</button><button class="button small primary submit-comment save-comment" aria-busy="false">${comment ? "Save changes" : "Add comment"}</button></div>`;
     formEntry.set(form, entry);
     if (comment && entry === outsideEntry) entry.views.get(comment.id).after(form); else threadFor(entry).append(form);
     draw(); form.querySelector("textarea").focus(); return form;
@@ -220,7 +220,7 @@ export function mountGitComments({ legacy = false, comments: initialComments = [
       if (editors.has(id)) { editors.get(id).querySelector("textarea").focus(); return; }
       const previous = deleting.get(id); if (previous) previous.querySelector(".comment-tools").innerHTML = toolsHtml;
       deleting.set(id, view); view.querySelector(".comment-error").textContent = "";
-      view.querySelector(".comment-tools").innerHTML = '<span class="inline-delete-label">Delete this comment?</span><button type="button" class="cancel-inline-delete cancel-delete">Cancel</button><button type="button" class="confirm-inline-delete confirm-delete" aria-busy="false">Delete</button>';
+      view.querySelector(".comment-tools").innerHTML = '<span class="inline-delete-label">Delete this comment?</span><button type="button" class="button small cancel-inline-delete cancel-delete">Cancel</button><button type="button" class="button small danger confirm-inline-delete confirm-delete" aria-busy="false">Delete</button>';
       view.querySelector(".confirm-delete").focus(); return;
     }
     if (event.target.closest(".cancel-delete")) {

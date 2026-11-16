@@ -10,7 +10,7 @@ export function createGitActivity({ name, className, controls, insert, collapsed
     if (!notice && !text) return;
     if (!notice) {
       notice = document.createElement("div"); notice.className = `git-activity ${className}`;
-      notice.innerHTML = '<span role="status" aria-live="polite" aria-atomic="true"></span><button type="button"></button>';
+      notice.innerHTML = '<span role="status" aria-live="polite" aria-atomic="true"></span><button class="button small" type="button"></button>';
       insert(notice); message = notice.querySelector("span"); button = notice.querySelector("button"); button.setAttribute("aria-controls", controls);
     }
     if (!text && notice.contains(document.activeElement)) focus()?.focus({ preventScroll: true });

@@ -740,10 +740,6 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "text/javascript; charset=utf-8",
                 include_bytes!("web/git-review/git-activity.js"),
             )),
-            "/git-review/review.css" => Some((
-                "text/css; charset=utf-8",
-                include_bytes!("web/git-review/review.css"),
-            )),
             "/pages" => Some(("text/html; charset=utf-8", include_bytes!("web/pages.html"))),
             "/pages.js" => Some(("text/javascript; charset=utf-8", include_bytes!("web/pages.js"))),
             "/pages.css" => Some(("text/css; charset=utf-8", include_bytes!("web/pages.css"))),

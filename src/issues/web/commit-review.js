@@ -41,6 +41,7 @@ function renderMessage() {
 }
 async function start() {
   if (!project || !Number.isSafeInteger(number) || number < 1 || !commit) throw new Error('Open a commit from its task to review it.');
+  $('.brand').href = `/#${new URLSearchParams({project,...(host?{host}:{})})}`;
   const response = await fetch('/api/bootstrap'); boot = await response.json();
   if (!response.ok || !boot.ok) throw new Error(boot.error?.message || 'Could not connect to Hey Boss');
   const [result, task] = await Promise.all([review({command:'view'}), request({action:'view',number})]);
@@ -86,4 +87,4 @@ async function start() {
   // Comments revise the task version too; refresh guards without rebuilding editors.
   document.addEventListener('git-comment-activity', event => { if (event.detail.state === 'success') refreshTask().catch(showError); });
 }
-start().catch(error => { document.body.replaceChildren(); const main = document.createElement('main'); const heading = document.createElement('h1'); heading.textContent = 'Could not open this review'; const message = document.createElement('p'); message.textContent = error.message; const link = document.createElement('a'); link.href = `/#${new URLSearchParams({project:project||'',issue:number||'',...(host?{host}:{})})}`; link.textContent = 'Back to task'; main.append(heading,message,link); document.body.append(main); });
+start().catch(error => { const main = $('#review-main'); const heading = document.createElement('h1'); heading.textContent = 'Could not open this review'; const message = document.createElement('p'); message.textContent = error.message; const link = document.createElement('a'); link.href = `/#${new URLSearchParams({project:project||'',issue:number||'',...(host?{host}:{})})}`; link.textContent = 'Back to task'; main.replaceChildren(heading,message,link); });
