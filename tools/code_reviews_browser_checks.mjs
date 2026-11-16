@@ -311,6 +311,16 @@ try {
   await page.goto(url + "&review=" + approval.id);
   await page.getByRole("link",{name:"View published review ↗"}).waitFor();
   assert.equal(await archive.getAttribute("aria-pressed"), "true");
+  // Link to a review still on page one, but well below the fold.
+  for (let number = 80; number < 95; number++)
+    op({...first, number});
+  await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
+  await page.getByRole("link", {name:"Open pending review for PR #73"}).click();
+  const selected = page.getByRole("button", {name:"Collapse review for PR #73"});
+  await selected.waitFor();
+  assert.ok(await selected.evaluate(el => el === document.activeElement
+    && el.getBoundingClientRect().top >= 0 && el.getBoundingClientRect().bottom <= innerHeight));
+  assert.ok(await page.locator("#reviews-detail").evaluate(el => el.getBoundingClientRect().top < innerHeight));
   assert.deepEqual(errors, []);
   console.log(
     "Code Reviews: disabled, empty, approval, changes requested, both edits, diff anchors, stale publication and 8 visual variants passed.",

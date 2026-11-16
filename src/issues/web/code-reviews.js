@@ -426,7 +426,13 @@
       error("Code Reviews is disabled for this project.");
       return;
     }
-    await load(new URLSearchParams(location.hash.slice(1)).get("review"));
+    const id = new URLSearchParams(location.hash.slice(1)).get("review");
+    await load(id);
+    if (id && review?.id === Number(id)) {
+      const selected = $(".review-toggle[aria-expanded=true]");
+      selected.closest(".review-index-row").scrollIntoView({block: "start"});
+      selected.focus({preventScroll: true});
+    }
   }
   for (const [id, archive] of [["#reviews-pending", false], ["#reviews-archive", true]]) {
     $(id).onclick = () => {
