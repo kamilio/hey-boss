@@ -141,10 +141,10 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle(.submit))
     }
 
-    func testHyperCStartsWithoutContext() {
+    func testHyperCCapturesSelection() {
         var hotkey = HotkeyState()
         XCTAssertEqual(hotkey.keyDown(code: 8, hyper: false, repeated: false), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 8, hyper: true, repeated: false), .startConversation)
+        XCTAssertEqual(hotkey.keyDown(code: 8, hyper: true, repeated: false), .captureSelection)
         XCTAssertEqual(hotkey.keyDown(code: 8, hyper: true, repeated: true), .none)
     }
 

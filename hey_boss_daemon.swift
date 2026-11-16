@@ -8034,8 +8034,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             selectionChip.toolTip = selections.last?.source
         }
     }
-    @discardableResult func addSelection(chat: UUID, time: TimeInterval, source: String, text: String) -> Int? {
-        guard chat == library.selected, voiceStatus["selection_chat"] != nil, !text.isEmpty, time.isFinite else { return nil }
+    @discardableResult func addSelection(chat: UUID?, time: TimeInterval, source: String, text: String) -> Int? {
+        guard restoreError == nil, !text.isEmpty, time.isFinite else { return nil }
+        if let chat, chat != library.selected || voiceStatus["selection_chat"] == nil { return nil }
         selections.append(Selection(time: time, source: source, text: text))
         save()
         return selections.count
@@ -8647,7 +8648,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 "microphone": !micMuted && (phase == .starting || (audio != nil && audio?.stopped == false)),
                 "approval": approvalSheet != nil,
                 "message": approvalSheet == nil ? label : "Needs approval", "detail": status.stringValue, "action": action, "interrupt": canListenNext && approvalSheet == nil]
-        if restoreError == nil, !micMuted, (window.isVisible || audio != nil) {
+        if restoreError == nil, !micMuted, audio != nil {
             result["selection_chat"] = library.selected.uuidString
         }
         if canPauseListening { result["listeningPaused"] = micMuted }
@@ -11414,15 +11415,16 @@ struct Daemon {
                         }
                         #endif
                         reply.send(["status": "error", "error": "Voice chat requires macOS 26."])
-                    } else if request.command == "selection_notice" {
+                    } else if request.command == "selection_notice" || request.command == "selection_insert" {
                         onMain {
                             var number: Int?
                             #if canImport(FoundationModels)
-                            if #available(macOS 26, *), let id = request.selection_chat,
+                            if #available(macOS 26, *), request.command == "selection_insert" || request.selection_chat != nil,
                                let time = request.selection_time, let source = request.selection_source, let text = request.selection_text {
-                                number = overview.currentConversation().addSelection(chat: id, time: time, source: source, text: text)
+                                number = overview.currentConversation().addSelection(chat: request.selection_chat, time: time, source: source, text: text)
                             }
                             #endif
+                            if request.command == "selection_insert", number == nil { reply.send(["status": "error"]); return }
                             ui.showSelection(request, number: number); reply.send(["status": "ok"])
                         }
                     } else if request.command == "toast" {

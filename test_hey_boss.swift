@@ -20,10 +20,12 @@ func audit() {
     if #available(macOS 26, *), let folder = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SELECTION_CHAT"] {
         let url = URL(fileURLWithPath: folder).appendingPathComponent("current.json")
         let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: url)
+        precondition(chat.voiceStatus["selection_chat"] == nil && !chat.window.isVisible)
+        precondition(chat.addSelection(chat: nil, time: 1.4, source: "PR", text: "    old()") == 1)
+        precondition(chat.voiceStatus["selection_chat"] == nil && !chat.window.isVisible)
         chat.connect(ReviewAudio())
         let id = UUID(uuidString: chat.voiceStatus["selection_chat"] as! String)!
         precondition(chat.addSelection(chat: UUID(), time: 1.4, source: "Wrong", text: "stale") == nil)
-        precondition(chat.addSelection(chat: id, time: 1.4, source: "PR", text: "    old()") == 1)
         precondition(chat.addSelection(chat: id, time: 3.4, source: "cmux", text: "new()\nnext()") == 2)
         let reopened = VoiceConversation(cli: chat.cli, saveURL: url)
         let wire = Pipe(); reopened.writer = wire.fileHandleForWriting
@@ -32,9 +34,12 @@ func audit() {
         reopened.respond("Compare this with that.", ends: [(0.3, 7), (1.2, 12), (2.1, 17), (3.2, 23)])
         let expected = "Compare this [1] with that. [2]\n\n[1] PR\n    old()\n\n[2] cmux\nnew()\nnext()"
         precondition(reopened.rows.last?.stringValue == expected)
-        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.15))
         var ready = pollfd(fd: wire.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
-        precondition(poll(&ready, 1, 1000) == 1, "No message reached the agent")
+        let sendDeadline = Date().addingTimeInterval(3)
+        while poll(&ready, 1, 0) == 0, Date() < sendDeadline {
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.02))
+        }
+        precondition(ready.revents & Int16(POLLIN) != 0, "No message reached the agent")
         let payload = try! JSONSerialization.jsonObject(with: wire.fileHandleForReading.availableData) as! [String:Any]
         precondition(payload["turn"] as? String == expected)
         reopened.process = nil

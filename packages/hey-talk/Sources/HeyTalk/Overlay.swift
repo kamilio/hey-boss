@@ -286,7 +286,7 @@ final class Overlay {
         pillContent.addSubview(editSpelling)
         chatButton.title = ""; chatButton.isBordered = false
         chatButton.image = NSImage(systemSymbolName: "bubble.left.and.bubble.right", accessibilityDescription: nil)
-        chatButton.toolTip = "Start conversation · Hyper+C"; chatButton.setAccessibilityLabel("Start conversation")
+        chatButton.toolTip = "Start conversation"; chatButton.setAccessibilityLabel("Start conversation")
         chatButton.target = self; chatButton.action = #selector(startConversation)
         pillContent.addSubview(chatButton)
         listenPause.isBordered = false; listenPause.imagePosition = .imageOnly
@@ -549,6 +549,7 @@ final class Overlay {
             if !stops, let phase = conversation["phase"] as? String, phase != "idle", phase != "starting" {
                 menu.addItem(withTitle: phase == "recording" ? "Stop recording" : "Stop conversation", action: #selector(stopConversation), keyEquivalent: "").target = self
             }
+            menu.addItem(.separator()); menu.addItem(.sectionHeader(title: "Chats"))
             if conversation["approval"] as? Bool != true { menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self }
             if conversation["action"] as? String != "Cancel opening chat" {
                 menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
@@ -577,10 +578,9 @@ final class Overlay {
             }
         }
         menu.addItem(.separator())
-        menu.addItem(.sectionHeader(title: "Conversation"))
+        menu.addItem(.sectionHeader(title: "Chats"))
         menu.addItem(withTitle: "Open Transcript", action: #selector(openTranscript), keyEquivalent: "").target = self
-        let start = menu.addItem(withTitle: "Start Conversation", action: #selector(startConversation), keyEquivalent: "c")
-        start.target = self; start.keyEquivalentModifierMask = [.control, .command, .option, .shift]
+        menu.addItem(withTitle: "New Chat", action: #selector(startConversation), keyEquivalent: "").target = self
         let recap = menu.addItem(withTitle: "Catch Up", action: #selector(catchUp), keyEquivalent: "m")
         recap.target = self; recap.keyEquivalentModifierMask = [.control, .command, .option, .shift]
         menu.addItem(selectionCapture.menuItem())

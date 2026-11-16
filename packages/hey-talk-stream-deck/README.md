@@ -7,7 +7,7 @@ The keys follow the pill: indigo waveform at rest, teal bars for microphone leve
 | Keyboard | Stream Deck action |
 | --- | --- |
 | Hyper+R | Dictation, including switching out of a conversation and back |
-| Hyper+C | Conversation; press again for the pill’s current action |
+| — | Conversation; press again for the pill’s current action |
 | Hyper+V | Auto Dictate |
 | Hyper+S / Hyper+T | Playback / Read Aloud |
 | Hyper+M | Catch Up |

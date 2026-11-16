@@ -73,18 +73,35 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
             guard let down, let point else { return }
             addressOnly = hypot(point.x - down.x, point.y - down.y) < 3 && event.clickCount < 2 && !event.modifierFlags.contains(.shift)
         }
+        capture(at: keyboard ? nil : point, addressOnly: addressOnly, insert: false)
+    }
+
+    func insertSelection() {
+        guard AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) else {
+            toast("Selection not added", "Allow Hey Talk in Accessibility to capture selected text."); return
+        }
+        capture(at: nil, addressOnly: false, insert: true)
+    }
+
+    private func capture(at point: CGPoint?, addressOnly: Bool, insert: Bool) {
         guard let app = NSWorkspace.shared.frontmostApplication else { return }
         let browser = BrowserPage.isBrowser(app)
-        guard browser || (!addressOnly && ["com.cmuxterm.app", "com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(app.bundleIdentifier)) else { return }
-        let id = session, time = Date(), hit = keyboard ? nil : point
+        guard browser || (!addressOnly && ["com.cmuxterm.app", "com.t3tools.t3code", "com.tinyspeck.slackmacgap"].contains(app.bundleIdentifier)) else {
+            if insert { toast("Selection not added", "Select text in your browser, cmux, T3, or Slack.") }
+            return
+        }
+        let id = session, time = Date()
         queue.async {
             guard app.isActive else { return }
-            let capture = Self.read(app, at: hit, addressOnly: addressOnly)
+            let capture = Self.read(app, at: point, addressOnly: addressOnly)
             DispatchQueue.main.async {
-                guard self.session == id, self.enabled else { return }
-                guard let capture else { return }
+                guard self.session == id, insert || self.enabled else { return }
+                guard let capture else {
+                    if insert { self.toast("Selection not added", "No selected text in the focused window.") }
+                    return
+                }
                 if capture.text.isEmpty {
-                    if !self.terminalHintShown {
+                    if insert || !self.terminalHintShown {
                         self.terminalHintShown = true
                         self.toast("cmux", "Hold Shift while dragging to select terminal text.")
                     }
@@ -94,6 +111,7 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
                 var request = Self.notice(app: app.localizedName ?? "Selection", detail: ([stamp] + capture.source).joined(separator: "  ·  "), text: capture.text)
                 request["selection_chat"] = self.conversation
                 request["selection_time"] = time.timeIntervalSince1970
+                if insert { request["command"] = "selection_insert" }
                 self.send(request)
             }
         }
@@ -177,6 +195,11 @@ final class SelectionCapture: NSObject, NSMenuItemValidation {
     }
 
     private func send(_ request: [String: Any]) {
-        queue.async { _ = try? TalkService.requestDesktop(request) }
+        queue.async {
+            let reply = try? TalkService.requestDesktop(request)
+            if request["command"] as? String == "selection_insert", reply?["status"] as? String != "ok" {
+                self.toast("Selection not added", "Couldn’t attach the selection to the current Hey Boss chat.")
+            }
+        }
     }
 }

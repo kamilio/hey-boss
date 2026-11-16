@@ -42,7 +42,7 @@ final class OverlayTests: XCTestCase {
         }
         XCTAssertEqual(requests, [true, false, true, false])
         overlay.showConversation(["phase": "thinking", "message": "Needs approval", "action": "Open chat", "approval": true])
-        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "New Chat", "Selection Capture: Off"])
+        XCTAssertEqual(overlay.contextMenu().items.map(\.title), ["Open chat", "Stop conversation", "", "Chats", "New Chat", "Selection Capture: Off"])
         overlay.showConversation(["phase": "speaking", "message": "Speaking", "action": "Stop voice", "interrupt": true])
         let interrupt = try XCTUnwrap(overlay.contextMenu().items.first { $0.title == "Listen for next message" })
         var interrupted = false; overlay.onInterruptConversation = { interrupted = true }
@@ -223,7 +223,7 @@ final class OverlayTests: XCTestCase {
         var historyOpened = false
         overlay.onShowHistory = { historyOpened = true }
         let menu = overlay.contextMenu()
-        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "", "Conversation", "Open Transcript", "Start Conversation", "Catch Up", "Selection Capture: Off", "", "Setup", "Paste Permissions…"])
+        XCTAssertEqual(menu.items.map(\.title), ["Dictation History…", "Vocabulary…", "", "Dictation", "AI Correction", "Auto Submit", "Auto Dictation", "Return to Field Before Pasting", "", "Speech", "Read Aloud", "", "Chats", "Open Transcript", "New Chat", "Catch Up", "Selection Capture: Off", "", "Setup", "Paste Permissions…"])
         let transcript = try XCTUnwrap(menu.item(withTitle: "Open Transcript"))
         var opened = false
         overlay.onOpenTranscript = { opened = true }
