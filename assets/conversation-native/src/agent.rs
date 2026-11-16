@@ -80,12 +80,36 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         }
         for call in &calls {
             let name = field(&call["function"], "name")?;
+            let id = field(call, "id")?;
+            let mut activity = None;
             let content: Result<Value> = async {
-                let args = serde_json::from_str(field(&call["function"], "arguments")?)?;
+                let args: Value = serde_json::from_str(field(&call["function"], "arguments")?)?;
+                if name == "delegate" {
+                    let provider = match args.get("provider") {
+                        None => "t3", Some(_) => field(&args, "provider")?,
+                    };
+                    anyhow::ensure!(matches!(provider, "t3" | "codex" | "claude"), "Unknown delegate provider");
+                    let request = field(&args, "request")?;
+                    let mut item = json!({"provider":provider,"request":request,"description":format!("{} · {}", match provider {"t3"=>"T3","claude"=>"Claude",_=>"Codex"}, request.lines().next().unwrap_or(""))});
+                    emit(json!({"ToolStarted":{"id":id,"input":item}}))?;
+                    let result = crate::delegate::run(tools, id, &mut item).await;
+                    activity = Some(item);
+                    return result.map(Value::String);
+                }
                 tools.call(name, &args).await
             }
             .await;
-            book.push(json!({"role":"tool","name":name,"toolCallId":call["id"],"content":content.unwrap_or_else(|e|json!(e.to_string()))}))?;
+            let failed = content.is_err();
+            let content = content.unwrap_or_else(|e| json!(e.to_string()));
+            let mut record = json!({"role":"tool","name":name,"toolCallId":id,"content":content});
+            if activity.is_some() {
+                record["failed"] = json!(failed);
+            }
+            book.push(record)?;
+            if let Some(mut item) = activity {
+                item["aggregatedOutput"] = content;
+                emit(json!({"ToolCompleted":{"id":id,"output":item,"failed":failed}}))?;
+            }
         }
         if let Some(cut) = compact_at(&book.messages) {
             emit(json!({"AgentStatus":{"text":"Remembering the conversation…"}}))?;

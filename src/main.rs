@@ -281,6 +281,8 @@ enum Command {
     },
     #[command(hide = true)]
     WorkspaceChat {
+        #[arg(long, value_enum, default_value = "codex")]
+        provider: hey_boss::agent_runtime::Provider,
         #[arg(long)]
         resume: Option<String>,
     },
@@ -503,8 +505,8 @@ fn run() -> std::io::Result<()> {
     match &cli.command {
         Command::Agent(AgentAction::Exec(exec)) => return exec.run(),
         Command::Agent(AgentAction::Chats(action)) => return action.run(),
-        Command::WorkspaceChat { resume } => {
-            if let Err(error) = workspace_chat::run(resume.clone()) {
+        Command::WorkspaceChat { resume, provider } => {
+            if let Err(error) = workspace_chat::run(*provider, resume.clone()) {
                 println!("{}", serde_json::json!({"error":error.to_string()}));
                 return Err(error);
             }

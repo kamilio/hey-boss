@@ -232,6 +232,7 @@ func audit() {
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_TURN_END"] {
         auditTurnEnd(URL(fileURLWithPath: root)); return
     }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DELEGATE"] { auditDelegate(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_INTERRUPTED_CHAT"] { auditInterruptedChat(root); return }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
@@ -5081,6 +5082,32 @@ func auditTurnEnd(_ folder: URL) {
     precondition(starts == 1 && ends.count == 1 && ends[0] - stop < 2.35,
                  "A finished question must get a model-confirmed endpoint before the old silence timeout")
     print("PASS local Smart Turn: kept the thinking pause and ended the complete question early")
+}
+
+@available(macOS 26, *)
+func auditDelegate(_ root: String) {
+    let folder = URL(fileURLWithPath: root)
+    let path = folder.appendingPathComponent("current.json")
+    try! Data(#"{"messages":[{"speaker":"You","text":"Review both paths."}]}"#.utf8).write(to: path)
+    let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: path)
+    let request = "Check delivery.\nInclude retries."
+    let call: [String:Any] = ["description":"T3 · Check delivery.", "provider":"t3", "request":request, "link":"t3code://example"]
+    for id in ["first", "second", "interrupted"] {
+        chat.event(["ToolStarted":["id":id, "input":call]])
+    }
+    var answer = call; answer["aggregatedOutput"] = "First answer"
+    chat.event(["ToolCompleted":["id":"first","output":answer,"failed":false]])
+    let index = try! JSONSerialization.jsonObject(with: Data(contentsOf:path)) as! [String:Any]
+    let notebook = folder.appendingPathComponent((index["selected"] as! String) + ".agent.jsonl")
+    try! Data(#"{"role":"tool","name":"delegate","toolCallId":"second","content":"Recovered answer","failed":false}"#.appending("\n").utf8).write(to:notebook)
+    let reopened = VoiceConversation(cli: "/usr/bin/false", saveURL: path)
+    precondition(reopened.tools.count == 3)
+    for (id, value) in [("first","First answer"), ("second","Recovered answer"), ("interrupted","Interrupted")] {
+        let row = reopened.tools[id]!
+        reopened.showTool(row)
+        precondition(reopened.details[row]!.contains(request) && reopened.details[row]!.contains(value))
+    }
+    print("PASS native subagent request, response, recovery and interrupted rows")
 }
 
 @available(macOS 26, *)

@@ -150,7 +150,13 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
             && prompt.contains("Organize notes")
             && !prompt.contains("Private skill body")
     );
-    assert_eq!(req[0]["tools"].as_array().unwrap().len(), 5);
+    assert!(
+        req[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "delegate")
+    );
     assert_eq!(fs::read_to_string(cwd.join("one.txt"))?, "one\n");
     assert!(
         req[2]["input"].to_string().contains("function_call_output")
@@ -425,5 +431,49 @@ fn notebook_extends_the_same_file_and_recovers_an_interrupted_write() -> Result<
         .open(&journal)?
         .write_all(b"broken\n")?;
     assert!(Notebook::open(&state, &Value::Null).is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn delegate_defaults_to_t3_and_journals_the_exact_exchange() -> Result<()> {
+    let tmp = scratch();
+    let dir = tmp.path();
+    fs::write(
+        dir.join("hey-t3.mjs"),
+        r#"
+import {createInterface} from 'node:readline';
+const input = createInterface({input:process.stdin});
+input.once('line', line => {
+  console.log(JSON.stringify({Session:{link:"t3code://test"}}));
+  console.log(JSON.stringify({TurnCompleted:{status:"Completed",output:"Answer: "+JSON.parse(line).turn}}));
+  input.close();
+});
+"#,
+    )?;
+    let request = "Compare 'a' and $b.\nKeep both lines.";
+    let (url, server) = mock(vec![
+        tool("delegate", json!({"request":request})),
+        msg("Finished."),
+    ])
+    .await?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let mut p = Plugins {
+        focus: None,
+        home: dir,
+        cwd: dir,
+        login: Path::new("/bin/sh"),
+        resources: dir,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let path = dir.join("chat.agent.json");
+    agent::run(&path, &url, &json!({"turn":"Check."}), &mut p).await?;
+    let requests = server.await??;
+    let result = requests[1]["input"].as_array().unwrap().last().unwrap();
+    assert_eq!(result["call_id"], "call_1");
+    assert_eq!(result["output"], format!("Answer: {request}"));
+    let book = hey_boss_conversation::notebook::Notebook::open(&path, &Value::Null)?;
+    assert_eq!(book.messages[2]["content"], result["output"]);
+    assert_eq!(book.messages[2]["failed"], false);
     Ok(())
 }

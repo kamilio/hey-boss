@@ -114,3 +114,19 @@ test('server-generated thread IDs round trip without accepting path or query fra
     assert.throws(() => target(`t3code://threads/${env}/${thread}`));
   }
 });
+
+test('a delegation returns only its own completed reply', async () => {
+  const {delegateResult} = await import('./hey-t3.mjs');
+  const run = {id:'r', userMessageId:'m', status:'running'};
+  const projection = {runs:[run], visibleTurnItems:[
+    {item:{type:'assistant_message',runId:'r',text:'Progress'}},
+    {item:{type:'assistant_message',runId:'r',text:'Final answer'}},
+    {item:{type:'assistant_message',runId:'other',text:'Unrelated'}},
+  ]};
+  assert.equal(delegateResult(projection,'m'),null);
+  assert.equal(delegateResult(projection,'missing'),null);
+  run.status='failed';
+  assert.throws(()=>delegateResult(projection,'m'),/failed/);
+  run.status='completed';
+  assert.equal(delegateResult(projection,'m'),'Final answer');
+});

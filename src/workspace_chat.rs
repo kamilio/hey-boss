@@ -12,7 +12,7 @@ enum Input {
     Decision { decision: String, allow: bool },
 }
 
-pub fn run(resume: Option<String>) -> io::Result<()> {
+pub fn run(provider: Provider, resume: Option<String>) -> io::Result<()> {
     let (tx, rx) = mpsc::sync_channel(4);
     std::thread::spawn(move || {
         for line in io::stdin().lock().lines() {
@@ -22,12 +22,12 @@ pub fn run(resume: Option<String>) -> io::Result<()> {
         }
     });
     let launch = Launch {
-        provider: Provider::Codex,
+        provider,
         cwd: std::env::current_dir()?,
         binary: None,
         model: None,
         resume: resume.map(|id| SessionRef {
-            provider: Provider::Codex,
+            provider,
             id,
             path: None,
             model: None,
@@ -38,7 +38,7 @@ pub fn run(resume: Option<String>) -> io::Result<()> {
     };
     let mut session = AgentSession::launch_with_codex_config(
         launch,
-        Some(serde_json::json!({"model_verbosity":"low"})),
+        (provider == Provider::Codex).then(|| serde_json::json!({"model_verbosity":"low"})),
     )?;
     let mut out = io::stdout().lock();
     let mut active = false;

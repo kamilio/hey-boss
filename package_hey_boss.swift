@@ -36,7 +36,7 @@ func desktopBuild() throws -> String {
     var hash = SHA256()
     // CLI changes must not rewrite the app. Include every desktop packaging input.
     let rust = "assets/conversation-native"
-    var inputs = ["hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/chats.icns", "assets/chats-dock.swift", "assets/package-smart-turn.sh", "assets/smart-turn-LICENSE", "assets/onnxruntime-LICENSE", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
+    var inputs = ["assets/hey-t3.mjs", "hey_boss_daemon.swift", "package_hey_boss.swift", "Cargo.toml", "assets/hey-boss.icns", "assets/chats.icns", "assets/chats-dock.swift", "assets/package-smart-turn.sh", "assets/smart-turn-LICENSE", "assets/onnxruntime-LICENSE", "assets/mermaid-LICENSE", "assets/poe-code-LICENSE", "assets/signing-identity.sha1", rust + "/Cargo.toml"]
     for folder in ["assets", "assets/conversation-tools"] {
         inputs += try files.contentsOfDirectory(atPath: root.appendingPathComponent(folder).path)
             .filter { $0.hasSuffix(".md") }.map { folder + "/" + $0 }
@@ -182,6 +182,7 @@ try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
     .write(to: resources.appendingPathComponent("conversation.md"), options: .atomic)
 try Data(contentsOf: root.appendingPathComponent("assets/conversation-title.md"))
     .write(to: resources.appendingPathComponent("conversation-title.md"), options: .atomic)
+try Data(contentsOf: root.appendingPathComponent("assets/hey-t3.mjs")).write(to: resources.appendingPathComponent("hey-t3.mjs"), options: .atomic)
 for name in ["conversation-agent", "conversation-diagram"] {
     let dest = resources.appendingPathComponent(name)
     if files.fileExists(atPath: dest.path) { try files.removeItem(at: dest) }

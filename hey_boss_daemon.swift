@@ -7993,9 +7993,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let id: String
         let afterMessage: Int
         let description: String
-        let command: String
+        let command: String?
         var output: String
         var state: String
+        var provider: String?
+        var request: String?
+        var link: String?
     }
     private var activities: [ToolActivity] = []
     private var toolPanels: [NSButton: NSScrollView] = [:]
@@ -9354,6 +9357,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         child.arguments = [agentStateURL.path]
         var environment = ProcessInfo.processInfo.environment
         let home = FileManager.default.homeDirectoryForCurrentUser.path
+        environment["HEY_BOSS_CLI_PATH"] = cli
         environment["PATH"] = home + "/.local/bin:" + home + "/.cargo/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
         child.environment = environment
         try startBridge(child)
@@ -9506,7 +9510,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 terminal.event(["type":"item.completed", "item":["id":UUID().uuidString, "type":"agent_message", "text":text]])
             } else if kind == "ToolStarted" || kind == "ToolCompleted", let item = (data["input"] ?? data["output"]) as? [String:Any] {
                 let start = kind == "ToolStarted"
-                terminal.event(["type": start ? "item.started" : "item.completed", "item":["id":id, "type":"command_execution", "command":item["command"] ?? "", "aggregated_output":item["aggregatedOutput"] ?? "", "exit_code":item["exit_code"] ?? NSNull(), "status":start ? "in_progress" : data["failed"] as? Bool == true ? "failed" : "completed"]])
+                if let provider = item["provider"], let request = item["request"] {
+                    terminal.event(["type": start ? "item.started" : "item.completed", "item":["id":id, "type":"subagent", "provider":provider, "request":request, "response":item["aggregatedOutput"] ?? NSNull(), "link":item["link"] ?? NSNull(), "status": start ? "in_progress" : data["failed"] as? Bool == true ? "failed" : "completed"]])
+                } else { terminal.event(["type": start ? "item.started" : "item.completed", "item":["id":id, "type":"command_execution", "command":item["command"] ?? "", "aggregated_output":item["aggregatedOutput"] ?? "", "exit_code":item["exit_code"] ?? NSNull(), "status":start ? "in_progress" : data["failed"] as? Bool == true ? "failed" : "completed"]]) }
             }
         }
         switch kind {
@@ -9536,9 +9542,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 if !stream.isEmpty { finishMessage(stream) }
                 let isNew = !activities.contains { $0.id == id }
                 let activity = ToolActivity(id: id, afterMessage: messages.count, description: description,
-                    command: item["command"] as? String ?? "", output: item["aggregatedOutput"] as? String ?? "",
-                    state: kind == "ToolStarted" ? "Running" : data["failed"] as? Bool == true ? "Failed" : "Completed")
+                    command: item["command"] as? String, output: item["aggregatedOutput"] as? String ?? "",
+                    state: kind == "ToolStarted" ? "Running" : data["failed"] as? Bool == true ? "Failed" : "Completed",
+                    provider: item["provider"] as? String, request: item["request"] as? String, link: item["link"] as? String)
                 if let index = activities.firstIndex(where: { $0.id == id }) {
+                    if let link = activity.link { activities[index].link = link }
                     activities[index].output = activity.output; activities[index].state = activity.state
                     renderTool(activities[index])
                 } else { activities.append(activity); renderTool(activity) }
@@ -9588,7 +9596,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         button.image = NSImage(systemSymbolName: running ? "circle.dotted" : failed ? "exclamationmark.circle" : activity.state == "Interrupted" ? "stop.circle" : "checkmark.circle", accessibilityDescription: activity.state)
         button.imagePosition = .imageLeading; button.isBordered = false
         button.contentTintColor = failed ? .systemOrange : .tertiaryLabelColor
-        button.lineBreakMode = .byTruncatingTail; button.toolTip = activity.state + " · Show command and output"
+        button.lineBreakMode = .byTruncatingTail; button.toolTip = activity.state + (activity.provider == nil ? " · Show command and output" : " · Show request and response")
         button.setAccessibilityLabel(activity.description + " · " + activity.state)
         button.target = self; button.action = #selector(showTool(_:))
         if tools[activity.id] == nil {
@@ -9598,9 +9606,25 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             group.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
             button.widthAnchor.constraint(lessThanOrEqualTo: group.widthAnchor).isActive = true
         }
-        details[button] = activity.command + "\n\n" + activity.state + (activity.output.isEmpty ? "" : "\n" + activity.output)
-        if let panel = toolPanels[button], let field = panel.documentView as? NSTextView { field.string = details[button]! }
+        if let provider = activity.provider, let request = activity.request {
+            let name = provider == "t3" ? "T3" : provider.capitalized
+            let label = failed ? "Error" : activity.state == "Completed" ? "Response from " + name : activity.state
+            details[button] = "Request to " + name + "\n" + request + "\n\n" + label + (activity.output.isEmpty ? "" : "\n" + activity.output) + (activity.link.map { "\n\n" + $0 } ?? "")
+        } else {
+            details[button] = (activity.command ?? "") + "\n\n" + activity.state + (activity.output.isEmpty ? "" : "\n" + activity.output)
+        }
+        if let panel = toolPanels[button], let field = panel.documentView as? NSTextView {
+            field.string = details[button]!
+            if activity.provider != nil { styleExchange(field, link: activity.link) }
+        }
         if follow { revealLatest() }
+    }
+    private func styleExchange(_ field: NSTextView, link: String?) {
+        field.font = .systemFont(ofSize: 13); field.textColor = .labelColor
+        if let link, link.hasPrefix("t3code://"), let url = URL(string: link), field.string.hasSuffix(link) {
+            let range = (field.string as NSString).range(of: link, options: .backwards)
+            field.textStorage?.addAttribute(.link, value: url, range: range)
+        }
     }
     func detailView(_ text: String) -> NSScrollView {
         let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 145))
@@ -9614,6 +9638,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if let panel = toolPanels[sender] { panel.isHidden.toggle() }
             else {
                 let panel = detailView(details[sender] ?? sender.title)
+                if let activity = activities.first(where: { tools[$0.id] === sender && $0.provider != nil }),
+                   let field = panel.documentView as? NSTextView { styleExchange(field, link: activity.link) }
                 panel.drawsBackground = false; (panel.documentView as? NSTextView)?.drawsBackground = false
                 group.addArrangedSubview(panel); panel.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
                 panel.heightAnchor.constraint(equalToConstant: 145).isActive = true; toolPanels[sender] = panel
@@ -9772,9 +9798,22 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private func apply(_ saved: Saved) {
         directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
         selections = saved.selections ?? []; pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
+        let pending = Set((saved.activities ?? []).filter { $0.provider != nil && $0.state == "Running" }.map(\.id))
+        var recovered: [String:(String, Bool)] = [:]
+        if !pending.isEmpty, let data = try? Data(contentsOf: agentStateURL.deletingPathExtension().appendingPathExtension("jsonl"), options: .mappedIfSafe) {
+            // The helper fsyncs its result before notifying the window. Only inspect that notebook after an interrupted handoff.
+            for line in data.split(separator: 10).reversed() where recovered.count < pending.count {
+                guard let row = try? JSONSerialization.jsonObject(with: line) as? [String:Any], row["name"] as? String == "delegate",
+                      let id = row["toolCallId"] as? String, pending.contains(id), let failed = row["failed"] as? Bool,
+                      let text = row["content"] as? String else { continue }
+                recovered[id] = (text, failed)
+            }
+        }
         activities = (saved.activities ?? []).map { activity in
             var value = activity
-            if value.state == "Running" { value.state = "Interrupted" }
+            if let (output, failed) = recovered[value.id] {
+                value.output = output; value.state = failed ? "Failed" : "Completed"
+            } else if value.state == "Running" { value.state = "Interrupted" }
             return value
         }
         visuals = saved.visuals ?? []
