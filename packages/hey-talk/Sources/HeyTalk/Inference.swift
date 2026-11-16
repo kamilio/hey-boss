@@ -155,11 +155,19 @@ func runInferenceWorker(model: String, library: String, vocabulary: String) thro
         var parts: [String] = []
         while !remaining.isEmpty {
             let chunk = AudioCapture.recognitionChunk(remaining)
-            guard let result = chunk.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count), hotwords) }) else {
-                throw TalkError("Orukeet could not decode audio")
+            func recognize(_ audio: ArraySlice<Float>) throws -> String {
+                guard let result = audio.withUnsafeBufferPointer({ ht_transcribe(recognizer, $0.baseAddress, Int32($0.count), hotwords) }) else {
+                    throw TalkError("Orukeet could not decode audio")
+                }
+                defer { ht_free_text(result) }
+                return String(cString: result).trimmingCharacters(in: .whitespacesAndNewlines)
             }
-            let text = String(cString: result).trimmingCharacters(in: .whitespacesAndNewlines)
-            ht_free_text(result)
+            var text = try recognize(chunk)
+            // A short command can decode as blank when speech is close to the clip boundary.
+            if text.isEmpty, samples.count <= 5 * PCMFrame.rate, chunk.contains(where: { $0 != 0 }) {
+                let silence = [Float](repeating: 0, count: PCMFrame.rate / 2)
+                text = try recognize((silence + chunk + silence)[...])
+            }
             if !text.isEmpty { parts.append(text) }
             remaining = remaining[chunk.endIndex...]
         }
