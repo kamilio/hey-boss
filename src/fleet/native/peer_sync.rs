@@ -131,7 +131,25 @@ fn plan(
         waiting: vec![],
     };
     if enabled {
-        for (host, value) in document["machines"].as_object().into_iter().flatten() {
+        // Connect the two neighbors in each direction on a stable ring.
+        // Compute routes from configuration, not from which peers are online.
+        let mut hosts: Vec<_> = document["machines"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| value["sync_address"].is_string())
+            .map(|(host, _)| host.as_str())
+            .collect();
+        hosts.sort_unstable();
+        let index = hosts
+            .binary_search(&machine)
+            .expect("enabled machine is configured");
+        for (i, &host) in hosts.iter().enumerate() {
+            let distance = i.abs_diff(index);
+            if distance.min(hosts.len() - distance) > 2 {
+                continue;
+            }
+            let value = &document["machines"][host];
             let Some(address) = value["sync_address"].as_str().filter(|_| host != machine) else {
                 continue;
             };
@@ -143,12 +161,12 @@ fn plan(
                 let identity: Identity = serde_json::from_value(identity.clone())?;
                 identity.validate()?;
                 settings.peers.push(Peer {
-                    machine: host.clone(),
+                    machine: host.into(),
                     address: address.into(),
                     identity,
                 });
             } else {
-                settings.waiting.push(host.clone());
+                settings.waiting.push(host.into());
             }
         }
     }
@@ -501,4 +519,38 @@ mod tests {
         assert!(key("ssh-ed25519 AAAA\ncommand=bad").is_err());
         assert!(!valid_address("user@host"));
     }
+}
+
+#[cfg(test)]
+#[test]
+fn hundred_machine_routes_are_bounded_symmetric_and_connected() {
+    use std::collections::BTreeSet;
+    let hosts: Vec<_> = (0..104).map(|i| format!("host{i:03}")).collect();
+    let mut doc = json!({"machines":{}});
+    let mut observed = BTreeMap::new();
+    for (i, h) in hosts.iter().enumerate() {
+        doc["machines"][h] = json!({"sync_address":format!("{h}.internal")});
+        observed.insert(h.clone(),json!({"peer_sync_identity":{"node":format!("{i:032x}"),"user":"worker","public_key":"ssh-ed25519 QUJD","host_keys":["ssh-rsa REVG"]}}));
+    }
+    let routes: BTreeMap<_, BTreeSet<_>> = hosts
+        .iter()
+        .map(|h| {
+            let s: Settings =
+                serde_json::from_value(plan(&doc, h, &"c".repeat(32), &observed).unwrap()).unwrap();
+            (h.clone(), s.peers.into_iter().map(|p| p.machine).collect())
+        })
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut pending = vec![hosts[1].clone()];
+    while let Some(h) = pending.pop() {
+        if h == hosts[0] || !seen.insert(h.clone()) {
+            continue;
+        }
+        assert!(routes[&h].len() <= 4);
+        for other in &routes[&h] {
+            assert!(routes[other].contains(&h));
+            pending.push(other.clone());
+        }
+    }
+    assert_eq!(seen.len(), hosts.len() - 1);
 }

@@ -19,8 +19,9 @@ machines:
 Merge these fields into the existing machine definitions, keeping their workers.
 Rollout provisions dedicated local keys and exchanges public keys and verified
 host keys through the existing trusted fleet connections. The keys authorize only
-the sync command. Every pair uses one bidirectional SSH connection; cached routes
-and local services keep it running without the laptop. Removing `sync_address`
+the sync command. Each machine connects to its two neighbors in each direction
+in sorted machine-name order, with one bidirectional SSH connection per pair.
+Changes relay through these cached routes even when the laptop is offline. Removing `sync_address`
 revokes the managed access when the affected machines next receive configuration.
 Initial distributed activation must still finish before relying on offline work.
 `hey-boss fleet sync-status` includes direct peer connection status.
