@@ -322,7 +322,9 @@ try {
   // A link from another screen opens the detail without loading the queue.
   let listRequests = 0;
   page.on("request", req => {
-    if (req.url().endsWith("/api/action") && req.postDataJSON()?.operation?.operation?.command === "list") listRequests++;
+    if (!req.url().endsWith("/api/action") || new URL(req.frame().url()).pathname !== "/code-review") return;
+    const op = req.postDataJSON()?.operation;
+    if (op?.action === "code_review" && op.operation.command === "list") listRequests++;
   });
   for (let number = 80; number < 95; number++)
     op({...first, number});
