@@ -13,6 +13,7 @@ struct HTRecognizer {
     const SherpaOnnxOfflineRecognizer *recognizer;
     __typeof__(&SherpaOnnxDestroyOfflineRecognizer) destroy;
     __typeof__(&SherpaOnnxCreateOfflineStreamWithHotwords) stream;
+    __typeof__(&SherpaOnnxOfflineStreamSetOption) set_option;
     __typeof__(&SherpaOnnxDestroyOfflineStream) destroy_stream;
     __typeof__(&SherpaOnnxAcceptWaveformOffline) accept;
     __typeof__(&SherpaOnnxDecodeOfflineStream) decode;
@@ -35,6 +36,7 @@ HTRecognizer *ht_create(const char *library, const char *models, int threads) {
     if (!create) { snprintf(last_error, sizeof(last_error), "Missing recognizer factory"); goto failed; }
     LOAD(destroy, SherpaOnnxDestroyOfflineRecognizer);
     LOAD(stream, SherpaOnnxCreateOfflineStreamWithHotwords);
+    LOAD(set_option, SherpaOnnxOfflineStreamSetOption);
     LOAD(destroy_stream, SherpaOnnxDestroyOfflineStream);
     LOAD(accept, SherpaOnnxAcceptWaveformOffline);
     LOAD(decode, SherpaOnnxDecodeOfflineStream);
@@ -71,6 +73,8 @@ failed:
 static char *decode(HTRecognizer *r, const float *samples, int32_t count, const char *hotwords, int json) {
     const SherpaOnnxOfflineStream *s = r->stream(r->recognizer, hotwords);
     if (!s) return NULL;
+    // Keep blank paths from winning simply because they skip a spoken phrase.
+    r->set_option(s, "length_reward", "0.5");
     r->accept(s, 16000, samples, count);
     r->decode(r->recognizer, s);
     const SherpaOnnxOfflineRecognizerResult *result = r->result(s);

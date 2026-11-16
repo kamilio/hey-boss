@@ -212,7 +212,7 @@ provider or network inference is configured in this build.
 
 ## Build and run
 
-Requires macOS 15+ and the Xcode 26 toolchain (Swift 6.2+). Build on the Mac that
+Requires macOS 15+, CMake, and the Xcode 26 toolchain (Swift 6.2+). Build on the Mac that
 will run it. Runtime downloads are pinned and SHA-256 verified.
 
 ```sh
@@ -419,10 +419,8 @@ The bar appears immediately with “Connecting…” while waiting for sound, th
 shows the live waveform. Click the bar to stop; Esc cancels.
 Startup runs off the UI thread and remains cancellable.
 
-On an M5 Pro, a 5.05-second synthetic speech clip decoded in 138–203 ms with a
-warm model (25–36× real time). The app bundle is about 34 MB; the idle desktop
-process used about 42 MB RSS. The warmed model worker used about 1.4 GB RSS.
-These are local measurements, not latency guarantees.
+On an M5 Pro, the warm decoder transcribed a 26-second recording with pauses in
+0.93–1.07 seconds. Timing depends on the recording.
 
 ## Verification
 

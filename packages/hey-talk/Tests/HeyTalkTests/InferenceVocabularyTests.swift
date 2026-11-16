@@ -57,6 +57,7 @@ final class InferenceVocabularyTests: XCTestCase {
             ("Vercel runs behind Cloudflare. Claude uses a MacBook.", ["Cloudflare", "MacBook"]),
             ("The cloud is gray. A camel walks past the boss. I wrote a poem.", ["cloud", "camel", "boss", "poem"]),
         ]
+        var phrases: [[Float]] = []
         for (index, entry) in cases.enumerated() {
             let audio = directory.appendingPathComponent("\(index).aiff")
             let speech = Process()
@@ -65,6 +66,7 @@ final class InferenceVocabularyTests: XCTestCase {
             try speech.run(); speech.waitUntilExit()
             XCTAssertEqual(speech.terminationStatus, 0)
             let samples = try AudioCapture.readFile(audio.path)
+            phrases.append(samples)
             let text = try transcribe(samples).replacingOccurrences(of: "-", with: " ")
             for word in entry.1 { XCTAssertTrue(text.contains(word), "Missing \(word): \(text)") }
             if index == 0 {
@@ -78,11 +80,21 @@ final class InferenceVocabularyTests: XCTestCase {
                 _ = try vocabulary.command(["add"] + original)
             }
         }
+        // The old decoder returned only the louder sentences, starting at "Vercel".
+        let paused = phrases[0].map { $0 * 0.11 } + phrases[1] + [Float](repeating: 0, count: 4 * PCMFrame.rate) + phrases[2]
+        var seed: UInt32 = 14
+        let noisy = paused.map { sample in
+            seed = seed &* 1664525 &+ 1013904223
+            return sample + (Float(seed) / Float(UInt32.max) - 0.5) * 0.07
+        }
+        let heard = try transcribe(noisy).lowercased()
+        for phrase in ["work on", "cloudflare", "wrote a poem"] { XCTAssertTrue(heard.contains(phrase), heard) }
+
         // One microphone request, with distinct speech in the first, middle and final windows.
         var dictation: [Float] = []
-        for index in cases.indices {
+        for index in phrases.indices {
             dictation += repeatElement(0, count: index * 32 * PCMFrame.rate - dictation.count)
-            dictation += try AudioCapture.readFile(directory.appendingPathComponent("\(index).aiff").path)
+            dictation += phrases[index]
         }
         let longText = try transcribe(dictation).lowercased()
         XCTAssertTrue(longText.contains("nova") && longText.contains("macbook") && longText.contains("poem"), longText)

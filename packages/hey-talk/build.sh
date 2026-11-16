@@ -3,14 +3,24 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p .build/vendor dist
 vendor="$PWD/.build/vendor"
-archive="$vendor/sherpa-tts.tar.bz2"
-runtime="$vendor/sherpa-onnx-v1.13.8-osx-universal2-shared"
-if [ ! -f "$archive" ]; then
-  curl -fL --retry 2 -o "$archive.tmp" 'https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.8/sherpa-onnx-v1.13.8-osx-universal2-shared.tar.bz2'
-  mv "$archive.tmp" "$archive"
+# First upstream revision with the corrected NeMo TDT beam search (#4084).
+revision=3898de1380029e96a3b0a3df9e21e3f5ee5eb7fb
+source_dir="$vendor/sherpa-onnx-$revision"
+runtime="$source_dir/build"
+if [ ! -f "$runtime/lib/libsherpa-onnx-c-api.dylib" ]; then
+  archive="$vendor/sherpa-onnx-$revision.tar.gz"
+  if [ ! -f "$archive" ]; then
+    curl -fL --retry 2 -o "$archive.tmp" "https://codeload.github.com/k2-fsa/sherpa-onnx/tar.gz/$revision"
+    mv "$archive.tmp" "$archive"
+  fi
+  printf '%s  %s\n' 'f3f73b5efaa91197fe46b5c4cbc6bb3e2e342ecfd4ca7a788a4be2bed798ea5e' "$archive" | shasum -a 256 -c -
+  tar -xzf "$archive" -C "$vendor"
+  cmake -S "$source_dir" -B "$runtime" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=ON -DCMAKE_SKIP_RPATH=ON \
+    -DSHERPA_ONNX_ENABLE_PORTAUDIO=OFF -DSHERPA_ONNX_ENABLE_WEBSOCKET=OFF -DSHERPA_ONNX_ENABLE_BINARY=OFF \
+    -DSHERPA_ONNX_ENABLE_TTS=OFF -DSHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=OFF \
+    -DSHERPA_ONNX_USE_PRE_INSTALLED_ONNXRUNTIME_IF_AVAILABLE=OFF
+  cmake --build "$runtime" --target sherpa-onnx-c-api --parallel "$(sysctl -n hw.activecpu)"
 fi
-printf '%s  %s\n' '2249f97f10df7d828af1b0d10e3d1eeaa2198b60b9a999a7ed853c150181ccfd' "$archive" | shasum -a 256 -c -
-if [ ! -d "$runtime" ]; then tar -xjf "$archive" -C "$vendor"; fi
 swift build -c release
 app="$PWD/dist/Hey Talk.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Frameworks" "$app/Contents/Resources"
@@ -30,19 +40,7 @@ fi
 tar -xzf "$vendor/$pocket.tar.gz" -C "$vendor"
 cp "$vendor/$pocket/pocket-tts" "$app/Contents/Helpers/pocket-tts"
 cp "$runtime/lib/libsherpa-onnx-c-api.dylib" "$app/Contents/Frameworks/"
-cp "$runtime/lib/libonnxruntime.dylib" "$app/Contents/Frameworks/"
-if [ "$(uname -m)" = arm64 ]; then
-  # The arm64-specific ONNX Runtime is substantially faster on INT8 models
-  # than the universal release. Same optimization used by OpenWhispr.
-  ort="$vendor/onnxruntime-arm64.zip"
-  if [ ! -f "$ort" ]; then
-    curl -fL --retry 2 -o "$ort.tmp" 'https://github.com/csukuangfj/onnxruntime-libs/releases/download/v1.28.2/onnxruntime-osx-arm64-1.28.2.zip'
-    mv "$ort.tmp" "$ort"
-  fi
-  printf '%s  %s\n' 'd9e5c0c79929e201f5b8eb095e6809a91ce78be9866a1bca0dfab7e20b40ae40' "$ort" | shasum -a 256 -c -
-  unzip -oq "$ort" -d "$vendor"
-  cp "$vendor/onnxruntime-osx-arm64-1.28.2/lib/libonnxruntime.dylib" "$app/Contents/Frameworks/libonnxruntime.dylib"
-fi
+cp "$runtime/_deps/onnxruntime-src/lib/libonnxruntime.dylib" "$app/Contents/Frameworks/"
 install_name_tool -change '@rpath/libonnxruntime.dylib' '@loader_path/libonnxruntime.dylib' "$app/Contents/Frameworks/libsherpa-onnx-c-api.dylib"
 cp THIRD_PARTY.md "$app/Contents/Resources/"
 cp ../hey-t3/hey-t3.mjs "$app/Contents/Resources/"
