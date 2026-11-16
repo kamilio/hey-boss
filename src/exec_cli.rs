@@ -26,6 +26,9 @@ enum Action {
     Submit {
         #[arg(long)]
         request_id: String,
+        /// Run only on this fleet node ID; never fall back to another machine.
+        #[arg(long)]
+        machine: Option<String>,
         #[arg(long, requires = "model")]
         harness: Option<String>,
         #[arg(long, requires = "harness")]
@@ -86,7 +89,7 @@ fn status(options: &Options, id: &str) -> Result<Value> {
 fn terminal(v: &Value) -> bool {
     !matches!(v["run"]["state"].as_str(), Some("pending" | "running"))
 }
-fn check(options: &Options, harness: &str, model: &str) -> Result<Value> {
+fn check(options: &Options, harness: &str, model: &str, machine: Option<&str>) -> Result<Value> {
     Spec {
         program: "agent-eval".into(),
         args: vec![],
@@ -109,6 +112,9 @@ fn check(options: &Options, harness: &str, model: &str) -> Result<Value> {
     let fleet = hey_boss::fleet::call(&json!({"kind":"status"}))?;
     let mut workers = Vec::new();
     for m in fleet["machines"].as_array().into_iter().flatten() {
+        if machine.is_some_and(|node| m["node"] != node) {
+            continue;
+        }
         for w in m["jobs"]["workers"].as_array().into_iter().flatten() {
             if !w["projects"]
                 .as_array()
@@ -127,9 +133,10 @@ fn check(options: &Options, harness: &str, model: &str) -> Result<Value> {
 }
 pub fn run(options: &Options) -> Result<()> {
     let value = match &options.action {
-        Action::Check { harness, model } => check(options, harness, model)?,
+        Action::Check { harness, model } => check(options, harness, model, None)?,
         Action::Submit {
             request_id,
+            machine,
             harness,
             model,
             effort,
@@ -146,7 +153,7 @@ pub fn run(options: &Options) -> Result<()> {
             };
             spec.validate()?;
             if let (Some(h), Some(m)) = (harness, model) {
-                let checked = check(options, h, m)?;
+                let checked = check(options, h, m, machine.as_deref())?;
                 if checked["ready"] != true {
                     return Err(Error::invalid(format!(
                         "No ready {h} worker for this project; run hey-boss exec check --harness {h} --model {m}"
@@ -169,6 +176,7 @@ pub fn run(options: &Options) -> Result<()> {
                 options,
                 Operation::Submit {
                     id,
+                    machine: machine.clone(),
                     execution: spec,
                 },
                 Some(request_id),

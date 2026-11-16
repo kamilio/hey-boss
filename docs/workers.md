@@ -130,3 +130,26 @@ Commands receive `HEY_BOSS_EXEC_HARNESS`, `HEY_BOSS_EXEC_MODEL`, and `HEY_BOSS_E
 Readiness reports the installed harness, CLI login status, credential source, evaluator version, and worker capacity. Codex can use its CLI login, an API key from the worker environment, or verified proxy credential sources. Claude requires a confirmed CLI login; Gemini login checks are not yet supported. Authentication checks never return credential contents and do not test access to the requested model. A real trial is required to establish model access. Companions must advertise `exec_v1` before they can receive commands. One-shot commands reserve worker capacity alongside issue work; cron jobs keep their existing scheduling behavior.
 
 Cancellation gives the command process group 30 seconds to save output before forcing it to stop. Existing commands survive a client disconnect. The supervisor owns pending placement, so put it and the benchmark coordinator on a server for laptop-independent scheduling.
+
+### Run a job when a file arrives on the main Mac
+
+Have the producer submit immediately after publishing the finished file. Use a unique, stable ID per arrival and the main Mac’s node ID from `hey-boss fleet status --records machines`:
+
+```sh
+hey-boss exec submit --project "$project" --machine "$mac_node_id" \
+  --request-id "$arrival_id" -- /absolute/path/to/process-file "$absolute_file_path"
+```
+
+This queues one run per file without polling or uploading its contents. The path must stay accessible to the worker on that Mac until it processes the file. If the Mac has no available project worker, the command waits. Reuse the arrival ID when retrying; use a new ID if a filename is reused for another arrival.
+
+For files published by an app you cannot change, create an **Automator → Folder Action** on the main Mac. Select the inbox folder, add **Run Shell Script**, and set **Pass input** to **as arguments**. For an inbox where every finished file has a unique filename:
+
+```sh
+for file in "$@"; do
+  [ -f "$file" ] || continue
+  /opt/homebrew/bin/hey-boss exec submit --project YOUR_PROJECT --machine MAIN_MAC_NODE_ID \
+    --request-id "inbox-${file##*/}" -- /absolute/path/to/process-file "$file" || exit 1
+done
+```
+
+Replace the project, node ID and executable paths before saving. Folder Actions report items added to the folder (including moves), not write completion. For long writes, stage outside the inbox and rename the finished file into it.

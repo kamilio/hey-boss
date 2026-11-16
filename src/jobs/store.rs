@@ -457,7 +457,15 @@ impl Store {
                     &project,
                 ));
             }
-            JobOperation::Submit { id, execution } => {
+            JobOperation::Submit {
+                id,
+                machine,
+                execution,
+            } => {
+                let key = request
+                    .request_id
+                    .as_deref()
+                    .ok_or_else(|| Error::invalid("Submission requires request_id"))?;
                 if let Some(blob) = &execution.input {
                     let path = crate::jobs::command::blob_path(&root, &project.id, blob)?;
                     if !path.is_file() || std::fs::metadata(path)?.len() != blob.size {
@@ -476,42 +484,35 @@ impl Store {
                     harness: String::new(),
                     model: String::new(),
                     thread_mode: Default::default(),
-                    machines: Vec::new(),
+                    machines: machine.iter().cloned().collect(),
                     all_machines: false,
                     each_machine: false,
                 };
-                // Definition and run each have stable receipts. A crash between them is safe to retry.
-                let mut create = request.clone();
-                create.request_id = Some(format!(
-                    "{}-definition",
-                    request
-                        .request_id
-                        .as_deref()
-                        .ok_or_else(|| Error::invalid("Submission requires request_id"))?
-                ));
-                create.operation = Operation::Job {
-                    operation: JobOperation::Create {
-                        id: id.clone(),
-                        definition,
-                        markdown: String::new(),
-                        enabled: false,
-                    },
-                };
                 match get_job(&self.db, &project.id, id) {
                     Ok(old) => {
-                        if old.snapshot.definition.execution.as_ref() != Some(execution) {
+                        if old.snapshot.definition != definition {
                             return Err(Error::conflict(
                                 "Execution ID was already used with different content",
                             ));
                         }
                     }
                     Err(e) if e.code == "not_found" => {
+                        // Definition and run each have stable receipts. A crash between them is safe to retry.
+                        let mut create = request.clone();
+                        create.request_id = Some(format!("{key}-definition"));
+                        create.operation = Operation::Job {
+                            operation: JobOperation::Create {
+                                id: id.clone(),
+                                definition,
+                                markdown: String::new(),
+                                enabled: false,
+                            },
+                        };
                         self.execute_job_at(&create, now)?;
                     }
                     Err(e) => return Err(e),
                 }
-                let occurrence =
-                    self.manual_job(&project.id, id, request.request_id.as_deref().unwrap(), now)?;
+                let occurrence = self.manual_job(&project.id, id, key, now)?;
                 return Ok(with_project(
                     json!({"run":self.enqueue_job(&occurrence)?}),
                     &project,

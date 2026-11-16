@@ -137,6 +137,8 @@ pub struct Snapshot {
 pub enum Operation {
     Submit {
         id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        machine: Option<String>,
         execution: command::Spec,
     },
     FilePut {
@@ -255,7 +257,7 @@ impl Operation {
     }
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Submit { id, execution } => {
+            Self::Submit { id, execution, .. } => {
                 validate_id(id)?;
                 execution.validate()?;
             }

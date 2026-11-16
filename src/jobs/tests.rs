@@ -80,6 +80,33 @@ fn exec_submission_preserves_model_and_is_idempotent() {
 }
 
 #[test]
+fn file_submissions_keep_their_machine_and_retry_independently() {
+    let mut f = Fixture::new();
+    let submit = |id: &str, machine: &str| {
+        serde_json::from_value(json!({
+            "command":"submit","id":id,"machine":machine,
+            "execution":{"program":"process-file","args":[format!("/inbox/{id}")]}
+        }))
+        .unwrap()
+    };
+    let first = f.op(submit("file-a", "main-mac"), 1000).unwrap();
+    let second = f.op(submit("file-b", "main-mac"), 1001).unwrap();
+    for result in [&first, &second] {
+        assert_eq!(
+            result["run"]["snapshot"]["definition"]["machines"],
+            json!(["main-mac"])
+        );
+        assert_eq!(result["run"]["state"], "pending");
+    }
+    assert_ne!(first["run"]["id"], second["run"]["id"]);
+    assert_eq!(
+        first["run"]["id"],
+        f.op(submit("file-a", "main-mac"), 1002).unwrap()["run"]["id"]
+    );
+    assert!(f.op(submit("file-a", "another-mac"), 1003).is_err());
+}
+
+#[test]
 fn legacy_job_definitions_keep_fresh_threads_and_immutable_serialization() {
     let original = serde_json::to_value(definition()).unwrap();
     assert!(original.get("thread_mode").is_none());

@@ -28,6 +28,8 @@ Markdown bytes are never normalized or stored as database prompt text. Reference
 
 ## Script jobs
 
+For **one run per new file**, submit a [one-shot command](workers.md#run-a-job-when-a-file-arrives-on-the-main-mac) after the producer closes or renames the finished file. Each arrival gets its own run in Jobs history, even while the previous file is processing.
+
 Select **Script** in the editor, or pass `--executable` instead of agent settings and instructions:
 
 ```sh
