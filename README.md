@@ -956,7 +956,7 @@ ssh_hosts:
 ```
 
 Strings are also accepted as host entries. `.local` hosts use the LAN; other hosts
-use their configured VPN domain (default `example.net`). The manager watches local
+use their configured VPN domain. Set `vpn_domain` for the host or save a default with `companion configure --vpn-domain DOMAIN`. The manager watches local
 config edits every five seconds and independently adds, removes, or restarts the
 changed connections. Invalid edits retain existing connections until corrected.
 Each machine has its own tunnel, persisted retry state, and lock. Set `enabled`

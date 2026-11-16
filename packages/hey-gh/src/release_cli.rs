@@ -47,10 +47,7 @@ pub enum Action {
 
 pub async fn run(api: &ApiClient, action: Action) -> Result<(), Box<dyn std::error::Error>> {
     match action {
-        Action::Profile { .. } => println!(
-            "{}",
-            include_str!("release/profiles/poe-code.json")
-        ),
+        Action::Profile { .. } => println!("{}", include_str!("release/profiles/poe-code.json")),
         Action::Add {
             config,
             state,

@@ -73,12 +73,12 @@ fn resolve_machines(data: &[u8]) -> Result<Vec<Config>, String> {
     if data.len() > 1024 * 1024 {
         return Err("machine config exceeds 1 MiB".into());
     }
-    let config: Machines = serde_yaml_ng::from_slice(data).map_err(|e| e.to_string())?;
-    if config.ssh_hosts.len() > 32 {
+    let inventory: Machines = serde_yaml_ng::from_slice(data).map_err(|e| e.to_string())?;
+    if inventory.ssh_hosts.len() > 32 {
         return Err("at most 32 machines are supported".into());
     }
     let mut result = Vec::new();
-    for entry in config.ssh_hosts {
+    for entry in inventory.ssh_hosts {
         let (host, domain, enabled) = match entry {
             MachineEntry::Host(host) => (host, None, true),
             MachineEntry::Settings {
@@ -93,7 +93,11 @@ fn resolve_machines(data: &[u8]) -> Result<Vec<Config>, String> {
             .ends_with(".local");
         let settings = Config {
             host,
-            vpn_domain: domain.unwrap_or_else(|| if lan { "local" } else { "example.net" }.into()),
+            vpn_domain: match domain {
+                Some(domain) => domain,
+                None if lan => "local".into(),
+                None => config().map_err(|_| "Set vpn_domain for this host or run companion configure --vpn-domain DOMAIN")?.vpn_domain,
+            },
             enabled,
         };
         validate(&settings)?;
@@ -573,17 +577,14 @@ pub fn run(
     {
         return Err("--local-network requires a .local SSH destination".into());
     }
+    let domain = match (local_network, vpn_domain) {
+        (true, _) => "local".into(),
+        (false, Some(domain)) => domain.to_owned(),
+        (false, None) => config()?.vpn_domain,
+    };
     let explicit = host.map(|host| Config {
         host: host.into(),
-        vpn_domain: if local_network {
-            "local".into()
-        } else {
-            vpn_domain
-                .map(str::to_owned)
-                .map(Ok)
-                .unwrap_or_else(|| config().map(|c| c.vpn_domain))
-                .unwrap_or_else(|_| "example.net".into())
-        },
+        vpn_domain: domain,
         enabled: true,
     });
     if let Some(settings) = &explicit {
@@ -766,7 +767,7 @@ mod tests {
     use super::*;
     #[test]
     fn machine_inventory_has_independent_gates_and_rejects_unsafe_configs() {
-        let entries = resolve_machines(br#"{"ssh_hosts":["devbox",{"host":"other.local","enabled":true},{"host":"staging","vpn_domain":"corp.example","enabled":false}]}"#).unwrap();
+        let entries = resolve_machines(br#"{"ssh_hosts":[{"host":"devbox","vpn_domain":"example.net"},{"host":"other.local","enabled":true},{"host":"staging","vpn_domain":"corp.example","enabled":false}]}"#).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].vpn_domain, "example.net");
         assert_eq!(entries[1].vpn_domain, "local");

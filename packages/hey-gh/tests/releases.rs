@@ -1074,8 +1074,8 @@ fn replay_sanitized_real_workflow_history_for_commit_profile() {
         serde_json::from_str(include_str!("fixtures/releases/history.json")).unwrap();
     assert_eq!(records.len(), 24);
     for record in records {
-        let project: Project = serde_json::from_str(include_str!("../src/release/profiles/poe-code.json"))
-        .unwrap();
+        let project: Project =
+            serde_json::from_str(include_str!("../src/release/profiles/poe-code.json")).unwrap();
         project.validate().unwrap();
         let verdict = hey_gh::release::assess(
             &project.gates[0],
@@ -1091,4 +1091,3 @@ fn replay_sanitized_real_workflow_history_for_commit_profile() {
         );
     }
 }
-

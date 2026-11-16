@@ -21,7 +21,7 @@ pub enum Action {
     Configure {
         #[arg(default_value = "devbox")]
         host: String,
-        #[arg(long, default_value = "example.net")]
+        #[arg(long)]
         vpn_domain: String,
         #[arg(long)]
         disable: bool,
