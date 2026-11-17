@@ -8001,7 +8001,6 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var link: String?
     }
     private var activities: [ToolActivity] = []
-    private var toolPanels: [NSButton: NSScrollView] = [:]
     struct Capture: Codable, Equatable { let source: String; let text: String? }
     private struct PlaybackInterruption: Codable, Equatable {
         let spoken: String
@@ -8659,7 +8658,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
         selections = []; checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
-        rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); toolPanels.removeAll(); pendingCapture = nil
+        rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
         if phase != next {
@@ -9606,25 +9605,56 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             group.widthAnchor.constraint(equalTo: turns.widthAnchor).isActive = true
             button.widthAnchor.constraint(lessThanOrEqualTo: group.widthAnchor).isActive = true
         }
-        if let provider = activity.provider, let request = activity.request {
-            let name = provider == "t3" ? "T3" : provider.capitalized
-            let label = failed ? "Error" : activity.state == "Completed" ? "Response from " + name : activity.state
-            details[button] = "Request to " + name + "\n" + request + "\n\n" + label + (activity.output.isEmpty ? "" : "\n" + activity.output) + (activity.link.map { "\n\n" + $0 } ?? "")
-        } else {
+        if activity.provider == nil || activity.request == nil {
             details[button] = (activity.command ?? "") + "\n\n" + activity.state + (activity.output.isEmpty ? "" : "\n" + activity.output)
         }
-        if let panel = toolPanels[button], let field = panel.documentView as? NSTextView {
-            field.string = details[button]!
-            if activity.provider != nil { styleExchange(field, link: activity.link) }
+        if let group = button.superview as? NSStackView, group.arrangedSubviews.count == 2 {
+            group.arrangedSubviews[1].removeFromSuperview()
+            showTool(button)
         }
         if follow { revealLatest() }
     }
-    private func styleExchange(_ field: NSTextView, link: String?) {
-        field.font = .systemFont(ofSize: 13); field.textColor = .labelColor
-        if let link, link.hasPrefix("t3code://"), let url = URL(string: link), field.string.hasSuffix(link) {
-            let range = (field.string as NSString).range(of: link, options: .backwards)
-            field.textStorage?.addAttribute(.link, value: url, range: range)
+
+    private func exchangeCard(_ activity: ToolActivity, provider: String, request: String) -> NSView {
+        let name = provider == "t3" ? "T3" : provider.capitalized
+        let card = NSBox()
+        card.boxType = .custom; card.cornerRadius = 12
+        card.borderColor = .separatorColor; card.borderWidth = 0.5
+        card.fillColor = .controlBackgroundColor; card.contentViewMargins = NSSize(width: 14, height: 12)
+        let column = NSStackView(); column.orientation = .vertical; column.alignment = .leading; column.spacing = 5
+        card.contentView = column
+
+        func heading(_ title: String, _ symbol: String, _ color: NSColor) -> NSStackView {
+            let icon = NSImageView(image: NSImage(systemSymbolName: symbol, accessibilityDescription: nil)!)
+            icon.contentTintColor = color
+            let label = NSTextField(labelWithString: title); label.font = .systemFont(ofSize: 12, weight: .semibold); label.textColor = color
+            let row = NSStackView(views: [icon, label]); row.spacing = 5; row.alignment = .centerY
+            column.addArrangedSubview(row)
+            return row
         }
+        func body(_ value: NSAttributedString) {
+            let text = ConversationText(wrappingLabelWithString: ""); text.isSelectable = true
+            text.allowsEditingTextAttributes = true; text.attributedStringValue = value
+            text.setContentCompressionResistancePriority(.required, for: .vertical)
+            column.addArrangedSubview(text); text.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        }
+        _ = heading("Hey Boss → " + name, "arrow.up.right", .secondaryLabelColor)
+        body(NSAttributedString(string: request, attributes: [.font: NSFont.systemFont(ofSize: 13), .foregroundColor: NSColor.secondaryLabelColor]))
+        let rule = NSBox(); rule.boxType = .separator
+        column.setCustomSpacing(10, after: column.arrangedSubviews.last!)
+        column.addArrangedSubview(rule); rule.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        column.setCustomSpacing(9, after: rule)
+        let failed = activity.state == "Failed"
+        let title = activity.state == "Completed" ? name : name + " · " + activity.state
+        let reply = heading(title, failed ? "exclamationmark.circle" : "text.bubble", failed ? .systemOrange : .controlAccentColor)
+        if let raw = activity.link, let url = URL(string: raw), url.scheme == "t3code" {
+            let link = NSTextField(labelWithString: ""); link.isSelectable = true; link.allowsEditingTextAttributes = true
+            link.attributedStringValue = NSAttributedString(string: "Open in T3 ↗", attributes: [.link: url, .font: NSFont.systemFont(ofSize: 12)])
+            reply.addArrangedSubview(NSView()); reply.addArrangedSubview(link)
+            reply.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
+        }
+        if !activity.output.isEmpty { body(markdown(activity.output, size: 14, color: .labelColor)) }
+        return card
     }
     func detailView(_ text: String) -> NSScrollView {
         let scroller = NSScrollView(frame: NSRect(x: 0, y: 0, width: 360, height: 145))
@@ -9635,15 +9665,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func showTool(_ sender: NSButton) {
         if let group = sender.superview as? NSStackView, group !== turns {
-            if let panel = toolPanels[sender] { panel.isHidden.toggle() }
-            else {
-                let panel = detailView(details[sender] ?? sender.title)
-                if let activity = activities.first(where: { tools[$0.id] === sender && $0.provider != nil }),
-                   let field = panel.documentView as? NSTextView { styleExchange(field, link: activity.link) }
-                panel.drawsBackground = false; (panel.documentView as? NSTextView)?.drawsBackground = false
-                group.addArrangedSubview(panel); panel.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
-                panel.heightAnchor.constraint(equalToConstant: 145).isActive = true; toolPanels[sender] = panel
+            if group.arrangedSubviews.count == 2 { group.arrangedSubviews[1].removeFromSuperview(); return }
+            let panel: NSView
+            if let activity = activities.first(where: { tools[$0.id] === sender }), let provider = activity.provider, let request = activity.request {
+                panel = exchangeCard(activity, provider: provider, request: request)
+            } else {
+                let scroller = detailView(details[sender] ?? sender.title)
+                scroller.drawsBackground = false; (scroller.documentView as? NSTextView)?.drawsBackground = false
+                scroller.heightAnchor.constraint(equalToConstant: 145).isActive = true; panel = scroller
             }
+            group.addArrangedSubview(panel); panel.widthAnchor.constraint(equalTo: group.widthAnchor).isActive = true
             return
         }
         let alert = NSAlert(); alert.messageText = "Tool details"; alert.accessoryView = detailView(details[sender] ?? sender.title)

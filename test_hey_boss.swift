@@ -5105,7 +5105,14 @@ func auditDelegate(_ root: String) {
     for (id, value) in [("first","First answer"), ("second","Recovered answer"), ("interrupted","Interrupted")] {
         let row = reopened.tools[id]!
         reopened.showTool(row)
-        precondition(reopened.details[row]!.contains(request) && reopened.details[row]!.contains(value))
+        func fields(_ view: NSView) -> [NSTextField] {
+            (view as? NSTextField).map { [$0] } ?? view.subviews.flatMap(fields)
+        }
+        let group = row.superview as! NSStackView
+        let labels = fields(group.arrangedSubviews[1])
+        precondition(labels.contains { $0.stringValue == request } && labels.contains { $0.stringValue.contains(value) })
+        precondition(labels.contains { $0.attributedStringValue.length > 0 && $0.attributedStringValue.attribute(.link, at: 0, effectiveRange: nil) != nil })
+        reopened.showTool(row); precondition(group.arrangedSubviews.count == 1)
     }
     print("PASS native subagent request, response, recovery and interrupted rows")
 }
