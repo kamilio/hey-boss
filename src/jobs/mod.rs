@@ -89,6 +89,11 @@ impl Definition {
                 return Err(Error::invalid("Script jobs cannot use agent settings"));
             }
         } else if !self.model.is_empty() || self.harness != "codex" {
+            if self.model.trim().is_empty() {
+                return Err(Error::invalid(
+                    "This harness needs an explicit model. Supply --model with a model supported by the selected harness.",
+                ));
+            }
             identifier(&self.model, "logical model", 256)?;
         }
         if self.all_machines && !self.machines.is_empty() {
@@ -132,29 +137,40 @@ impl Definition {
             }
         } else if let Some(dir) = &self.directory {
             identifier(&dir.path, "directory path", 4096)?;
-            if !std::path::Path::new(&dir.path).is_absolute()
-                || !self.cron.is_empty()
-                || self.fans_out()
-            {
+            if !std::path::Path::new(&dir.path).is_absolute() {
                 return Err(Error::invalid(
-                    "Directory jobs require an absolute directory, no cron, and one execution per file",
+                    "Use an absolute directory on the main Mac, e.g. /Users/me/Inbox. Put filename globs in --match.",
                 ));
             }
-            if dir.patterns.len() > 32
-                || dir.patterns.iter().any(|p| {
-                    p.is_empty()
-                        || p.len() > 256
-                        || p.contains('/')
-                        || glob::Pattern::new(p).is_err()
-                })
-            {
+            if !self.cron.is_empty() {
                 return Err(Error::invalid(
-                    "Use up to 32 filename globs without directory separators",
+                    "Choose one trigger: remove cron for file arrivals, or remove the directory for a schedule.",
                 ));
             }
-            jiff::tz::db()
-                .get(&self.timezone)
-                .map_err(|_| Error::invalid("Invalid display timezone"))?;
+            if self.fans_out() {
+                return Err(Error::invalid(
+                    "Each file starts one execution. Remove --all-machines or --each-machine; use --machine for ordered fallbacks, or omit it for automatic placement.",
+                ));
+            }
+            if dir.patterns.len() > 32 {
+                return Err(Error::invalid(
+                    "Use at most 32 --match patterns. Omit --match to accept all filenames.",
+                ));
+            }
+            for pattern in &dir.patterns {
+                if pattern.is_empty()
+                    || pattern.len() > 256
+                    || pattern.contains('/')
+                    || glob::Pattern::new(pattern).is_err()
+                {
+                    return Err(Error::invalid(
+                        "Invalid filename glob. Use a nonempty glob of at most 256 bytes without '/', e.g. --match '*.pdf'. Put the folder in --directory.",
+                    ));
+                }
+            }
+            jiff::tz::db().get(&self.timezone).map_err(|_| {
+                Error::invalid("Use an IANA display timezone such as UTC or America/Chicago")
+            })?;
         } else {
             schedule::Schedule::parse(&self.cron, &self.timezone)?;
         }

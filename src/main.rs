@@ -223,7 +223,7 @@ enum Command {
     /// Project issues, Markdown comments, and atomic agent claims in SQLite.
     #[command(visible_alias = "issues")]
     Issue(issue_cli::Options),
-    /// Durable cron job definitions, schedule previews and run history.
+    /// Create schedule or file-triggered jobs and inspect their runs.
     #[command(visible_alias = "jobs")]
     Job(job_cli::Options),
     /// Durable isolated commands on project workers, with input and output transfer.

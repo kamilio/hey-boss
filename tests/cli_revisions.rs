@@ -237,3 +237,92 @@ fn imported_artifact_retry_matches_content_hash_receipt() {
     let first = f.value("artifact", &args);
     assert_eq!(f.value("artifact", &args), first);
 }
+
+#[test]
+fn job_trigger_action_errors_explain_how_to_fix_the_command() {
+    let f = Fixture::new("job-guidance");
+    fs::copy(
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src/jobs/fixtures/original.md"),
+        f.0.join("instructions.md"),
+    )
+    .unwrap();
+    fs::write(f.0.join("empty.md"), "").unwrap();
+    #[rustfmt::skip]
+    let cases: &[(&[&str], &str)] = &[
+        (&["--executable", "true"], "Missing trigger"),
+        (&["--cron", "0 9 * * *", "--directory", "/inbox", "--executable", "true"], "Create two jobs"),
+        (&["--cron", "0 9 * * *", "--executable", "true"], "--timezone UTC"),
+        (&["--cron", "0 9 * * *", "--match", "*.pdf", "--executable", "true"], "remove it from the schedule"),
+        (&["--directory", "inbox", "--executable", "true"], "absolute directory on the main Mac"),
+        (&["--directory", "/inbox", "--match", "a/*.pdf", "--executable", "true"], "Put the folder in --directory"),
+        (&["--directory", "/inbox", "--match", "[", "--executable", "true"], "--match '*.pdf'"),
+        (&["--directory", "/inbox", "--all-machines", "--executable", "true"], "Remove --all-machines"),
+        (&["--directory", "/inbox", "--each-machine", "--machine", "a", "--executable", "true"], "ordered fallbacks"),
+        (&["--directory", "/inbox"], "Missing action"),
+        (&["--directory", "/inbox", "--harness", "codex"], "--instructions PATH.md"),
+        (&["--directory", "/inbox", "--harness", "codex", "--instructions", "missing.md"], "Cannot read --instructions missing.md"),
+        (&["--directory", "/inbox", "--executable", "true", "--harness", "codex"], "Choose one action"),
+        (&["--cron", "0 9 * *", "--timezone", "UTC", "--executable", "true"], "five fields"),
+        (&["--cron", "61 * * * *", "--timezone", "UTC", "--executable", "true"], "0–59"),
+        (&["--cron", "0 9 31 FEB *", "--timezone", "UTC", "--executable", "true"], "choose a day"),
+        (&["--cron", "0 9 * * *", "--timezone", "Nowhere", "--executable", "true"], "America/Chicago"),
+        (&["--directory", "/inbox", "--machine", "a", "--machine", "a", "--executable", "true"], "unique"),
+        (&["--directory", "/inbox", "--executable", "true", "--thread-mode", "new"], "Choose one action"),
+        (&["--directory", "/inbox", "--harness", "claude", "--instructions", "instructions.md"], "--model"),
+        (&["--directory", "/inbox", "--harness", "codex", "--instructions", "instructions.txt"], ".md file"),
+        (&["--directory", "/inbox", "--harness", "codex", "--instructions", "empty.md"], "nonempty"),
+    ];
+    for (args, hint) in cases {
+        let mut create = vec!["create", "--id", "pdfs", "--name", "PDFs"];
+        create.extend_from_slice(args);
+        let out = f.run("job", &create, "author");
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            !out.status.success() && diagnostic.contains(hint),
+            "{args:?}: {diagnostic}"
+        );
+    }
+    f.value(
+        "job",
+        &[
+            "create",
+            "--id",
+            "pdfs",
+            "--name",
+            "PDFs",
+            "--directory",
+            "/inbox",
+            "--match",
+            "*.pdf",
+            "--executable",
+            "true",
+            "--machine",
+            "a",
+            "--machine",
+            "b",
+            "--paused",
+        ],
+    );
+    let ok = f.value(
+        "job",
+        &[
+            "edit",
+            "pdfs",
+            "--if-revision",
+            "1",
+            "--name",
+            "PDFs",
+            "--cron",
+            "0 9 * * *",
+            "--timezone",
+            "UTC",
+            "--executable",
+            "true",
+        ],
+    );
+    assert_eq!(ok["job"]["snapshot"]["definition"]["cron"], "0 9 * * *");
+}

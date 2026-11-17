@@ -26,9 +26,34 @@ The existing resource API accepts `{"action":"job","operation":...}`; `hey-boss 
 
 Markdown bytes are never normalized or stored as database prompt text. References point to SHA-256-named `.md` files beside the database in its `.jobs` directory. Files are published and fsynced before references commit. Revisions are immutable and retained after edits/deletion. A revision/run read transfers and verifies its exact bytes, then fsyncs the companion copy before acknowledging. The runner must fetch a run on its destination before launch; cached instructions can subsequently be loaded offline. Failed/crashed saves can leave unreferenced content-addressed files, which must not be removed while an in-flight save could reference them.
 
+## Create a job: When → Do
+
+From the project checkout (or pass `--project NAME`), choose one trigger and one action:
+
+```sh
+hey-boss job create --id process-pdfs --name 'Process incoming PDFs' \
+  --directory /Users/me/Inbox --match '*.pdf' \
+  --executable ./scripts/process-pdf
+```
+
+For a schedule, replace the directory and matches with `--cron '0 9 * * *' --timezone UTC`. For an agent, replace the executable with `--harness codex --instructions ./prompts/review-pdf.md`. Omit machine flags to use any eligible machine. `job view ID` shows the saved trigger, action and revision.
+
+| If create or edit reports… | Recovery |
+| --- | --- |
+| Both triggers, or neither | Keep either `--directory /absolute/folder` or `--cron '…' --timezone ZONE`. To run on both events, create two jobs with different IDs. |
+| Missing, malformed or impossible schedule | Quote all five cron fields as one argument: minute, hour, day, month, weekday. Use a real date, ascending ranges and positive steps. Supply an IANA timezone such as `America/Chicago` or `UTC`. |
+| Relative directory or bad pattern | Give the absolute folder **on the main Mac**. Use up to 32 quoted filename globs (1–256 bytes each, no slash), one per `--match`. Omit the flag for all files. Remove it for cron. |
+| Missing action or mixed script and agent flags | Pick `--executable PROGRAM` alone or `--harness codex\|claude\|pi` with agent settings. Put arguments in the script. `--condition PROGRAM` can guard either action but cannot replace it. |
+| Missing model or instructions | Claude and Pi need an explicit supported `--model`; Codex can inherit it. Pass a readable, nonblank UTF-8 `.md` file, at most 1 MiB. Agent edits can keep prior instructions; switching from a script requires a file. |
+| Machine flags conflict | For ordered fallbacks, repeat `--machine NODE_ID` using unique fleet IDs without spaces. Schedules may instead use `--all-machines`, or `--each-machine` with a list. File jobs run once per file: remove both fanout flags. |
+| Missing or invalid identity | Supply a nonblank `--name` (≤256 bytes) and an `--id` of 1–128 ASCII letters, digits, hyphens or underscores. Run from a registered project checkout or pass its existing name or ID with `--project`. |
+| Existing ID, changed revision or uncertain save | Use a new ID for a different job. To edit, read `job view ID`, review the current definition, then pass its revision to `job edit ID --if-revision N` with the full replacement fields. After a lost response, retry the identical request with the original request ID; use a fresh request ID for changed content. |
+
+**If a saved job stays idle:** Check that it is enabled and the watched folder exists and is readable on the main Mac. Once watching, add a new matching regular file directly inside the folder. An existing file, subfolder or symlink won’t trigger a run. If a run is queued, check worker eligibility and machine restrictions; if it failed, check `job history ID` and, for scripts, `job logs ID RUN_ID`. The executable must exist and be executable in the chosen machine’s environment.
+
 ## Script jobs
 
-For an arrival trigger, select **When a file is created**, enter an absolute directory on the main Mac, and optionally enter filename globs (one per line, any match). The CLI equivalent is `--directory /path/to/inbox --match '*.pdf' --match '*.csv'` instead of cron and timezone. The same directory and patterns appear in the project's Jobs YAML.
+For an arrival trigger, select **File created** under **When**, enter an absolute directory on the main Mac, and optionally enter filename globs (one per line, any match). The CLI equivalent is `--directory /path/to/inbox --match '*.pdf' --match '*.csv'` instead of cron and timezone. The same directory and patterns appear in the project's Jobs YAML.
 
 The main Mac observes direct regular files, including files renamed into place. Existing files, edits to an already processed file, subdirectories and symlinks are ignored. For a slow producer, finish the file outside the inbox and rename it into place: a quiet interval cannot prove a writer has closed the file. Leave arrivals in place until queued. On restart the watcher checks the remaining files against its last inventory. Pausing or changing the definition starts a new observation period.
 

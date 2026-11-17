@@ -26,11 +26,16 @@ impl Field {
                         "Cron fields require numbers or supported month/day names",
                     ));
                 }
-                s.parse()
-                    .map_err(|_| Error::invalid("Cron value out of range"))?
+                s.parse().map_err(|_| {
+                    Error::invalid(format!(
+                        "Cron value {s:?} is out of range; use {min}–{max} here"
+                    ))
+                })?
             };
             if !(min..=max).contains(&n) {
-                return Err(Error::invalid("Cron value out of range"));
+                return Err(Error::invalid(format!(
+                    "Cron value {s:?} is out of range; use {min}–{max} here"
+                )));
             }
             Ok(n)
         };
@@ -40,12 +45,15 @@ impl Field {
                 Some((base, s)) => {
                     let step = s
                         .parse::<u8>()
-                        .map_err(|_| Error::invalid("Invalid cron step"))?;
+                        .map_err(|_| Error::invalid("Invalid cron step; use a positive integer after /, e.g. */5 in the minute field"))?;
                     if step == 0
                         || step > (max - min + 1) as u8
                         || !s.bytes().all(|c| c.is_ascii_digit())
                     {
-                        return Err(Error::invalid("Cron step out of range"));
+                        return Err(Error::invalid(format!(
+                            "Cron step out of range; use 1–{} here",
+                            max - min + 1
+                        )));
                     }
                     (base, step)
                 }
@@ -60,7 +68,9 @@ impl Field {
                 (n, if part.contains('/') { max } else { n })
             };
             if start > end {
-                return Err(Error::invalid("Descending cron ranges are unsupported"));
+                return Err(Error::invalid(
+                    "Descending cron ranges are unsupported; put the smaller value first or split a wrapping range with a comma",
+                ));
             }
             values.extend((start..=end).step_by(step as usize));
         }
@@ -96,9 +106,11 @@ impl Schedule {
             ));
         }
         // Database lookup accepts IANA names only; never infer the machine's zone.
-        let zone = jiff::tz::db()
-            .get(zone)
-            .map_err(|e| Error::invalid(format!("Invalid IANA timezone: {e}")))?;
+        let zone = jiff::tz::db().get(zone).map_err(|e| {
+            Error::invalid(format!(
+                "Invalid IANA timezone; use UTC or a name such as America/Chicago: {e}"
+            ))
+        })?;
         let mut weekday = Field::parse(
             parts[4],
             0,
@@ -137,7 +149,7 @@ impl Schedule {
             date = date.tomorrow().unwrap();
         }
         Err(Error::invalid(
-            "Cron schedule never matches a calendar date",
+            "Cron schedule never matches a calendar date; choose a day that exists in the selected months",
         ))
     }
     fn matches_date(&self, date: Date) -> bool {

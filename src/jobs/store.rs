@@ -779,7 +779,7 @@ impl Store {
             let old = get_job(&self.db, &project.id, id)?;
             if old.revision != expected || old.deleted_at.is_some() {
                 return Err(Error::conflict(
-                    "Job changed or was deleted; refresh its revision",
+                    "Job changed or was deleted; use hey-boss job view ID to review its current state before retrying with --if-revision",
                 ));
             }
             Some(old)
@@ -810,7 +810,7 @@ impl Store {
                     let sha = &old.as_ref().unwrap().snapshot.instruction_digest;
                     if sha.is_empty() {
                         return Err(Error::invalid(
-                            "Switching to an agent requires instructions",
+                            "Switching to an agent requires instructions; supply --instructions FILE.md",
                         ));
                     }
                     files::load(&root, sha)?;
@@ -856,13 +856,13 @@ impl Store {
             let changed=tx.execute("UPDATE scheduled_jobs SET revision=?3,enabled=?4,deleted_at=?5,schedule_from=?6,next_at=?7,snapshot=?8,updated_at=?6 WHERE project_id=?1 AND id=?2 AND revision=?9 AND deleted_at IS NULL",params![project.id,id,revision,enabled,deleted.then_some(now),now,next_at,encoded,expected])?;
             if changed != 1 {
                 return Err(Error::conflict(
-                    "Job changed or was deleted; refresh its revision",
+                    "Job changed or was deleted; use hey-boss job view ID to review its current state before retrying with --if-revision",
                 ));
             }
         } else {
             let changed=tx.execute("INSERT INTO scheduled_jobs(id,project_id,revision,enabled,schedule_from,next_at,snapshot,created_at,updated_at) VALUES(?1,?2,1,?3,?4,?5,?6,?4,?4) ON CONFLICT(id) DO NOTHING",params![id,project.id,enabled,now,next_at,encoded])?;
             if changed != 1 {
-                return Err(Error::conflict("Job ID already exists"));
+                return Err(Error::conflict("Job ID already exists; choose a new --id or use hey-boss job edit to change the existing job"));
             }
         }
         tx.execute(

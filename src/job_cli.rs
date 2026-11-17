@@ -29,49 +29,89 @@ pub struct Options {
 struct Fields {
     #[arg(long)]
     name: String,
-    /// Five fields; quote the expression.
-    #[arg(
-        long,
-        required_unless_present = "directory",
-        conflicts_with = "directory"
-    )]
+    /// Quoted five-field schedule, e.g. '0 9 * * *'. Pair with --timezone.
+    #[arg(long, help_heading = "When")]
     cron: Option<String>,
-    /// Watch this absolute folder on the main Mac.
-    #[arg(long)]
+    /// Watch an absolute folder on the main Mac instead of a schedule.
+    #[arg(long, help_heading = "When")]
     directory: Option<String>,
-    /// Filename glob; repeat to match any pattern.
-    #[arg(long = "match", requires = "directory")]
+    /// Filename glob, e.g. '*.pdf'; repeat for alternatives, omit for all files.
+    #[arg(long = "match", help_heading = "When")]
     patterns: Vec<String>,
-    /// Explicit IANA timezone, e.g. America/Chicago.
-    #[arg(long, required_unless_present = "directory")]
+    /// IANA timezone, e.g. America/Chicago. Required for cron; display only for files.
+    #[arg(long, help_heading = "When")]
     timezone: Option<String>,
-    #[arg(long, value_enum, required_unless_present = "executable")]
+    /// Agent runtime. Pair with --instructions when creating an agent job.
+    #[arg(long, value_enum, help_heading = "Do")]
     harness: Option<hey_boss::agent_runtime::Provider>,
     /// Run this executable in the project checkout (absolute path, relative path, or name on PATH).
-    #[arg(long, conflicts_with_all = ["harness", "model", "thread_mode", "instructions"])]
+    #[arg(long, help_heading = "Do")]
     executable: Option<String>,
     /// Check this executable in the project checkout first: print JSON true to run or false to skip.
-    #[arg(long)]
+    #[arg(long, help_heading = "Do")]
     condition: Option<String>,
     /// Exact model override; omit for Codex to follow the project setting.
-    #[arg(long, default_value = "")]
-    model: String,
+    #[arg(long, help_heading = "Do")]
+    model: Option<String>,
     /// Start a new thread (default), or resume this job's previous thread on this machine.
-    #[arg(long, value_enum, default_value = "new")]
-    thread_mode: hey_boss::jobs::ThreadMode,
+    #[arg(long, help_heading = "Do", value_enum)]
+    thread_mode: Option<hey_boss::jobs::ThreadMode>,
     /// Restrict to these fleet node IDs in fallback order; repeat for each machine.
-    #[arg(long = "machine", value_name = "NODE_ID")]
+    #[arg(long = "machine", help_heading = "Where", value_name = "NODE_ID")]
     machines: Vec<String>,
     /// Run once on every known fleet machine; unavailable machines wait.
-    #[arg(long, conflicts_with = "machines")]
+    #[arg(long, help_heading = "Where", conflicts_with = "machines")]
     all_machines: bool,
     /// Run independently on each --machine, rather than in fallback order.
-    #[arg(long, requires = "machines", conflicts_with = "all_machines")]
+    #[arg(
+        long,
+        help_heading = "Where",
+        requires = "machines",
+        conflicts_with = "all_machines"
+    )]
     each_machine: bool,
 }
 impl Fields {
-    fn definition(&self) -> Definition {
-        Definition {
+    fn definition(&self, instructions: Option<&Path>) -> Result<Definition> {
+        match (&self.cron, &self.directory) {
+            (Some(_), Some(_)) => {
+                return Err(Error::invalid(
+                    "Choose one trigger: keep --cron and --timezone for a schedule, or keep --directory for file arrivals. Create two jobs if you need both.",
+                ));
+            }
+            (None, None) => {
+                return Err(Error::invalid(
+                    "Missing trigger: supply --directory /absolute/folder for file arrivals, or --cron '0 9 * * *' with --timezone UTC for a schedule.",
+                ));
+            }
+            _ => {}
+        }
+        if self.directory.is_none() && !self.patterns.is_empty() {
+            return Err(Error::invalid(
+                "--match filters filenames: remove it from the schedule, or replace --cron with --directory /absolute/folder.",
+            ));
+        }
+        if self.cron.is_some() && self.timezone.is_none() {
+            return Err(Error::invalid(
+                "A cron schedule needs a timezone: add --timezone UTC or an IANA name such as America/Chicago.",
+            ));
+        }
+        if self.executable.is_some()
+            && (self.harness.is_some()
+                || self.model.is_some()
+                || self.thread_mode.is_some()
+                || instructions.is_some())
+        {
+            return Err(Error::invalid(
+                "Choose one action: for a script keep --executable and remove --harness, --model, --thread-mode and --instructions. For an agent remove --executable and supply --harness.",
+            ));
+        }
+        if self.executable.is_none() && self.harness.is_none() {
+            return Err(Error::invalid(
+                "Missing action: supply --executable ./script for a script, or --harness codex for an agent. New agent jobs also need --instructions FILE.md.",
+            ));
+        }
+        Ok(Definition {
             name: self.name.clone(),
             directory: self
                 .directory
@@ -86,12 +126,12 @@ impl Fields {
             condition: self.condition.clone(),
             execution: None,
             harness: self.harness.map(|p| p.name()).unwrap_or_default().into(),
-            model: self.model.clone(),
-            thread_mode: self.thread_mode,
+            model: self.model.clone().unwrap_or_default(),
+            thread_mode: self.thread_mode.unwrap_or_default(),
             machines: self.machines.clone(),
             all_machines: self.all_machines,
             each_machine: self.each_machine,
-        }
+        })
     }
 }
 #[derive(Args)]
@@ -129,26 +169,26 @@ impl Window {
 }
 #[derive(Subcommand)]
 enum Action {
-    /// Create a stable job; retry with the same ID and request ID.
+    /// Choose one trigger (When) and one action (Do). Retry uncertain saves with the same IDs.
     Create {
         #[arg(long)]
         id: String,
         #[command(flatten)]
         fields: Fields,
         /// User-written UTF-8 Markdown file; copied exactly into managed storage.
-        #[arg(long, required_unless_present = "executable")]
+        #[arg(long, help_heading = "Do")]
         instructions: Option<PathBuf>,
         #[arg(long)]
         paused: bool,
     },
-    /// Replace definition fields; retain instructions unless a new .md file is supplied.
+    /// Replace the trigger, action and placement. Omit --instructions to keep existing agent text.
     Edit {
         id: String,
         #[arg(long)]
         if_revision: i64,
         #[command(flatten)]
         fields: Fields,
-        #[arg(long)]
+        #[arg(long, help_heading = "Do")]
         instructions: Option<PathBuf>,
     },
     /// Show the current definition, revision and next scheduled time.
@@ -220,8 +260,14 @@ fn markdown(path: &Path) -> Result<String> {
     if path.extension().and_then(|s| s.to_str()) != Some("md") {
         return Err(Error::invalid("Instructions must come from a .md file"));
     }
-    String::from_utf8(hey_boss::attachments::read_file(path)?)
-        .map_err(|_| Error::invalid("Instructions must be UTF-8"))
+    let bytes = hey_boss::attachments::read_file(path).map_err(|e| {
+        Error::invalid(format!(
+            "Cannot read --instructions {}: {}. Supply a readable Markdown file (at most 1 MiB).",
+            path.display(),
+            e.message
+        ))
+    })?;
+    String::from_utf8(bytes).map_err(|_| Error::invalid("Instructions must be UTF-8"))
 }
 pub fn run(options: &Options) -> Result<()> {
     let operation = match &options.action {
@@ -232,12 +278,16 @@ pub fn run(options: &Options) -> Result<()> {
             paused,
         } => Operation::Create {
             id: id.clone(),
-            definition: fields.definition(),
-            markdown: instructions
-                .as_deref()
-                .map(markdown)
-                .transpose()?
-                .unwrap_or_default(),
+            definition: fields.definition(instructions.as_deref())?,
+            markdown: match instructions {
+                Some(path) => markdown(path)?,
+                None if fields.executable.is_some() => String::new(),
+                None => {
+                    return Err(Error::invalid(
+                        "New agent jobs need instructions: add --instructions PATH.md pointing to your UTF-8 Markdown file.",
+                    ));
+                }
+            },
             enabled: !*paused,
         },
         Action::Edit {
@@ -248,7 +298,7 @@ pub fn run(options: &Options) -> Result<()> {
         } => Operation::Edit {
             id: id.clone(),
             if_revision: *if_revision,
-            definition: fields.definition(),
+            definition: fields.definition(instructions.as_deref())?,
             markdown: instructions.as_deref().map(markdown).transpose()?,
         },
         Action::View { id } => Operation::View { id: id.clone() },
@@ -483,20 +533,32 @@ fn print_job(job: &Value) {
             "paused"
         }
     );
+    if let Some(folder) = d["directory"]["path"].as_str() {
+        let patterns = d["directory"]["patterns"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        println!(
+            "  When: file created in {folder} on the main Mac ({})",
+            if patterns.is_empty() {
+                "all filenames".into()
+            } else {
+                patterns.join(", ")
+            }
+        );
+    } else if let Some(cron) = d["cron"].as_str().filter(|cron| !cron.is_empty()) {
+        println!("  When: {cron} · {}", d["timezone"].as_str().unwrap_or(""));
+    }
     if let Some(condition) = d["condition"].as_str() {
         println!("  Condition: {condition}");
     }
     if let Some(executable) = d["executable"].as_str() {
-        println!(
-            "  {} · {} · Script: {executable}",
-            d["cron"].as_str().unwrap_or(""),
-            d["timezone"].as_str().unwrap_or("")
-        );
+        println!("  Do: script {executable}");
     } else {
         println!(
-            "  {} · {} · {} / {}",
-            d["cron"].as_str().unwrap_or(""),
-            d["timezone"].as_str().unwrap_or(""),
+            "  Do: agent {} / {}",
             d["harness"].as_str().unwrap_or(""),
             d["model"].as_str().unwrap_or("")
         );
