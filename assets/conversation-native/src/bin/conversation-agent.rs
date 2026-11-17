@@ -13,7 +13,7 @@ async fn serve() -> Result<()> {
         .nth(1)
         .context("Expected conversation state path")?;
     let home = PathBuf::from(std::env::var_os("HOME").context("Missing HOME")?);
-    let (cwd, login) = context::settings(&home)?;
+    let (cwd, login) = context::settings(&home, None)?;
     let resources = std::env::current_exe()?
         .parent()
         .context("Missing desktop resources")?

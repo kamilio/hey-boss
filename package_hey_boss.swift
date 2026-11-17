@@ -183,7 +183,7 @@ try Data(contentsOf: root.appendingPathComponent("assets/conversation.md"))
 try Data(contentsOf: root.appendingPathComponent("assets/conversation-title.md"))
     .write(to: resources.appendingPathComponent("conversation-title.md"), options: .atomic)
 try Data(contentsOf: root.appendingPathComponent("assets/hey-t3.mjs")).write(to: resources.appendingPathComponent("hey-t3.mjs"), options: .atomic)
-for name in ["conversation-agent", "conversation-diagram"] {
+for name in ["conversation-agent", "conversation-job", "conversation-diagram"] {
     let dest = resources.appendingPathComponent(name)
     if files.fileExists(atPath: dest.path) { try files.removeItem(at: dest) }
     try files.copyItem(at: target.appendingPathComponent("release/" + name), to: dest)

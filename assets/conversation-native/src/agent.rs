@@ -21,25 +21,33 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         "local"
     };
     let mut book = crate::notebook::Notebook::open(state, &request["history"])?;
-    let observation = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        tools.talk(json!({"command":"spoken_context"})),
-    )
-    .await
-    .ok()
-    .and_then(Result::ok);
+    let job = request["job"] == true;
+    let observation = if job {
+        None
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tools.talk(json!({"command":"spoken_context"})),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+    };
     tools.focus = observation
         .as_ref()
         .and_then(|v| v["id"].as_str())
         .map(str::to_owned);
     let mut schemas = schemas();
+    if job {
+        schemas.retain(|t| matches!(t["name"].as_str(), Some("shell" | "batch" | "delegate")));
+    }
     if let Some(paste) = observation.as_ref().and_then(|v| v.get("paste_tool")) {
         schemas.push(paste.clone());
     }
     let observed = observation
         .and_then(|v| v.get("observed").cloned())
         .unwrap_or(json!("unavailable"));
-    book.push(json!({"role":"user","content":format!("Observed pre-focus desktop context: {observed}\n\n{turn}")}))?;
+    book.push(json!({"role":"user","content":if job { turn.to_owned() } else { format!("Observed pre-focus desktop context: {observed}\n\n{turn}") }}))?;
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
     let mut usage = Value::Null;
     let mut add_usage = |reported: &Value| {
@@ -83,6 +91,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
             let id = field(call, "id")?;
             let mut activity = None;
             let content: Result<Value> = async {
+                ensure!(!job || schemas.iter().any(|tool| tool["name"] == name), "Tool unavailable in a background job");
                 let args: Value = serde_json::from_str(field(&call["function"], "arguments")?)?;
                 if name == "delegate" {
                     let provider = match args.get("provider") {

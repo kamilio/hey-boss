@@ -111,7 +111,7 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
         home.join(".hey-boss/config.yaml"),
         "conversation:\n  root: ~/work\n  shell: /bin/zsh\n",
     )?;
-    let (cwd, login) = context::settings(home)?;
+    let (cwd, login) = context::settings(home, None)?;
     let skills = cwd.join(".agents/skills/notes");
     fs::create_dir_all(&skills)?;
     fs::write(
@@ -475,5 +475,60 @@ input.once('line', line => {
     let book = hey_boss_conversation::notebook::Notebook::open(&path, &Value::Null)?;
     assert_eq!(book.messages[2]["content"], result["output"]);
     assert_eq!(book.messages[2]["failed"], false);
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_turn_uses_checkout_and_no_desktop_context() -> Result<()> {
+    let tmp = scratch();
+    let home = tmp.path();
+    let cwd = home.join("project");
+    fs::create_dir(&cwd)?;
+    let (url, server) = mock(vec![
+        tool(
+            "shell",
+            json!({"command":"pwd > workspace","description":"Record working directory"}),
+        ),
+        msg("Done."),
+    ])
+    .await?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let mut p = Plugins {
+        focus: None,
+        home,
+        cwd: &cwd,
+        login: Path::new("/bin/sh"),
+        resources: &resources(),
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let text = include_str!("../../../src/jobs/fixtures/original.md");
+    agent::run(
+        &home.join("job.json"),
+        &url,
+        &json!({"turn":text,"job":true}),
+        &mut p,
+    )
+    .await?;
+    let requests = server.await??;
+    assert_eq!(
+        fs::canonicalize(fs::read_to_string(cwd.join("workspace"))?.trim())?,
+        cwd.canonicalize()?
+    );
+    let req = &requests[0];
+    assert!(
+        !req["input"]
+            .to_string()
+            .contains("Observed pre-focus desktop context")
+    );
+    assert_eq!(
+        req["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["delegate", "shell", "batch"]
+    );
     Ok(())
 }

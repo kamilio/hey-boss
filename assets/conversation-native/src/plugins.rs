@@ -77,16 +77,24 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
     emit(json!({"ToolStarted":{"id":id,"input":args}}))?;
     let mut exit_code = None;
     let result: Result<String> = async {
-        let mut child = Command::new(login)
-            .args(["-ilc", &format!("set +m; trap 'exit 143' TERM;\n{cmd}")])
+        let background = std::env::var_os("HEY_BOSS_JOB_RUN").is_some();
+        let mut command = Command::new(login);
+        if !background {
+            command.process_group(0);
+        }
+        let mut child = command
+            .args([
+                if background { "-lc" } else { "-ilc" },
+                &format!("set +m; trap 'exit 143' TERM;\n{cmd}"),
+            ])
             .current_dir(cwd)
-            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
-        let group = Group(child.id().context("Missing shell PID")? as i32);
+        let pid = child.id().context("Missing shell PID")? as i32;
+        let group = (!background).then(|| Group(pid));
         let out = child.stdout.take().unwrap();
         let err = child.stderr.take().unwrap();
         let (s, o, e) = timeout(Duration::from_secs(120), async {

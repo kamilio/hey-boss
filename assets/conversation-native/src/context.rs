@@ -15,7 +15,7 @@ pub fn optional(path: &Path) -> Result<Option<String>> {
         Err(e) => Err(e).with_context(|| path.display().to_string()),
     }
 }
-pub fn settings(home: &Path) -> Result<(PathBuf, PathBuf)> {
+pub fn settings(home: &Path, checkout: Option<PathBuf>) -> Result<(PathBuf, PathBuf)> {
     let mut cfg = Value::Null;
     let mut config_path = ".hey-boss/config.yaml";
     for p in [".hey-boss/config.yaml", ".hey-boss/config.json"] {
@@ -26,14 +26,17 @@ pub fn settings(home: &Path) -> Result<(PathBuf, PathBuf)> {
         }
     }
     let c = &cfg["conversation"];
-    let root = c["root"]
+    let root = if let Some(checkout) = checkout {
+        checkout
+    } else {
+        let root = c["root"]
         .as_str()
         .filter(|s| !s.trim().is_empty())
         .with_context(|| format!("Orchestrator, configure your root folder: set conversation.root in ~/{config_path}."))?;
-    let root = root
-        .strip_prefix("~/")
-        .map(|p| home.join(p))
-        .unwrap_or_else(|| root.into());
+        root.strip_prefix("~/")
+            .map(|p| home.join(p))
+            .unwrap_or_else(|| root.into())
+    };
     // GUI launch environments do not necessarily inherit SHELL.
     let shell = match c.get("shell") {
         Some(v) => PathBuf::from(v.as_str().context("Invalid conversation.shell")?),
