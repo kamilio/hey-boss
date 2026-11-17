@@ -41,6 +41,7 @@ try{
   await page.locator('#job-harness').selectOption('codex');
   await page.locator('#job-name').fill('Execution settings check');
   await page.locator('#job-markdown').fill(await readFile('src/jobs/fixtures/original.md','utf8'));
+  await page.locator('.job-condition summary').click();
   await page.locator('#job-condition').fill('./scripts/build-is-broken');
   await page.locator('#job-enabled').uncheck();
   await page.getByRole('button',{name:'Create job',exact:true}).click();
