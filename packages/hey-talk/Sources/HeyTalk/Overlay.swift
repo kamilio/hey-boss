@@ -219,10 +219,10 @@ final class Overlay {
         autoHalo.isHidden = true
         root.layer?.addSublayer(autoHalo)
         glow.name = "transcription-progress"
-        glow.fillColor = nil; glow.strokeColor = TalkDesign.accent.cgColor
-        glow.lineWidth = 1.5; glow.lineCap = .round
-        glow.shadowColor = TalkDesign.accent.cgColor
-        glow.shadowOpacity = 0.5; glow.shadowRadius = 3; glow.shadowOffset = .zero
+        glow.fillColor = nil; glow.strokeColor = NSColor(srgbRed: 0.58, green: 0.66, blue: 1, alpha: 1).cgColor
+        glow.lineWidth = 3.5; glow.lineCap = .round
+        glow.shadowColor = NSColor.black.cgColor
+        glow.shadowOpacity = 0.85; glow.shadowRadius = 1.25; glow.shadowOffset = .zero
         halo.fillColor = TalkDesign.accent.withAlphaComponent(0.12).cgColor
         halo.shadowColor = TalkDesign.accent.cgColor; halo.shadowOpacity = 0.3; halo.shadowRadius = 6
         halo.shadowOffset = .zero
@@ -699,8 +699,8 @@ final class Overlay {
         let frame = NSRect(x: center - width / 2, y: 12, width: width, height: height)
         // Clockwise from the top center, just outside the existing glass edge.
         let rim = CGMutablePath()
-        let left = frame.minX - 1, right = frame.maxX + 1, bottom = frame.minY - 1, top = frame.maxY + 1
-        let radius: CGFloat = 19
+        let left = frame.minX - 3, right = frame.maxX + 3, bottom = frame.minY - 3, top = frame.maxY + 3
+        let radius: CGFloat = 21
         rim.move(to: CGPoint(x: center, y: top))
         rim.addLine(to: CGPoint(x: right - radius, y: top))
         rim.addArc(tangent1End: CGPoint(x: right, y: top), tangent2End: CGPoint(x: right, y: bottom), radius: radius)

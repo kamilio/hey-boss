@@ -54,10 +54,10 @@ required. Auto waits for the destination field before pasting or submitting.
 The existing app and website Enter exceptions also apply in Auto.
 
 The floating control is a compact glass capsule with an indigo waveform mark.
-It expands to show live teal audio levels while recording, then a thin indigo
-progress rim while transcribing. Progress is estimated from recording length,
+It expands to show live teal audio levels while recording, then a bright blue
+ring advances around its outer edge while transcribing. Progress is estimated from recording length,
 includes AI correction when enabled, and gently advances if processing runs long.
-The rim completes when the transcript is ready. Accent colors match the shared Hey Boss design tokens.
+The ring completes when the transcript is ready.
 “Connecting…” appears only if opening the microphone takes more than 700 ms.
 With Accessibility enabled, the bubble lifts above the bottom Dock when it opens
 and returns to its previous position when the Dock hides.
