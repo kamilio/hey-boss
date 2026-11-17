@@ -641,3 +641,45 @@ fn review_queue_pins_edits_and_publication_to_the_submitted_revision() {
         1
     );
 }
+
+#[test]
+fn composing_uses_saved_delivery_and_workspace_without_changing_them() {
+    let f = Fixture::new();
+    f.json(&[
+        "project",
+        "init",
+        "--project",
+        "Atlas",
+        "--prs",
+        "true",
+        "--worktree",
+        "false",
+        "--yes",
+        "--json",
+    ]);
+    let show = ["issue", "settings", "show", "--project", "Atlas", "--json"];
+    let before = f.json(&show);
+    fs::write(f.0.join("sequence.md"), "@include(\"worker\")\n@include(\"workspace\")\n@next(thread=\"new\")\n@include(\"delivery\")").unwrap();
+    let composed = f.json(&[
+        "issue",
+        "settings",
+        "compose",
+        "sequence.md",
+        "--project",
+        "Atlas",
+        "--json",
+    ]);
+    assert_eq!(
+        composed["steps"][0]["prompt"],
+        format!(
+            "{}\n{}\n",
+            before["prompt"].as_str().unwrap(),
+            before["prompt_defaults"]["checkout"].as_str().unwrap()
+        )
+    );
+    assert_eq!(
+        composed["steps"][1]["prompt"],
+        before["prompt_defaults"]["prs"]
+    );
+    assert_eq!(f.json(&show), before);
+}

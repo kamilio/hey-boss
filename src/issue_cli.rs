@@ -802,6 +802,11 @@ enum PrAction {
 }
 #[derive(Subcommand)]
 enum SettingsAction {
+    /// Compose a Markdown sequence against saved prompt sections without running it.
+    Compose {
+        /// Markdown file, or - for stdin.
+        file: PathBuf,
+    },
     Show,
     Set {
         /// Codex model ID; an empty value inherits the machine's configuration.
@@ -1061,7 +1066,7 @@ impl Options {
             },
             Action::GlobalSettings { operation } => operation.as_ref().clone(),
             Action::Settings { command } => match command {
-                SettingsAction::Show => Operation::ProjectSettings,
+                SettingsAction::Show | SettingsAction::Compose { .. } => Operation::ProjectSettings,
                 SettingsAction::Set {
                     worker_model,
                     worker_reasoning,
@@ -1852,6 +1857,24 @@ pub fn run(options: &Options) -> Result<()> {
         };
         value
     };
+    if let Action::Settings {
+        command: SettingsAction::Compose { file },
+    } = &options.action
+    {
+        let source = if file == std::path::Path::new("-") {
+            read_text(std::io::stdin(), 32000)?
+        } else {
+            read_text(std::fs::File::open(file)?, 32000)?
+        };
+        let steps = issues::worker::compose_sequence(&source, &value)?;
+        let result = json!({"ok":true, "steps":steps});
+        if options.json {
+            println!("{}", serde_json::to_string(&result)?);
+        } else {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+        return Ok(());
+    }
     if let Some(actor) = value.get("assignee_agent").filter(|a| !a.is_null()) {
         let actor: issues::Actor = serde_json::from_value(actor.clone())?;
         value["assignee_presence"] = json!(issues::identity::presence(

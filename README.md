@@ -728,6 +728,31 @@ preserve custom prompts. Only `project init` creates projects. Other commands us
 the registered checkout or nearest registered parent; otherwise specify an existing
 project with `--project` or initialize it. Empty legacy folders stay out of the picker. See `hey-boss project init --help`.
 
+To compose a Markdown file into a sequence of messages, run
+`hey-boss issue settings compose sequence.md --project PROJECT` (or use `-` for stdin).
+The command only prints the steps. Workers still use the saved prompts and workflow settings.
+
+```text
+@next(workspace="new-worktree", base="origin/poe-legacy-build", harness="codex", model="gpt-6-astra")
+@include("worker")
+@include("worktree")
+
+@next()
+<follow-up in the same chat>
+
+@next(thread="new", harness="claude")
+<fresh review prompt in the same checkout>
+```
+
+Write directives at the beginning of their own line. Ordinary Markdown starts a step
+in the project root. Choosing a workspace (`project-root` or `new-worktree`) starts
+a fresh chat; `base` is only valid for a new worktree. A new thread inherits the harness
+and model unless specified; changing harness resets the model to its default.
+`@include("workspace")` and `@include("delivery")` use the project's worktree and PR
+settings. To select a specific section, use `worker`, `plan`, `checkout`, `worktree`,
+`prs`, or `main`. Included text is inserted once; issue variables such as `{{number}}`
+remain available for later substitution. Code examples are literal.
+
 ## Upgrading every machine
 
 Boss can add **YOLO** in **Assign tags** in the issue web UI. The

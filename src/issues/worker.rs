@@ -18,6 +18,9 @@ use std::{
 
 #[path = "worker_execution.rs"]
 mod execution;
+#[path = "prompt_sequence.rs"]
+mod sequence;
+pub use sequence::compose_sequence;
 #[path = "worker_prompts.rs"]
 mod prompts;
 #[path = "worker_providers.rs"]
