@@ -510,6 +510,12 @@ fn embedded_assets_and_markdown_are_same_origin_and_script_safe() {
         assert!(r.headers.contains("no-store"));
         assert!(!r.body.is_empty());
     }
+    for path in ["/code-review", "/commit-review?project=example"] {
+        let r = web.http("GET", path, &[], b"");
+        assert_eq!(r.status, 200);
+        assert!(r.headers.contains("frame-ancestors 'self'"));
+        assert!(r.headers.to_lowercase().contains("x-frame-options: sameorigin"));
+    }
     let body = "# Description\n\n<script>window.pwned=1</script>\n\n[bad](javascript:alert(1))\n\n- [ ] Test\n\n| A | B |\n|---|---|\n| 1 | 2 |\n";
     let reply = web.http(
         "POST",

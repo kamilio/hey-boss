@@ -835,8 +835,8 @@ function prStatus(pr, label = false) {
   const title = name + (stale ? " · Update delayed" : "") + (pr.checked_at ? " · Checked " + new Date(pr.checked_at).toLocaleString() : "");
   return `<span class="pr-status pr-status-${status}${stale ? " pr-status-stale" : ""}" role="img" aria-label="${esc(title)}" title="${esc(title)}">${icon(stale ? "clock" : {open:"pull-request",closed:"pr-closed",merged:"pr-merged",unknown:"clock"}[status])}${label ? `<span>${esc(name)}${stale ? " · Update delayed" : ""}</span>` : ""}</span>`;
 }
-function pendingReviewLinks(url) {
-  return HeyBossUI.pendingReviewLinks(url, model.project.id, model.route.host, model.pendingReviews);
+function pendingReviewLinks(url, issue) {
+  return HeyBossUI.pendingReviewLinks(url, model.project.id, model.route.host, model.pendingReviews, issue);
 }
 function listPullRequests(issue) {
   return (issue.pull_requests || [])
@@ -856,7 +856,7 @@ function listPullRequests(issue) {
       const classified = purpose !== PR_PURPOSES.unspecified;
       const statusLabel = {open:"Open",closed:"Closed without merge",merged:"Merged"}[pr.status];
       const suffix = (classified ? ` · ${purpose}` : "") + (statusLabel ? ` · ${statusLabel}` : "");
-      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${prStatus(pr)}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>${pendingReviewLinks(pr.url)}`;
+      return `<a class="issue-pr-link" href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer" title="${esc(pr.url)}${suffix}" aria-label="Open pull request ${esc(title)}${suffix}">${prStatus(pr)}<span class="pr-link-title">${esc(title)}</span>${classified ? `<span class="pr-purpose-label">${purpose}</span>` : ""}</a>${pendingReviewLinks(pr.url, issue.number)}`;
     })
     .join("");
 }
@@ -1304,7 +1304,7 @@ function mountIssueReviews(value) {
   if (root.hidden) return;
   const status = HeyBossUI.codeReviewStage;
   root.innerHTML = `<h2 class="side-heading">Code reviews</h2><ul class="artifact-attachment-list">${linked.map(r => {
-    const query = new URLSearchParams({project,review:r.id,...(host ? {host} : {})});
+    const query = new URLSearchParams({project,review:r.id,issue:issue.number,...(host ? {host} : {})});
     const receipt = r.stage === "published" && r.receipt.startsWith("https://" + project + "/pull/" + r.number + "#");
     return `<li><div><a data-review-preview aria-haspopup="dialog" href="/code-review#${esc(query.toString())}">${icon("pull-request")}<span>#${r.number} · ${esc(r.title)}</span></a><small>${receipt ? `<a href="${esc(r.receipt)}" target="_blank" rel="noopener noreferrer">Published on GitHub ↗</a>` : esc(status[r.stage] || r.stage)}</small></div>${issue.deleted_at ? "" : `<button data-unlink="${r.id}" aria-label="Unlink review for PR #${r.number}">${icon("x")}</button>`}</li>`;
   }).join("")}</ul>${value.code_reviews_enabled && !issue.deleted_at ? '<button class="artifact-text-button" data-attach>Attach review</button>' : ""}<div data-picker></div><p role="alert" hidden></p>`;
@@ -2653,7 +2653,7 @@ function renderPullRequests(issue, prsEnabled) {
   if (!prsEnabled) return "";
   return `<details class="side-section pr-section"${issue.pull_requests?.length ? " open" : ""}><summary class="commit-summary">${icon("pull-request")}Pull requests <span class="commit-count">${issue.pull_requests?.length || 0}</span><span class="commit-chevron" aria-hidden="true">›</span></summary><div class="pr-links">${(issue.pull_requests || []).map((pr) => {
     const trace = traceLinkForOrigin(pr.origin, issue.number, pr.added_by);
-    return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${pendingReviewLinks(pr.url)}${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
+    return `<div class="pr-link"><div class="pr-link-heading"><a href="${esc(pr.url)}" target="_blank" rel="noopener noreferrer">${prStatus(pr, true)} ${esc(pr.url)}</a>${pendingReviewLinks(pr.url, issue.number)}${issue.deleted_at ? "" : `<button type="button" class="icon-button" aria-label="Remove PR ${esc(pr.url)}" data-remove-pr="${esc(pr.url)}">${icon("x")}</button>`}</div>${trace ? `<div class="commit-trace-row"><a class="origin-conversation commit-trace-link" href="${esc(trace)}">View agent trace<span aria-hidden="true">↗</span></a></div>` : ""}${issue.deleted_at ? `<span class="pr-purpose-label">${prPurposeLabel(pr.purpose)}</span>` : `<label class="pr-purpose-field"><span>Purpose</span><select class="text-input" aria-label="Purpose of PR ${esc(pr.url)}" data-pr-purpose="${esc(pr.url)}" data-saved-purpose="${esc(pr.purpose || 'unspecified')}">${prPurposeOptions(pr.purpose)}</select></label>`}</div>`;
   }).join("") || "<p>No pull requests attached.</p>"}</div>${issue.deleted_at ? "" : `<details class="pr-add"><summary>${icon("plus")}Attach a pull request</summary><form id="pr-form"><label class="field-label" for="pr-url">Attach a PR link</label><input class="text-input" id="pr-url" type="url" required placeholder="https://github.com/…/pull/123"><label class="pr-purpose-field" for="pr-purpose"><span>Purpose</span><select class="text-input" id="pr-purpose">${prPurposeOptions()}</select></label><button class="button small" type="submit">Attach PR</button></form></details><p id="pr-error" class="form-error" role="alert" hidden></p>`}</details>`;
 }
 async function changePullRequest(action, url, purpose, control) {

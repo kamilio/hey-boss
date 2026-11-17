@@ -27,7 +27,7 @@
 .review-meta a { margin-left: auto; }
 #reviews-detail h2 { margin: 18px 0 6px; font-size: 14px; }
 .review-editor { display: flex; align-items: flex-start; gap: 12px; }
-.review-editor p { flex: 1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.review-editor > .markdown { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .review-editor .icon-button { width: 32px; height: 32px; }
 .review-editor:has(textarea) { display: grid; }
 .review-editor textarea { min-height: 6em; resize: vertical; }

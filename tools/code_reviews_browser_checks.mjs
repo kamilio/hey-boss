@@ -261,6 +261,7 @@ try {
   await page.getByText(latest.title, {exact:true}).waitFor();
   assert.equal(await archive.getAttribute("aria-pressed"), "true");
   const issueNumber = run([...issue, "create", "--title", "Check reminder labels"]).issue.number;
+  run([...issue, "comment", String(issueNumber), "--body", "Discuss **reminder context** here."]);
   const issueUrl = info.url + "#" + new URLSearchParams({project, issue:issueNumber});
   for (const pr of ["example/time/pull/71","example/time/pull/72","example/time/pull/73","other/repo/pull/73"]) {
     run([...issue, "pr", "add", String(issueNumber), "https://github.com/" + pr]);
@@ -274,15 +275,17 @@ try {
     const row = address === issueUrl ? page.locator(".pr-link").filter({has:links}) : page.locator(".issue-row").filter({has:links});
     assert.equal(await row.locator('a[href="https://github.com/example/time/pull/73"]').count(), 1);
     await links.click();
-    await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
-    const preview = page.getByRole("dialog", {name:"Draft with inline feedback"});
-    await preview.waitFor();
+    const preview = page.getByRole("dialog", {name:"Code review"}).frameLocator("iframe");
+    await preview.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
     assert.equal(new URL(page.url()).pathname, "/");
     assert.ok(await preview.getByText(first.comments[0].body).isVisible());
-    assert.equal(await preview.locator("#preview-submit").isVisible(), false);
+    assert.match(await preview.locator(".rv-code-line.marked").innerText(), /next.in_zone/);
+    await preview.locator(".review-discussion .markdown strong").filter({hasText:"reminder context"}).waitFor();
+    await preview.getByRole("button",{name:"Edit review comment",exact:true}).focus();
     await page.keyboard.press("Escape");
     const [solo] = await Promise.all([page.context().waitForEvent("page"), links.click({modifiers:["Shift"]})]);
     await solo.waitForURL("**/code-review#**");
+    await solo.locator(".review-discussion .markdown strong").waitFor();
     await solo.close();
   }
   await page.goto(issueUrl);
@@ -313,7 +316,8 @@ try {
   await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
   await page.getByRole("link",{name:"Open pending review for PR #74"}).click();
   const modal = page.locator("#review-preview");
-  await modal.getByRole("heading",{name:quick.title}).waitFor();
+  const full = modal.frameLocator("iframe");
+  await full.getByRole("heading",{name:quick.title}).waitFor();
   await page.unroute("**/api/code-reviews/publish");
   await page.route("**/api/code-reviews/publish", route => {
     const {id,version,digest} = route.request().postDataJSON();
@@ -325,32 +329,41 @@ try {
   for (const [width,scheme] of [[320,"dark"],[1280,"light"]]) {
     await page.setViewportSize({width,height:768});
     await page.emulateMedia({colorScheme:scheme});
-    const action = modal.getByRole("button",{name:"Approve and publish"});
-    assert.ok(await action.evaluate(el => {const r=el.getBoundingClientRect();return r.right<=innerWidth && r.bottom<=innerHeight}));
+    const action = full.getByRole("button",{name:"Approve and publish"});
+    await action.scrollIntoViewIfNeeded();
+    assert.ok(await modal.evaluate(el => el.clientWidth >= innerWidth * .94));
+    assert.ok(await action.evaluate(el => el.getBoundingClientRect().right <= innerWidth));
     if (snap) await modal.screenshot({path:join(snap,"preview-"+scheme+".png")});
   }
-  await modal.getByRole("button",{name:"Approve and publish"}).click();
+  await full.getByRole("button",{name:"Approve and publish"}).click();
+  await full.getByRole("link",{name:"View published review ↗"}).waitFor();
+  await page.keyboard.press("Escape");
   await modal.waitFor({state:"hidden"});
   assert.equal(op({command:"view",id:quick.id}).review.stage,"published");
   const sha = "c".repeat(40), message = "Keep reminder labels when the timezone changes";
   await page.evaluate(async ({project,issueNumber,sha,message}) => {
     await mutate({action:"add_commit",number:issueNumber,commit:sha,review:{
-      repository:project,parent:"a".repeat(40),message,author:"QA",email:"qa@example.invalid",
+      repository:project,parent:"a".repeat(40),message:message+"\n\n**Summary:** Keep labels.\n\n<details>\n<summary>Details</summary>\n\n**Why:** Labels should persist.\n\n</details>",author:"QA",email:"qa@example.invalid",
       authored_at:"2026-11-16",patch:"diff --git a/labels.rs b/labels.rs\n--- a/labels.rs\n+++ b/labels.rs\n@@ -1 +1 @@\n-clear(labels);\n+preserve(labels);\n"
     }},project);
   },{project,issueNumber,sha,message});
   await page.reload();
   const chip = page.getByRole("link",{name:/Open commit ccccccc/});
   await chip.click();
-  await modal.getByRole("heading",{name:message}).waitFor();
-  assert.ok((await modal.locator("pre").textContent()).includes("+preserve(labels)"));
+  await full.getByRole("heading",{name:message}).waitFor();
+  await full.locator("#message-body details summary").click();
+  await full.locator("#message-body details strong").filter({hasText:"Why:"}).waitFor();
+  await full.locator('.diff-row.addition code').filter({hasText:"+preserve(labels);"}).first().waitFor();
+  assert.equal(await full.getByRole("button",{name:"Approve commit"}).count(),0);
+  await full.locator("#assign-me").click();
+  await full.locator("#unassign").click();
+  await full.locator("#task-owner").filter({hasText:"Unassigned"}).waitFor();
+  await full.locator("#make-ready").click();
+  await full.locator("#rework").click();
+  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
   if (snap) await modal.screenshot({path:join(snap,"preview-commit.png")});
-  await modal.getByRole("button",{name:"Approve commit"}).click();
-  await modal.waitFor({state:"hidden"});
-  await chip.click();
-  await modal.getByText(/ccccccc · Approved/).waitFor();
-  assert.equal(await modal.locator("#preview-submit").isVisible(),false);
   await page.keyboard.press("Escape");
+  await modal.waitFor({state:"hidden"});
   const [commitPage] = await Promise.all([page.context().waitForEvent("page"),chip.click({modifiers:["Shift"]})]);
   await commitPage.getByRole("heading",{name:message}).waitFor();
   await commitPage.close();
@@ -384,7 +397,7 @@ try {
     op({...first, number});
   await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
   await page.getByRole("link", {name:"Open pending review for PR #73"}).click();
-  await page.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
+  await full.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
   await page.getByRole("link",{name:"Full review"}).click();
   await page.locator("#reviews-detail").waitFor();
   assert.ok(await page.locator("#reviews-detail").evaluate(el => el.getBoundingClientRect().top < innerHeight));

@@ -557,14 +557,11 @@
     </dialog>
     <dialog id="review-preview" closedby="any" aria-labelledby="preview-title">
       <div class="dialog-heading">
-        <div><span class="dialog-eyebrow" id="preview-meta"></span><h2 id="preview-title">Review preview</h2></div>
-        <button type="button" class="icon-button" id="preview-close" aria-label="Close preview" autofocus><span data-icon="x"></span></button>
+        <h2 id="preview-title">Review</h2>
+        <a id="preview-full" class="button small">Full review <span aria-hidden="true">↗</span></a>
+        <button type="button" class="icon-button" id="preview-close" aria-label="Close review" autofocus><span data-icon="x"></span></button>
       </div>
-      <div class="dialog-content" id="preview-content" aria-live="polite"></div>
-      <div class="dialog-footer">
-        <a id="preview-full" class="button">Full review <span aria-hidden="true">↗</span></a>
-        <button type="button" id="preview-submit" class="button primary" hidden></button>
-      </div>
+      <iframe id="preview-frame" title="Review"></iframe>
     </dialog>
     <dialog id="transfer-dialog" aria-labelledby="transfer-title" aria-describedby="transfer-description">
       <form id="transfer-form">

@@ -420,16 +420,25 @@ function date(at) {
       if(!response.ok||!value.ok)throw Error(value.error?.message||value.error||fallback);
       return value;
     }
-  function pendingReviewLinks(url, project, host, pending) {
+  function pendingReviewLinks(url, project, host, pending, issue) {
     if (!pending) return "";
     const match = /^https?:\/\/(github\.com\/[\w.-]+\/[\w.-]+)\/pull\/([1-9]\d*)(?:[/?#]|$)/i.exec(url);
     if (!match || match[1].toLowerCase() !== project.toLowerCase()) return "";
     return (pending[match[2]] || []).map((id, index, ids) => {
-      const query = new URLSearchParams({project, review:id, ...(host ? {host} : {})});
+      const query = new URLSearchParams({project, review:id, ...(issue ? {issue} : {}), ...(host ? {host} : {})});
       return ` <a class="issue-pr-link" data-review-preview aria-haspopup="dialog" href="/code-review#${esc(query.toString())}" aria-label="Open pending review for PR #${match[2]}${ids.length > 1 ? ", review " + (index + 1) : ""}">Pending review${ids.length > 1 ? " " + (index + 1) : ""}</a>`;
     }).join("");
   }
-  return {pendingReviewLinks, codeReviewStage: {
+  function reviewDiscussion(task, project, host) {
+    const section = document.createElement("section");
+    section.className = "review-discussion";
+    const url = "/#" + new URLSearchParams({project,issue:task.issue.number,...(host ? {host} : {})});
+    section.innerHTML = `<h2>Task discussion</h2><a href="${esc(url)}" target="_top">#${task.issue.number} · ${esc(task.issue.title)}</a>` +
+      task.comments.map(c => `<article class="comment-card"><div class="comment-header"><strong>${esc(actorLabel(c.author,c.actor_model))}</strong> ${date(c.created_at)}${c.resolved ? " · Resolved" : ""}</div><div class="comment-body markdown">${c.body_html ?? esc(c.body)}</div></article>`).join("") +
+      (task.more_comments ? `<a href="${esc(url)}" target="_top">More comments on the task →</a>` : "");
+    return section;
+  }
+  return {reviewDiscussion, pendingReviewLinks, codeReviewStage: {
     draft: "Draft",
     submitted: "Awaiting approval",
     publishing: "Publication pending",

@@ -586,6 +586,7 @@ fn respond(mut request: tiny_http::Request, app: &App) {
     // permits those styles; script execution remains restricted to local assets.
     let artifact_page = request.url().split('?').next() == Some("/artifacts");
     let html_preview = request.url().split('?').next() == Some("/html-preview");
+    let review_page = matches!(request.url().split('?').next(), Some("/code-review" | "/commit-review"));
     let reply = route(&mut request, app);
     let (status, kind, bytes) = match reply {
         Ok(value) => value,
@@ -618,12 +619,14 @@ fn respond(mut request: tiny_http::Request, app: &App) {
         ("Referrer-Policy", "no-referrer"),
         (
             "X-Frame-Options",
-            if html_preview { "SAMEORIGIN" } else { "DENY" },
+            if html_preview || review_page { "SAMEORIGIN" } else { "DENY" },
         ),
         (
             "Content-Security-Policy",
             if html_preview {
                 include_str!("web/html-preview.csp").trim()
+            } else if review_page {
+                "default-src 'none'; script-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'"
             } else if artifact_page {
                 "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; font-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             } else {
@@ -1277,6 +1280,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
                 "Issue status updates use the terminal workflow",
             ));
         }
+        let code_review = matches!(&action.operation, Operation::CodeReview { .. });
         let commit_message = matches!(
             &action.operation,
             Operation::CommitReview {
@@ -1291,6 +1295,18 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             action.request_id,
             action.host.as_deref(),
         )?;
+        if code_review && let Some(review) = result.get_mut("review") {
+            if let Some(body) = review["body"].as_str() {
+                review["body_html"] = json!(crate::markdown::render_fragment(body));
+            }
+            if let Some(comments) = review["comments"].as_array_mut() {
+                for comment in comments {
+                    if let Some(body) = comment["body"].as_str() {
+                        comment["body_html"] = json!(crate::markdown::render_fragment(body));
+                    }
+                }
+            }
+        }
         if commit_message {
             let message = result["review"]["message"]
                 .as_str()

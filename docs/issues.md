@@ -524,10 +524,10 @@ queue host, state, search, label, and assignee filters. **Assigned to me** targe
 Boss explicitly, so an agent running the copied command sees the same issues.
 
 In the Issues list or issue detail, click **Pending review** or a stored commit
-SHA for a preview. **Full review** or Shift+click opens the standalone page.
-Publishing sends the displayed verdict and comments to GitHub. **Approve commit**
-records approval of the attached patch and its current message on the issue;
-editing the message clears that approval.
+SHA to open the full review in a dialog. Escape closes it; **Full review** or
+Shift+click opens the standalone page. PR reviews publish their displayed verdict
+and comments to GitHub. Stored commits show the diff, comments and task controls,
+including reopening a ready task and unassigning its owner.
 
 Every change increments an issue's `version`. Required transport guards are
 captured by the CLI; commands do not require manual revision arguments.

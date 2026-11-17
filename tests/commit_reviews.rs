@@ -240,27 +240,3 @@ fn attachments_without_a_remote_and_url_prefixes_resolve_to_the_stored_review() 
     let shown=f.call(json!({"action":"commit_review","number":1,"commit":format!("https://github.com/commit/{}.patch",&SHA[..7]),"operation":{"command":"view"}}));
     assert_eq!(shown["review"]["patch"], PATCH);
 }
-
-#[test]
-fn approval_is_for_the_previewed_attachment_and_message() {
-    let mut f = Fixture::new();
-    let preview = f.review(json!({"command":"preview"}));
-    assert_eq!(preview["excerpt"], PATCH);
-    assert_eq!(preview["approved"], false);
-    let approve = json!({"command":"approve","previous_message":preview["message"]});
-    let mut agent =
-        f.request(json!({"action":"commit_review","number":1,"commit":SHA,"operation":approve}));
-    agent.actor.as_mut().unwrap().id = "agent:worker".into();
-    agent.actor.as_mut().unwrap().kind = "agent".into();
-    assert!(f.store.execute(&agent).is_err());
-    assert_eq!(f.review(json!({"command":"preview"}))["approved"], false);
-    assert_eq!(f.review(approve.clone())["changed"], true);
-
-    assert_eq!(f.review(approve.clone())["changed"], false);
-    assert_eq!(f.review(json!({"command":"view"}))["approved"], true);
-    f.review(json!({"command":"message","message":"Updated subject","previous_message":preview["message"]}));
-    assert_eq!(f.review(json!({"command":"preview"}))["approved"], false);
-    let stale =
-        f.request(json!({"action":"commit_review","number":1,"commit":SHA,"operation":approve}));
-    assert_eq!(f.store.execute(&stale).unwrap_err().code, "conflict");
-}

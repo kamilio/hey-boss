@@ -45,10 +45,6 @@ pub struct Location {
 #[serde(tag = "command", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     View,
-    Preview,
-    Approve {
-        previous_message: String,
-    },
     Patch,
     Comments,
     Comment {
@@ -71,10 +67,7 @@ pub enum Operation {
 }
 impl Operation {
     pub fn writes(&self) -> bool {
-        !matches!(
-            self,
-            Self::View | Self::Preview | Self::Patch | Self::Comments
-        )
+        !matches!(self, Self::View | Self::Patch | Self::Comments)
     }
 }
 
@@ -418,29 +411,12 @@ pub(super) fn execute_sha(
     actor: Option<&Actor>,
     now: i64,
 ) -> Result<Value> {
-    let approved = || -> Result<bool> {
-        Ok(db.query_row("SELECT json_extract(data,'$.command')='approve' FROM events WHERE project_id=?1 AND issue_number=?2 AND action='commit_reviewed' AND json_extract(data,'$.sha')=?3 AND json_extract(data,'$.command') IN ('approve','message') ORDER BY created_at DESC,id DESC LIMIT 1", params![project.id,number,sha], |r| r.get(0)).optional()?.unwrap_or(false))
-    };
-    if matches!(operation, Operation::Preview) {
-        let (message, excerpt): (String, String) = db.query_row("SELECT message, substr(json_extract(snapshot,'$.patch'),1,4096) FROM commit_reviews WHERE project_id=?1 AND issue_number=?2 AND sha=?3", params![project.id,number,sha], |r| Ok((r.get(0)?, r.get(1)?))).optional()?.ok_or_else(|| Error::invalid("No stored patch for this commit"))?;
-        return Ok(
-            json!({"ok":true,"sha":sha,"message":message,"excerpt":excerpt,"approved":approved()?}),
-        );
-    }
     let (encoded, current): (String,String) = db.query_row("SELECT snapshot,message FROM commit_reviews WHERE project_id=?1 AND issue_number=?2 AND sha=?3",params![project.id,number,sha],|r|Ok((r.get(0)?,r.get(1)?))).optional()?.ok_or_else(|| Error::invalid("No stored patch; attach this commit from its Git checkout with issue commit add"))?;
     let snapshot: Snapshot = serde_json::from_str(&encoded)?;
     let mut result =
         json!({"ok":true,"project":project,"number":number,"sha":sha,"changed":operation.writes()});
     match operation {
-        Operation::Preview => unreachable!(),
-        Operation::Approve { previous_message } => {
-            if !actor.is_some_and(|a| a.id == "human:boss" && a.kind == "human") {
-                return Err(Error::new("forbidden", "Only Boss can approve a commit"));
-            }
-            if &current != previous_message { return Err(Error::conflict("Commit message changed; reopen the preview before approving")); }
-            if approved()? { result["changed"]=json!(false); return Ok(result); }
-        },
-        Operation::View => { result["approved"]=json!(approved()?); let mut review=serde_json::to_value(&snapshot)?; review["message"]=json!(current); review["sha"]=json!(sha); result["review"]=review; result["comments"]=json!(comments(db,&project.id,number,&sha)?); },
+        Operation::View => { let mut review=serde_json::to_value(&snapshot)?; review["message"]=json!(current); review["sha"]=json!(sha); result["review"]=review; result["comments"]=json!(comments(db,&project.id,number,&sha)?); },
         Operation::Comments => result["comments"]=json!(comments(db,&project.id,number,&sha)?),
         Operation::Patch => {
             let trimmed=current.trim_end(); let (subject,rest)=trimmed.split_once('\n').unwrap_or((trimmed,""));

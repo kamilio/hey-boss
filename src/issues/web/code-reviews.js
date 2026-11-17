@@ -31,6 +31,7 @@
     project,
     host,
     review,
+    task,
     serial = 0,
     busy = false,
     editing = false,
@@ -42,13 +43,13 @@
     box.hidden = !m;
     box.textContent = m || "";
   };
-  const action = (op) =>
+  const request = (operation) =>
     HeyBossUI.post(
       "/api/action",
       {
         project,
         ...(host ? { host } : {}),
-        operation: { action: "code_review", operation: op },
+        operation,
       },
       boot,
       {
@@ -56,6 +57,7 @@
         fallback: "Cannot open Code Reviews",
       },
     );
+  const action = operation => request({action:"code_review", operation});
   const picker = new HeyBossUI.ProjectPicker({
     onSelect: (id) => {
       if (!busy && leave())
@@ -76,6 +78,17 @@
         const v = await action({command: "view", id});
         if (seq !== serial) return;
         review = v.review;
+        const number = Number(new URLSearchParams(location.hash.slice(1)).get("issue"));
+        if (Number.isSafeInteger(number) && number > 0) {
+          try {
+            const context = await request({action:"view", number});
+            if (seq !== serial) return;
+            task = context;
+          } catch (err) {
+            if (seq !== serial) return;
+            error("Cannot load task discussion: " + err.message);
+          }
+        }
       } else {
         const v = await action({command: "list", archived, offset: append ? nextOffset : 0});
         if (seq !== serial) return;
@@ -105,9 +118,11 @@
       busy = false;
     }
   }
-  function editor(label, body, comment) {
+  function editor(label, body, comment, html) {
     const box = e("div", undefined, "review-editor");
-    box.append(e("p", body || "No review comment."));
+    const content = e("div", body || "No review comment.", "markdown");
+    if (html) content.innerHTML = html;
+    box.append(content);
     if (!["draft", "submitted"].includes(review.stage)) return box;
     const controls = e("div", undefined, "review-controls");
     const edit = btn("Edit", () => {
@@ -236,6 +251,7 @@
     document.title = title + " · Hey Boss";
     const hash = new URLSearchParams(location.hash.slice(1));
     hash.delete("review");
+    hash.delete("issue");
     const back = $("#reviews-back");
     back.hidden = !detailPage;
     back.href = "/code-reviews#" + hash;
@@ -287,7 +303,7 @@
     pane.append(
       meta,
       e("h2", "Review comment"),
-      editor("review comment", r.body, null),
+      editor("review comment", r.body, null, r.body_html),
       e("h2", "Inline comments · " + r.comments.length),
     );
     if (!r.comments.length) pane.append(e("p", "No inline comments."));
@@ -330,7 +346,7 @@
       }
       if (c.snippet) card.append(excerpt(c));
       card.append(
-        editor("comment on " + a.path + " line " + a.line, c.body, c.id),
+        editor("comment on " + a.path + " line " + a.line, c.body, c.id, c.body_html),
       );
       pane.append(card);
     }
@@ -373,6 +389,7 @@
       footer.append(discard);
     }
     pane.append(footer);
+    if (task) pane.append(HeyBossUI.reviewDiscussion(task, project, host));
   }
   async function navigate() {
     if (!detailPage && new URLSearchParams(location.hash.slice(1)).has("review")) {
@@ -380,7 +397,7 @@
       return;
     }
     serial++;
-    review = null;
+    review = task = null;
     rows = [];
     archived = new URLSearchParams(location.hash.slice(1)).get("view") === "archive";
     nextOffset = null;
