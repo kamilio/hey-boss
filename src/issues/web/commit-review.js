@@ -63,7 +63,7 @@ async function start() {
   HeyBossUI.icons($('#review'));
   renderMessage(result.message_body_html);
   if (window !== window.top) $('#full-message').open = true;
-  if (task.comments.length) $('#files').after(HeyBossUI.reviewDiscussion(task, project, host));
+  if (window === window.top && task.comments.length) $('#files').after(HeyBossUI.reviewDiscussion(task, project, host));
   $('#loading').remove(); $('#review').hidden = false;
   taskBar(); mountGitFiles(); mountGitComments({comments:result.comments,request:review}); mountGitLayout();
   $('#rework').onclick = () => action({action:'rework',number,if_version:issue.version});

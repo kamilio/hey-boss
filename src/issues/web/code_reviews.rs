@@ -23,7 +23,28 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
         version,
         digest,
     } = serde_json::from_slice(bytes)?;
-    let repo = project
+    let repo = github_repo(&project)?;
+    let op = |operation| {
+        app.execute_at(
+            Some(project.clone()),
+            Operation::CodeReview { operation },
+            None,
+            host.as_deref(),
+        )
+    };
+    let token = personal_token()?;
+    publish_with(
+        &op,
+        repo,
+        id,
+        version,
+        &digest,
+        "https://api.github.com",
+        token.trim(),
+    )
+}
+fn github_repo(project: &str) -> Result<&str> {
+    project
         .strip_prefix("github.com/")
         .filter(|s| {
             s.split('/').count() == 2
@@ -35,15 +56,10 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
                             .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
                 })
         })
-        .ok_or_else(|| Error::invalid("Select a GitHub project to publish"))?;
-    let op = |operation| {
-        app.execute_at(
-            Some(project.clone()),
-            Operation::CodeReview { operation },
-            None,
-            host.as_deref(),
-        )
-    };
+        .ok_or_else(|| Error::invalid("Select a GitHub project"))
+}
+
+fn personal_token() -> Result<String> {
     // Read the person's stored login; never use a worker's installation token.
     let token = Command::new("gh")
         .args(["auth", "token", "--hostname", "github.com"])
@@ -74,16 +90,91 @@ pub(super) fn publish(app: &App, bytes: &[u8]) -> Result<Value> {
             )));
         }
     };
-    publish_with(
-        &op,
-        repo,
-        id,
-        version,
-        &digest,
-        "https://api.github.com",
-        token.trim(),
-    )
+    Ok(token)
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Diff {
+    project: String,
+    host: Option<String>,
+    id: i64,
+}
+
+pub(super) fn diff(app: &App, bytes: &[u8]) -> Result<Value> {
+    let Diff { project, host, id } = serde_json::from_slice(bytes)?;
+    let repo = github_repo(&project)?;
+    let value = app.execute_at(
+        Some(project.clone()),
+        Operation::CodeReview {
+            operation: Review::View { id },
+        },
+        None,
+        host.as_deref(),
+    )?;
+    let r = &value["review"];
+    if !matches!(r["stage"].as_str(), Some("draft" | "submitted")) {
+        return Err(Error::invalid(
+            "Code is available for pending reviews only.",
+        ));
+    }
+    let token = personal_token()?;
+    let client = Client::builder()
+        .user_agent("hey-gh")
+        .timeout(Duration::from_secs(12))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
+    let root = format!("https://api.github.com/repos/{repo}");
+    let get = |url: String, accept: &str| {
+        client
+            .get(url)
+            .bearer_auth(token.trim())
+            .header("Accept", accept)
+            .send()
+            .and_then(|res| res.error_for_status())
+            .map_err(|_| Error::invalid("Could not load the PR diff from GitHub."))
+    };
+    let number = r["number"]
+        .as_i64()
+        .ok_or_else(|| Error::invalid("Invalid PR number"))?;
+    let pr: Value = get(
+        format!("{root}/pulls/{number}"),
+        "application/vnd.github+json",
+    )?
+    .json()
+    .map_err(|_| Error::invalid("Invalid GitHub PR metadata."))?;
+    let head = r["head"].as_str().unwrap_or_default();
+    if pr["head"]["sha"].as_str() != Some(head) {
+        return Err(Error::conflict(
+            "This PR has changed since the review was written.",
+        ));
+    }
+    let base = pr["base"]["sha"]
+        .as_str()
+        .filter(|s| s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit()))
+        .ok_or_else(|| Error::invalid("Missing PR base commit."))?;
+    // Immutable comparison: a force-push between these reads cannot move the displayed lines.
+    let mut bytes = Vec::new();
+    const LIMIT: usize = 256 * 1024;
+    get(
+        format!("{root}/compare/{base}...{head}"),
+        "application/vnd.github.diff",
+    )?
+    .take((LIMIT + 1) as u64)
+    .read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > LIMIT;
+    if truncated {
+        bytes.truncate(
+            bytes[..LIMIT]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .unwrap_or(0),
+        );
+    }
+    Ok(json!({"ok": true, "patch": String::from_utf8_lossy(&bytes), "truncated": truncated}))
+}
+
 fn publish_with(
     op: &impl Fn(Review) -> Result<Value>,
     repo: &str,

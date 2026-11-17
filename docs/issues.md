@@ -524,7 +524,11 @@ queue host, state, search, label, and assignee filters. **Assigned to me** targe
 Boss explicitly, so an agent running the copied command sees the same issues.
 
 In the Issues list or issue detail, click **Pending review** or a stored commit
-SHA to open the full review in a dialog. Escape closes it; **Full review** or
+SHA to open the full review in a dialog. Publishing an approval closes the dialog.
+Pending reviews show the changed code with comments on their lines. The web app
+loads up to 256 KiB of diff from GitHub without storing it. Confirmed publication
+clears saved code excerpts and keeps comment text, line references, and the receipt.
+Escape also closes the dialog; **Full review** or
 Shift+click opens the standalone page. PR reviews publish their displayed verdict
 and comments to GitHub. Stored commits show the diff, comments and task controls,
 including reopening a ready task and unassigning its owner.

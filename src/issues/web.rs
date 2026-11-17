@@ -1094,6 +1094,7 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
     if request.method() == &Method::Post
         && [
             "/api/code-reviews/publish",
+            "/api/code-reviews/diff",
             "/api/action",
             "/api/jobs/runtime",
             "/api/preview",
@@ -1133,6 +1134,9 @@ fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static s
             .read_to_end(&mut bytes)?;
         if bytes.len() > super::WIRE_LIMIT {
             return Err(Error::invalid("Request exceeds 16 MiB"));
+        }
+        if path == "/api/code-reviews/diff" {
+            return json_response(code_reviews::diff(app, &bytes)?);
         }
         if path == "/api/code-reviews/publish" {
             return json_response(code_reviews::publish(app, &bytes)?);

@@ -67,3 +67,11 @@
 .review-views button { padding: 6px 14px; font: inherit; color: var(--muted); background: transparent; border: none; border-radius: 6px; cursor: pointer; }
 .review-views button[aria-pressed="true"] { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px #0002; font-weight: 600; }
 #reviews-more { margin-top: 12px; }
+
+.review-file { border: 1px solid var(--line); border-radius: 8px; margin-block: 6px; overflow: hidden; }
+.review-file summary { padding: 10px 12px; background: var(--surface); cursor: pointer; overflow-wrap: anywhere; font: 600 13px/1.5 ui-monospace, monospace; }
+.review-file pre { overflow: auto; margin: 0; font: 12px/1.65 ui-monospace, monospace; tab-size: 4; }
+.review-file .rv-hunk { color: var(--muted); background: var(--hover); }
+.review-file .addition { background: color-mix(in srgb, var(--green) 10%, transparent); }
+.review-file .deletion { background: color-mix(in srgb, var(--danger) 10%, transparent); }
+.review-file .review-comment, .review-file > p { padding: 10px 14px; margin: 0; }

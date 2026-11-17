@@ -32,6 +32,7 @@
     host,
     review,
     task,
+    diff,
     serial = 0,
     busy = false,
     editing = false,
@@ -70,6 +71,7 @@
   const leave = () => !editing || confirm("Discard your unsaved edit?");
   async function load(append = false) {
     const seq = ++serial;
+    diff = null;
     error("");
     try {
       if (detailPage) {
@@ -79,7 +81,7 @@
         if (seq !== serial) return;
         review = v.review;
         const number = Number(new URLSearchParams(location.hash.slice(1)).get("issue"));
-        if (Number.isSafeInteger(number) && number > 0) {
+        if (window === window.top && Number.isSafeInteger(number) && number > 0) {
           try {
             const context = await request({action:"view", number});
             if (seq !== serial) return;
@@ -190,6 +192,61 @@
     }
     return pre;
   }
+  async function showDiff(section, r, cards, fallback, url) {
+    const status = e("p", "Loading changed code…", "review-empty");
+    section.append(e("h2", "Changed code"), status);
+    try {
+      diff ??= HeyBossUI.post("/api/code-reviews/diff", {project, ...(host ? {host} : {}), id:r.id}, boot);
+      const [{patch, truncated}, {parseUnifiedDiff}] = await Promise.all([diff, import("/git-review/diff.js")]);
+      if (!section.isConnected) return;
+      const files = parseUnifiedDiff(patch);
+      status.remove();
+      for (const [index, file] of files.entries()) {
+        const notes = r.comments.filter(c => c.anchor.path === file.path || (c.anchor.side === "LEFT" && c.anchor.path === file.oldPath));
+        const details = e("details", undefined, "review-file");
+        details.append(e("summary", file.path + "  +" + file.additions + " −" + file.deletions));
+        function draw() {
+          if (!details.open || details.childElementCount > 1) return;
+          if (!file.hunks.length) details.append(e("p", file.binary ? "Binary file" : "No text changes."));
+          for (const hunk of file.hunks) {
+            let pre = e("pre");
+            details.append(pre);
+            pre.append(e("span", hunk.header, "rv-code-line rv-hunk"));
+            for (const line of hunk.lines) {
+              const number = a => a.side === "LEFT" ? line.oldLine : line.newLine;
+              const marked = notes.some(({anchor:a}) => number(a) !== null && number(a) >= (a.start_line || a.line) && number(a) <= a.line);
+              const row = e("span", undefined, "rv-code-line " + line.type + (marked ? " marked" : ""));
+              row.append(e("span", line.oldLine ?? "", "rv-line-number"), e("span", line.newLine ?? "", "rv-line-number"),
+                document.createTextNode(({addition:"+", deletion:"-", context:" "})[line.type] + line.content));
+              pre.append(row);
+              for (const c of notes.filter(c => number(c.anchor) === c.anchor.line)) {
+                const card = cards.get(c.id);
+                if (card.contains(document.activeElement)) continue;
+                card.querySelector("pre")?.remove();
+                details.append(card);
+                pre = e("pre");
+                details.append(pre);
+              }
+            }
+            if (!pre.childNodes.length) pre.remove();
+          }
+        }
+        details.open = index === 0 || notes.length > 0;
+        details.ontoggle = draw;
+        section.append(details);
+        draw();
+      }
+      if (!r.comments.some(c => cards.get(c.id).parentNode === fallback)) fallback.hidden = true;
+      if (truncated || !files.length) {
+        status.textContent = truncated ? "Large diff: showing the first part. " : "No changed code to display. ";
+        status.append(link("View files on GitHub ↗", url + "/files"));
+        section.append(status);
+      }
+    } catch (err) {
+      status.textContent = err.message + " ";
+      status.append(link("View files on GitHub ↗", url + "/files"));
+    }
+  }
   function publishButton(r) {
     const label = {
       APPROVE: "Approve and publish",
@@ -223,6 +280,11 @@
           { fallback: "Publication failed" },
         );
         if (seq !== serial) return;
+        const dialog = window.frameElement?.closest("#review-preview");
+        if (r.verdict === "APPROVE" && dialog?.open) {
+          dialog.close();
+          return;
+        }
         await load();
         $("#reviews-status").textContent = "Published to GitHub.";
       } catch (err) {
@@ -304,9 +366,11 @@
       meta,
       e("h2", "Review comment"),
       editor("review comment", r.body, null, r.body_html),
-      e("h2", "Inline comments · " + r.comments.length),
     );
-    if (!r.comments.length) pane.append(e("p", "No inline comments."));
+    const changes = e("section"), fallback = e("section"), cards = new Map();
+    pane.append(changes, fallback);
+    fallback.append(e("h2", "Inline comments · " + r.comments.length));
+    if (!r.comments.length) fallback.append(e("p", "No inline comments."));
     for (const c of r.comments) {
       const a = c.anchor,
         card = e("article", undefined, "review-comment");
@@ -348,8 +412,10 @@
       card.append(
         editor("comment on " + a.path + " line " + a.line, c.body, c.id, c.body_html),
       );
-      pane.append(card);
+      fallback.append(card);
+      cards.set(c.id, card);
     }
+    if (url && ["submitted", "draft"].includes(r.stage)) showDiff(changes, r, cards, fallback, url);
     const footer = e("div", undefined, "review-actions");
     if (r.stage === "submitted") {
       footer.append(
@@ -388,7 +454,7 @@
       discard.classList.add("review-discard");
       footer.append(discard);
     }
-    pane.append(footer);
+    pane.insertBefore(footer, changes);
     if (task) pane.append(HeyBossUI.reviewDiscussion(task, project, host));
   }
   async function navigate() {

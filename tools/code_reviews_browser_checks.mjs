@@ -95,6 +95,8 @@ try {
     verdict: "REQUEST_CHANGES",
     body: "A reminder scheduled just before midnight can appear on the wrong day.",
   };
+  const patch = "diff --git a/scheduler/reminders.rs b/scheduler/reminders.rs\n--- a/scheduler/reminders.rs\n+++ b/scheduler/reminders.rs\n" + first.comments[0].snippet;
+  await page.context().route("**/api/code-reviews/diff", route => route.fulfill({json:{ok:true,patch,truncated:false}}));
   const saved = op(first).review;
   const approval = op({
     ...first,
@@ -278,9 +280,9 @@ try {
     const preview = page.getByRole("dialog", {name:"Code review"}).frameLocator("iframe");
     await preview.getByRole("heading", {name:"Draft with inline feedback"}).waitFor();
     assert.equal(new URL(page.url()).pathname, "/");
-    assert.ok(await preview.getByText(first.comments[0].body).isVisible());
+    await preview.locator(".review-file pre + .review-comment").getByText(first.comments[0].body).waitFor();
     assert.match(await preview.locator(".rv-code-line.marked").innerText(), /next.in_zone/);
-    await preview.locator(".review-discussion .markdown strong").filter({hasText:"reminder context"}).waitFor();
+    assert.equal(await preview.locator(".review-discussion").count(), 0);
     await preview.getByRole("button",{name:"Edit review comment",exact:true}).focus();
     await page.keyboard.press("Escape");
     const [solo] = await Promise.all([page.context().waitForEvent("page"), links.click({modifiers:["Shift"]})]);
@@ -312,7 +314,7 @@ try {
   await receipt.waitFor({state:"detached"});
   assert.equal(op({command:"view",id:approval.id}).review.stage, "published");
   run([...issue,"pr","add",String(issueNumber),"https://github.com/example/time/pull/74"]);
-  const quick = op({...first,number:74,title:"Fix the reminder boundary",comments:[],verdict:"APPROVE"}).review;
+  const quick = op({...first,number:74,title:"Fix the reminder boundary",verdict:"APPROVE"}).review;
   await page.goto(info.url + "#" + new URLSearchParams({project,state:"all"}));
   await page.getByRole("link",{name:"Open pending review for PR #74"}).click();
   const modal = page.locator("#review-preview");
@@ -326,6 +328,11 @@ try {
     op({command:"finish_publication",id,version:claim.version,receipt:"https://github.com/example/time/pull/74#review-3",author:"qa"});
     return route.fulfill({json:{ok:true}});
   });
+  await page.route("**/api/code-reviews/publish", route => route.fulfill({status:409,json:{ok:false,error:{message:"Could not publish approval"}}}), {times:1});
+  await full.getByRole("button",{name:"Approve and publish"}).click();
+  await full.getByText("Could not publish approval", {exact:true}).waitFor();
+  assert.ok(await modal.isVisible());
+  assert.equal(op({command:"view",id:quick.id}).review.comments[0].snippet, first.comments[0].snippet);
   for (const [width,scheme] of [[320,"dark"],[1280,"light"]]) {
     await page.setViewportSize({width,height:768});
     await page.emulateMedia({colorScheme:scheme});
@@ -336,10 +343,11 @@ try {
     if (snap) await modal.screenshot({path:join(snap,"preview-"+scheme+".png")});
   }
   await full.getByRole("button",{name:"Approve and publish"}).click();
-  await full.getByRole("link",{name:"View published review ↗"}).waitFor();
-  await page.keyboard.press("Escape");
   await modal.waitFor({state:"hidden"});
-  assert.equal(op({command:"view",id:quick.id}).review.stage,"published");
+  await page.getByRole("link",{name:"Open pending review for PR #74"}).waitFor({state:"detached"});
+  const published = op({command:"view",id:quick.id}).review;
+  assert.equal(published.stage,"published");
+  assert.deepEqual(published.comments, quick.comments.map(c => ({...c,snippet:""})));
   const sha = "c".repeat(40), message = "Keep reminder labels when the timezone changes";
   await page.evaluate(async ({project,issueNumber,sha,message}) => {
     await mutate({action:"add_commit",number:issueNumber,commit:sha,review:{

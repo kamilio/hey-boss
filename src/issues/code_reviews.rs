@@ -343,6 +343,7 @@ pub(super) fn execute(db: &Connection, p: &Project, op: &Operation, now: i64) ->
                 return Err(Error::invalid("Invalid review receipt"));
             }
             if db.execute("UPDATE pr_code_reviews SET stage='published',receipt=?4,published_by=?6,version=version+1,updated_at=?5 WHERE project_id=?1 AND id=?2 AND version=?3 AND stage='publishing'",params![p.id,id,version,receipt,now,author])?!=1{return Err(stale())}
+            db.execute("UPDATE pr_code_comments SET snippet='' WHERE project_id=?1 AND review_id=?2 AND snippet!=''", params![p.id,id])?;
             *id
         }
     };
