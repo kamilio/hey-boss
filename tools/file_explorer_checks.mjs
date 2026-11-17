@@ -83,7 +83,7 @@ export async function checkExplorer(page, root, run, origin) {
   const site=join(root,'site');mkdirSync(join(site,'docs'),{recursive:true});
   writeFileSync(join(site,'index.html'),'<h1>Example</h1>');writeFileSync(join(site,'docs/note.md'),'# Note');
   await run(['pages','publish',site,'--name','example','--json']);
-  await page.goto(new URL('/pages/example',origin).href);
+  await page.goto(new URL('/pages/example/',origin).href);
   await page.locator('#page-files').click();await edit.waitFor();
   assert.equal(await edit.innerText(),'<h1>Example</h1>');
   await open('docs'); await open('note.md');await edit.fill('# Changed');

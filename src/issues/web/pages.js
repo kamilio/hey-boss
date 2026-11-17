@@ -77,7 +77,7 @@
     return box;
   }
   if ($('page-frame')) {
-    const name = decodeURIComponent(location.pathname.slice('/pages/'.length));
+    const name = decodeURIComponent(location.pathname.slice('/pages/'.length).replace(/\/$/, ''));
     $('page-title').textContent = name; document.title = `${name} · Hey Boss`;
     $('page-frame').title = name;
     let contentURL = '', busy = false;
