@@ -314,6 +314,7 @@ impl Fixture {
         self.op(Operation::Create {
             id: id.into(),
             definition: Definition {
+                directory: None,
                 name: id.into(),
                 cron: "* * * * *".into(),
                 timezone: "UTC".into(),
@@ -1754,4 +1755,117 @@ fn checkout_runs_scheduled_script_without_task_workers() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+#[test]
+fn directory_arrivals_survive_restart_and_queue_each_matching_file() {
+    use std::{
+        os::unix::fs::{PermissionsExt, symlink},
+        sync::atomic::Ordering,
+    };
+    let mut f = Fixture::new();
+    let inbox = f.root.join("inbox");
+    fs::create_dir(&inbox).unwrap();
+    fs::write(inbox.join("existing.txt"), "old").unwrap();
+    std::thread::sleep(Duration::from_millis(10));
+    let script = f.root.join("show-input");
+    fs::write(&script, "#!/bin/sh\ncat \"$HEY_BOSS_JOB_FILE\"\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    f.op(serde_json::from_value(json!({"command":"create","id":"arrivals","enabled":true,"definition":{"name":"Inbox","timezone":"UTC","directory":{"path":inbox,"patterns":["*.txt"]},"executable":script}})).unwrap());
+    let start = |ctx: Context| std::thread::spawn(move || super::super::directory_jobs::run(ctx));
+    let thread = start(f.ctx.clone());
+    let db = f.ctx.db().unwrap();
+    wait(|| {
+        db.query_row("SELECT count(*) FROM directory_job_seen", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+            == 1
+    });
+    fs::write(inbox.join("one file.txt"), "first payload").unwrap();
+    fs::write(inbox.join("ignored.csv"), "ignored").unwrap();
+    symlink(&script, inbox.join("link.txt")).unwrap();
+    fs::write(inbox.join("two.txt"), "second payload").unwrap();
+    let count = || {
+        db.query_row("SELECT count(*) FROM scheduled_job_runs", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    };
+    wait(|| count() == 2);
+    f.ctx.stop.store(true, Ordering::Release);
+    thread.join().unwrap();
+    fs::write(inbox.join("one file.txt"), "edited after capture").unwrap();
+    fs::write(inbox.join("offline.txt"), "third payload").unwrap();
+    f.ctx.stop.store(false, Ordering::Release);
+    let thread = start(f.ctx.clone());
+    wait(|| count() == 3);
+    f.ctx.stop.store(true, Ordering::Release);
+    thread.join().unwrap();
+    assert!(f.store.due_jobs(now(), 10).unwrap().is_empty());
+    let mut outputs = Vec::new();
+    for _ in 0..3 {
+        schedule(&f.ctx, &f.machines()).unwrap();
+        let dispatch = f.store.job_dispatches(&f.ctx.node).unwrap().pop().unwrap();
+        f.ctx.stop.store(false, Ordering::Release);
+        execute(&f.ctx, &dispatch).unwrap();
+        let report = f.report(&dispatch);
+        assert_eq!(report.state, "succeeded", "{report:?}");
+        assert!(f.store.accept_job_report(&f.ctx.node, &report).unwrap());
+        outputs.push(report.log.unwrap().output);
+    }
+    for expected in ["first payload", "second payload", "third payload"] {
+        assert!(
+            outputs.iter().any(|output| output.ends_with(expected)),
+            "{outputs:?}"
+        );
+    }
+    assert_eq!(count(), 3);
+}
+
+#[test]
+fn directory_job_agent_can_read_the_staged_input() {
+    if isolated("directory_job_agent_can_read_the_staged_input", &[]) {
+        return;
+    }
+    let mut f = Fixture::new();
+    let wrapper = f.root.join("agent-with-file");
+    fs::write(&wrapper,"#!/bin/sh\ncat \"$HEY_BOSS_JOB_FILE\" > \"$ARRIVAL_AUDIT\" || exit 1\nexec \"$ARRIVAL_AGENT\" \"$@\"\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let audit = f.root.join("agent-read");
+    unsafe {
+        std::env::set_var("ARRIVAL_AGENT", std::env::var_os("HEY_BOSS_CODEX").unwrap());
+        std::env::set_var("ARRIVAL_AUDIT", &audit);
+        std::env::set_var("HEY_BOSS_CODEX", &wrapper);
+    }
+    let saved=f.op(serde_json::from_value(json!({"command":"create","id":"agent-arrival","enabled":true,"markdown":MARKDOWN,"definition":{"name":"Inbox","timezone":"UTC","directory":{"path":f.root},"harness":"codex","model":"exact-model"}})).unwrap());
+    let input = f.root.join("new file.txt");
+    fs::write(&input, "agent input bytes").unwrap();
+    let blob = crate::jobs::command::upload(&input, |op| Ok(f.op(op))).unwrap();
+    let run = f
+        .store
+        .enqueue_job(&crate::jobs::Occurrence {
+            snapshot: serde_json::from_value(saved["job"]["snapshot"].clone()).unwrap(),
+            scheduled_at: now(),
+            observed_at: now(),
+            expected_next: None,
+            next_at: None,
+            request_key: Some("receipt".into()),
+            arrival: Some(crate::jobs::Arrival {
+                name: "new file.txt".into(),
+                blob,
+            }),
+        })
+        .unwrap();
+    fs::remove_file(input).unwrap();
+    f.store
+        .assign_job(&run.id, &f.ctx.node, Some("pool"))
+        .unwrap();
+    let d = f.store.job_dispatches(&f.ctx.node).unwrap().remove(0);
+    receive(&f.ctx, &d, MARKDOWN).unwrap();
+    execute(&f.ctx, &d).unwrap();
+    let report = f.report(&d);
+    assert_eq!(report.state, "succeeded", "{report:?}");
+    assert_eq!(fs::read(audit).unwrap(), b"agent input bytes");
 }

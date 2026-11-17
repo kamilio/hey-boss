@@ -6,6 +6,7 @@ mod configuration;
 mod context;
 mod control;
 mod conversation;
+mod directory_jobs;
 mod distributed;
 mod workers;
 pub(crate) use distributed::restore_history_row;

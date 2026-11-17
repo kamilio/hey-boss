@@ -49,7 +49,7 @@ fn progress(db: &Connection, run: &Run, state: &str, reason: Option<&str>, now: 
 impl Store {
     pub(crate) fn active_job_runs(&self) -> Result<Vec<Run>> {
         authority(&self.db)?;
-        Ok(self.db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE state IN('pending','running') ORDER BY sequence"),[],run_row)?)
+        Ok(self.db.query_collect(&format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs r WHERE state IN('pending','running') AND (arrival IS NULL OR sequence=(SELECT min(sequence) FROM scheduled_job_runs q WHERE q.job_id=r.job_id AND q.arrival IS NOT NULL AND q.state IN('pending','running'))) ORDER BY sequence"),[],run_row)?)
     }
     /// A generation is never reassigned on timeout. Only an acknowledged revoke
     /// before submission can release its owner; submitted work completes once.
@@ -57,7 +57,7 @@ impl Store {
         authority(&self.db)?;
         let tx =
             crate::database::Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
-        let changed = tx.execute("UPDATE scheduled_job_owners SET node=?2 WHERE run_id=?1 AND node IS NULL AND stop_requested=0 AND EXISTS(SELECT 1 FROM scheduled_job_runs WHERE id=?1 AND state='pending')",params![id,node])? == 1;
+        let changed = tx.execute("UPDATE scheduled_job_owners SET node=?2 WHERE run_id=?1 AND node IS NULL AND stop_requested=0 AND EXISTS(SELECT 1 FROM scheduled_job_runs r WHERE id=?1 AND state='pending' AND (arrival IS NULL OR NOT EXISTS(SELECT 1 FROM scheduled_job_runs busy JOIN scheduled_job_owners o ON o.run_id=busy.id WHERE busy.job_id=r.job_id AND busy.state IN ('pending','running') AND o.node IS NOT NULL)))",params![id,node])? == 1;
         if changed {
             tx.execute(
                 "UPDATE scheduled_job_runs SET worker_id=?2,reason=NULL WHERE id=?1",

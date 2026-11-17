@@ -47,7 +47,26 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     }
     migrate_worker_runs(db)?;
     migrate_fanout(db)?;
-    if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_job_definitions')", [], |r|r.get::<_,bool>(0))? {
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('scheduled_job_runs') WHERE name='arrival')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        let tx = crate::database::Transaction::new_unchecked(db, TransactionBehavior::Immediate)?;
+        tx.execute_batch("ALTER TABLE scheduled_job_runs ADD COLUMN arrival TEXT;
+            DROP INDEX scheduled_job_active;
+            CREATE UNIQUE INDEX scheduled_job_active ON scheduled_job_runs(job_id) WHERE state IN ('pending','running') AND parent_run_id IS NULL AND arrival IS NULL;
+            CREATE INDEX directory_jobs_queue ON scheduled_job_runs(job_id,sequence) WHERE arrival IS NOT NULL AND state IN ('pending','running');
+            CREATE INDEX directory_jobs_enabled ON scheduled_jobs(id) WHERE enabled=1 AND json_extract(snapshot,'$.definition.directory') IS NOT NULL;
+            CREATE TABLE directory_job_status(job_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,error TEXT);
+            CREATE TABLE directory_job_seen(job_id TEXT PRIMARY KEY,revision INTEGER NOT NULL,files TEXT NOT NULL,generation INTEGER NOT NULL);")?;
+        tx.commit()?;
+    }
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='scheduled_job_definitions')",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
         db.execute_batch("CREATE INDEX IF NOT EXISTS scheduled_job_definitions ON scheduled_jobs(project_id,id) WHERE deleted_at IS NULL AND json_extract(snapshot,'$.definition.execution') IS NULL")?;
     }
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='scheduled_job_calendar')",[],|r|r.get::<_,bool>(0))? {
@@ -87,6 +106,9 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
     }
     if !db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_job_workers') WHERE name='readiness')", [], |r|r.get::<_,bool>(0))? {
         db.execute_batch("ALTER TABLE local_job_workers ADD COLUMN readiness TEXT;")?;
+    }
+    if !db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('local_job_workers') WHERE name='directory_jobs')", [], |r|r.get::<_,bool>(0))? {
+        db.execute_batch("ALTER TABLE local_job_workers ADD COLUMN directory_jobs INTEGER NOT NULL DEFAULT 0")?;
     }
     Ok(())
 }
@@ -173,7 +195,7 @@ fn job_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Job> {
         enabled: r.get(3)?,
         deleted_at: r.get(4)?,
         schedule_from: r.get(5)?,
-        next_at: r.get(6)?,
+        next_at: r.get::<_, Option<i64>>(6)?.filter(|v| *v != i64::MAX),
         snapshot: snapshot_column(r, 7)?,
         created_at: r.get(8)?,
         updated_at: r.get(9)?,
@@ -188,14 +210,29 @@ fn get_job(db: &Connection, project: &str, id: &str) -> Result<Job> {
     .optional()?
     .ok_or_else(|| Error::new("not_found", "Job not found in this project"))
 }
-const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,worker_id,parent_run_id,target_machine";
+const RUN_COLUMNS: &str = "sequence,id,snapshot,scheduled_at,trigger,request_key,state,reason,task_number,machine,session_id,created_at,started_at,finished_at,worker_id,parent_run_id,target_machine,arrival";
 fn run_row(r: &crate::database::Row<'_>) -> rusqlite::Result<Run> {
     Ok(Run {
+        arrival: r
+            .get::<_, Option<String>>(17)?
+            .map(|s| serde_json::from_str(&s))
+            .transpose()
+            .map_err(|e| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    17,
+                    rusqlite::types::Type::Text,
+                    Box::new(e),
+                )
+            })?,
         sequence: r.get(0)?,
         id: r.get(1)?,
         snapshot: snapshot_column(r, 2)?,
         scheduled_at: r.get(3)?,
-        trigger: r.get(4)?,
+        trigger: if r.get::<_, Option<String>>(17)?.is_some() {
+            "file_created".into()
+        } else {
+            r.get(4)?
+        },
         request_key: r.get(5)?,
         state: r.get(6)?,
         reason: r.get(7)?,
@@ -304,12 +341,14 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
         last = Some(execution);
     }
     let active: Option<Run> = db.query_row(
-        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND parent_run_id IS NULL AND state IN ('pending','running') LIMIT 1"),
+        &format!("SELECT {RUN_COLUMNS} FROM scheduled_job_runs WHERE job_id=?1 AND parent_run_id IS NULL AND state IN ('pending','running') ORDER BY sequence LIMIT 1"),
         [&job.id], run_row,
     ).optional()?;
     // A peer outside a pinned job's placement can report a pending run forever.
     // Use the target's last actual attempt for display, retaining local run controls.
-    let target_run = if history == "distributed_job_runs" && job.snapshot.definition.machines.len() == 1 {
+    let target_run = if history == "distributed_job_runs"
+        && job.snapshot.definition.machines.len() == 1
+    {
         let target = &job.snapshot.definition.machines[0];
         db.query_row(&format!("SELECT {RUN_COLUMNS} FROM distributed_job_runs r
             WHERE project_id=?1 AND job_id=?2 AND parent_run_id IS NULL
@@ -318,9 +357,25 @@ fn job_summary(db: &Connection, job: Job) -> Result<Value> {
               SELECT 1 FROM distributed_fields f WHERE f.table_name='scheduled_job_runs' AND f.entity=json_object('id',r.id)
               AND f.field='@row' AND (f.origin=?3 OR substr(f.origin,1,length(?3)+1)=?3||':'))))
             ORDER BY scheduled_at DESC,id DESC LIMIT 1"), params![job.project_id,job.id,target],run_row).optional()?
-    } else { None };
+    } else {
+        None
+    };
     let status = target_run.as_ref().or(active.as_ref()).or(last.as_ref());
+    let observer = if job.enabled && job.snapshot.definition.directory.is_some() {
+        db.query_row(
+            "SELECT error FROM directory_job_status WHERE job_id=?1 AND revision=?2",
+            params![job.id, job.revision],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .map(|error| json!({"error":error}))
+    } else {
+        None
+    };
     let mut value = serde_json::to_value(job)?;
+    if let Some(observer) = observer {
+        value["observer"] = observer;
+    }
     value["status"] = status.map(|r| json!({"state":r.state,"at":r.started_at.unwrap_or(r.created_at),"reason":r.reason,"finished_at":r.finished_at})).unwrap_or(Value::Null);
     value["last_run"] = serde_json::to_value(last)?;
     value["active_run"] = serde_json::to_value(active)?;
@@ -478,6 +533,7 @@ impl Store {
                     }
                 }
                 let definition = crate::jobs::Definition {
+                    directory: None,
                     name: id.clone(),
                     cron: String::new(),
                     timezone: "UTC".into(),
@@ -605,7 +661,10 @@ impl Store {
                 } => {
                     let job = get_job(&tx, &project.id, id)?;
                     let after = (*after).max(job.schedule_from);
-                    let dates = if job.enabled && after <= *through {
+                    let dates = if job.snapshot.definition.directory.is_none()
+                        && job.enabled
+                        && after <= *through
+                    {
                         Schedule::parse(
                             &job.snapshot.definition.cron,
                             &job.snapshot.definition.timezone,
@@ -734,7 +793,10 @@ impl Store {
         if enabled && definition.execution.is_some() {
             return Err(Error::invalid("One-shot commands cannot be scheduled"));
         }
-        let next_at = if enabled {
+        // The legacy table requires a non-null cursor for every enabled definition.
+        let next_at = if enabled && definition.directory.is_some() {
+            Some(i64::MAX)
+        } else if enabled {
             Some(Schedule::parse(&definition.cron, &definition.timezone)?.next(now)?)
         } else {
             None
@@ -844,6 +906,7 @@ impl Store {
                     .latest(after, now)?
                     .ok_or_else(|| Error::invalid("Due cursor has no occurrence"))?;
                 Ok(Occurrence {
+                    arrival: None,
                     snapshot: job.snapshot,
                     scheduled_at,
                     observed_at: now,
@@ -868,7 +931,11 @@ impl Store {
             }
             job.snapshot
         };
+        if snapshot.definition.directory.is_some() {
+            return Err(Error::invalid("This job requires an arriving file"));
+        }
         Ok(Occurrence {
+            arrival: None,
             snapshot,
             scheduled_at: now,
             observed_at: now,
@@ -893,6 +960,7 @@ impl Store {
         }
         let job = get_job(&tx, &o.snapshot.project_id, &o.snapshot.job_id)?;
         if job.deleted_at.is_some()
+            || (o.arrival.is_some() && !job.enabled)
             || job.snapshot != o.snapshot
             || (o.request_key.is_none() && (!job.enabled || job.next_at != o.expected_next))
         {
@@ -900,9 +968,9 @@ impl Store {
                 "Job changed after the occurrence was prepared",
             ));
         }
-        let overlap:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE job_id=?1 AND state IN('pending','running'))",[&o.snapshot.job_id],|r|r.get(0))?;
+        let overlap:bool=o.arrival.is_none() && tx.query_row("SELECT EXISTS(SELECT 1 FROM scheduled_job_runs WHERE job_id=?1 AND state IN('pending','running'))",[&o.snapshot.job_id],|r|r.get(0))?;
         let state = if overlap { "skipped" } else { "pending" };
-        tx.execute("INSERT INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,created_at,finished_at,snapshot) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",params![id,o.snapshot.job_id,o.snapshot.revision,o.snapshot.project_id,o.scheduled_at,if o.request_key.is_some(){"manual"}else{"scheduled"},o.request_key,state,overlap.then_some("overlap"),o.observed_at,overlap.then_some(o.observed_at),serde_json::to_string(&o.snapshot)?])?;
+        tx.execute("INSERT INTO scheduled_job_runs(id,job_id,job_revision,project_id,scheduled_at,trigger,request_key,state,reason,created_at,finished_at,snapshot,arrival) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",params![id,o.snapshot.job_id,o.snapshot.revision,o.snapshot.project_id,o.scheduled_at,if o.request_key.is_some(){"manual"}else{"scheduled"},o.request_key,state,overlap.then_some("overlap"),o.observed_at,overlap.then_some(o.observed_at),serde_json::to_string(&o.snapshot)?,o.arrival.as_ref().map(serde_json::to_string).transpose()?])?;
         if !overlap {
             tx.execute(
                 "INSERT INTO scheduled_job_owners(run_id,generation) VALUES(?1,1)",

@@ -164,6 +164,7 @@ impl Drop for Fixture {
 }
 fn definition() -> Definition {
     Definition {
+        directory: None,
         name: "Schedule fixture".into(),
         cron: "0 * * * *".into(),
         timezone: "UTC".into(),
@@ -265,9 +266,9 @@ fn old_job_history_and_ownership_survive_migration_without_new_tasks() {
     f.store.assign_job(&run.id, "remote", Some("pool")).unwrap();
     let columns = RUN_COLUMNS
         .replace(",worker_id", "")
-        .replace(",parent_run_id,target_machine", "");
+        .replace(",parent_run_id,target_machine,arrival", "");
     // Recreate the pre-change table, including its issue-required CHECK.
-    f.store.db.execute_batch("CREATE TEMP TABLE old_runs AS SELECT * FROM scheduled_job_runs; CREATE TEMP TABLE old_owners AS SELECT * FROM scheduled_job_owners; DROP TABLE scheduled_job_owners; DROP TABLE scheduled_job_runs;").unwrap();
+    f.store.db.execute_batch("DROP TABLE directory_job_seen; DROP TABLE directory_job_status; DROP INDEX directory_jobs_enabled; CREATE TEMP TABLE old_runs AS SELECT * FROM scheduled_job_runs; CREATE TEMP TABLE old_owners AS SELECT * FROM scheduled_job_owners; DROP TABLE scheduled_job_owners; DROP TABLE scheduled_job_runs;").unwrap();
     let old_schema = SCHEMA.replace(",worker_id TEXT", "").replace("CHECK(state<>'skipped' OR (task_number IS NULL AND finished_at IS NOT NULL))", "CHECK((state='skipped' AND task_number IS NULL AND finished_at IS NOT NULL) OR (state<>'skipped' AND task_number IS NOT NULL))");
     f.store.db.execute_batch(&old_schema).unwrap();
     f.store.db.execute_batch(&format!("INSERT INTO scheduled_job_runs({columns},job_id,job_revision,project_id) SELECT {columns},job_id,job_revision,project_id FROM old_runs; CREATE TABLE scheduled_job_owners(run_id TEXT PRIMARY KEY REFERENCES scheduled_job_runs(id),node TEXT,generation INTEGER NOT NULL,revoking INTEGER NOT NULL DEFAULT 0,stop_requested INTEGER NOT NULL DEFAULT 0); INSERT INTO scheduled_job_owners SELECT * FROM old_owners; DROP TABLE old_runs; DROP TABLE old_owners;")).unwrap();

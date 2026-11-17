@@ -1202,6 +1202,7 @@ fn check_job_history_replication(script: bool) {
     sa.execute(&request(Job::Create {
         id: "test-job".into(),
         definition: Definition {
+            directory: None,
             name: "Schedule fixture".into(),
             cron: "0 * * * *".into(),
             timezone: "UTC".into(),
@@ -2912,6 +2913,8 @@ fn upgrading_job_history_view_refreshes_machine_metadata_capture() {
     let trigger:String=db.query_row("SELECT sql FROM sqlite_master WHERE name='distributed_capture_scheduled_job_runs_INSERT'",[],|r|r.get(0)).unwrap();
     assert!(trigger.contains("parent_run_id"));
     assert!(trigger.contains("target_machine"));
+    assert!(columns.iter().any(|c| c["name"] == "arrival"));
+    assert!(trigger.contains("arrival"));
 }
 
 #[test]

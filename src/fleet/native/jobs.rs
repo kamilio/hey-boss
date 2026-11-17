@@ -16,7 +16,7 @@ fn now() -> i64 {
 }
 
 fn advertise_worker(ctx: &Context, worker: &str) -> Result<()> {
-    ctx.db()?.execute("INSERT OR REPLACE INTO local_job_workers(worker_id,owner_pid,owner_start,scripts) SELECT id,owner_pid,owner_start,1 FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![worker,std::process::id()])?;
+    ctx.db()?.execute("INSERT OR REPLACE INTO local_job_workers(worker_id,owner_pid,owner_start,scripts,directory_jobs) SELECT id,owner_pid,owner_start,1,1 FROM issue_workers WHERE id=?1 AND owner_pid=?2", params![worker,std::process::id()])?;
     Ok(())
 }
 
@@ -24,17 +24,17 @@ fn advertise_worker(ctx: &Context, worker: &str) -> Result<()> {
 pub(super) fn capability(ctx: &Context) -> Result<Value> {
     let db = ctx.db()?;
     let ids = db.query_collect(
-        "SELECT w.id,b.scripts FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start WHERE w.machine=?1 ORDER BY w.id",
-        [&ctx.node], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?, r.get::<_,bool>(1)?)))?;
+        "SELECT w.id,b.scripts,b.directory_jobs FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id AND b.owner_pid=w.owner_pid AND b.owner_start=w.owner_start WHERE w.machine=?1 ORDER BY w.id",
+        [&ctx.node], |r| Ok::<_,rusqlite::Error>((r.get::<_,String>(0)?, r.get::<_,bool>(1)?,r.get::<_,bool>(2)?)))?;
     let store = Store::open(&ctx.path)?;
     let mut workers = Vec::new();
-    for (id, scripts) in ids {
+    for (id, scripts, directory_jobs) in ids {
         let projects = store.job_worker_projects(&id)?;
         if !projects.is_empty() {
             workers.push(
                 {
                     let (capacity, active, readiness):(i64,i64,Option<String>)=db.query_row("SELECT json_extract(w.config,'$.concurrency'),(SELECT count(*) FROM worker_runs r WHERE r.worker_id=w.id AND r.finished_at IS NULL),b.readiness FROM issue_workers w JOIN local_job_workers b ON b.worker_id=w.id WHERE w.id=?1", [&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
-                    json!({"id":id,"scripts":scripts,"projects":projects.keys().collect::<Vec<_>>(),"exec_v1":true,"capacity":capacity,"issue_active":active,"readiness":readiness.and_then(|s|serde_json::from_str::<Value>(&s).ok())})
+                    json!({"id":id,"directory_jobs":directory_jobs,"scripts":scripts,"projects":projects.keys().collect::<Vec<_>>(),"exec_v1":true,"capacity":capacity,"issue_active":active,"readiness":readiness.and_then(|s|serde_json::from_str::<Value>(&s).ok())})
                 },
             );
         }
@@ -58,7 +58,7 @@ pub(super) fn capability(ctx: &Context) -> Result<Value> {
         .flat_map(|o| o.keys())
         .collect::<Vec<_>>();
     Ok(
-        json!({"script_projects":script_projects,"available":true,"workers":workers,"runtimes":runtimes}),
+        json!({"directory_jobs":true,"script_projects":script_projects,"available":true,"workers":workers,"runtimes":runtimes}),
     )
 }
 
@@ -96,6 +96,7 @@ pub(super) fn receive(ctx: &Context, dispatch: &Dispatch, markdown: &str) -> Res
         let saved: Dispatch = serde_json::from_str(&saved)?;
         if generation > dispatch.generation
             || (generation == dispatch.generation
+                && saved.run.arrival == dispatch.run.arrival
                 && saved.run.snapshot == dispatch.run.snapshot
                 && (saved.revoke || !dispatch.revoke))
         {
@@ -119,7 +120,8 @@ pub(super) fn receive(ctx: &Context, dispatch: &Dispatch, markdown: &str) -> Res
             return Ok(());
         };
         if generation == dispatch.generation {
-            if old.run.snapshot != dispatch.run.snapshot {
+            if old.run.arrival != dispatch.run.arrival || old.run.snapshot != dispatch.run.snapshot
+            {
                 return Err(replica::invalid(
                     "Job snapshot changed within its generation",
                 ));
@@ -182,7 +184,11 @@ fn finish(
         report.log = script::read_log(ctx, report, 0)?;
     }
     report.finished_at = Some(now().max(report.started_at.unwrap_or(0)));
-    save(ctx, report)
+    save(ctx, report)?;
+    if d.run.arrival.is_some() {
+        let _ = std::fs::remove_dir_all(ctx.state.join("job-inputs").join(&d.run.id));
+    }
+    Ok(())
 }
 
 /// Owned by the worker process; fleet restarts cannot cancel its sessions.
@@ -509,6 +515,22 @@ fn run_session(
     if d.run.snapshot.definition.execution.is_some() {
         return command::run(ctx, d, report);
     }
+    let input = if let Some(arrival) = &d.run.arrival {
+        if std::path::Path::new(&arrival.name)
+            .file_name()
+            .and_then(|s| s.to_str())
+            != Some(arrival.name.as_str())
+        {
+            return Err(replica::invalid("Invalid incoming filename"));
+        }
+        let dir = ctx.state.join("job-inputs").join(&d.run.id);
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(&arrival.name);
+        crate::jobs::command::download(&arrival.blob, &path, |op| command::call(ctx, d, op))?;
+        Some(path)
+    } else {
+        None
+    };
     if let Some(condition) = &d.run.snapshot.definition.condition {
         let outcome = script::run(
             ctx,
@@ -570,6 +592,9 @@ fn run_session(
         "HEY_BOSS_ISSUE_PROJECT".into(),
         d.run.snapshot.project_id.clone().into(),
     );
+    if let Some(path) = input {
+        env.insert("HEY_BOSS_JOB_FILE".into(), path.into_os_string());
+    }
     let launch = Launch {
         codex_execution: config.execution.clone(),
         provider,
@@ -755,10 +780,14 @@ pub(super) fn schedule(ctx: &Context, machines: &[Value]) -> Result<()> {
                 > w["issue_active"].as_i64().unwrap_or(0) + occupied.get(id).copied().unwrap_or(0)
         };
         // Scheduled definitions replicate and execute locally on each peer.
-        // Explicit commands retain one submitting owner and may use its fleet.
+        // Commands and file arrivals have one submitting owner and may use its fleet.
         let eligible = |m: &Value| {
-            (!peer || run.snapshot.definition.execution.is_some() || m["node"] == ctx.node)
+            (!peer
+                || run.arrival.is_some()
+                || run.snapshot.definition.execution.is_some()
+                || m["node"] == ctx.node)
                 && connected(m)
+                && (run.arrival.is_none() || m["jobs"]["directory_jobs"] == true)
                 && (machine_script(m, &run)
                     || eligible_workers(m, &run).any(|id| worker_fits(m, id)))
         };
@@ -850,17 +879,19 @@ fn eligible_workers<'a>(
         .into_iter()
         .flatten()
         .filter(move |w| {
-            run.snapshot
-                .definition
-                .execution
-                .as_ref()
-                .is_none_or(|spec| {
-                    w["exec_v1"] == true
-                        && spec
-                            .harness
-                            .as_ref()
-                            .is_none_or(|h| w["readiness"]["harnesses"][h]["ready"] == true)
-                })
+            (run.arrival.is_none() || w["directory_jobs"] == true)
+                && run
+                    .snapshot
+                    .definition
+                    .execution
+                    .as_ref()
+                    .is_none_or(|spec| {
+                        w["exec_v1"] == true
+                            && spec
+                                .harness
+                                .as_ref()
+                                .is_none_or(|h| w["readiness"]["harnesses"][h]["ready"] == true)
+                    })
                 && (if run.snapshot.definition.executable.is_some() {
                     w["scripts"] == true
                 } else {

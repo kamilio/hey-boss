@@ -144,7 +144,7 @@ pub(super) fn read(
     if let Some(id) = &q.job_id {
         get_job(db, project, id)?;
     }
-    let jobs=db.query_collect(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE project_id=?1 AND enabled=1 AND deleted_at IS NULL AND (?2 IS NULL OR id=?2) ORDER BY id LIMIT ?3"),params![project,q.job_id,MAX_JOBS+1],job_row)?;
+    let jobs=db.query_collect(&format!("SELECT {JOB_COLUMNS} FROM scheduled_jobs WHERE project_id=?1 AND enabled=1 AND deleted_at IS NULL AND json_extract(snapshot,'$.definition.directory') IS NULL AND (?2 IS NULL OR id=?2) ORDER BY id LIMIT ?3"),params![project,q.job_id,MAX_JOBS+1],job_row)?;
     if jobs.len() > MAX_JOBS {
         return Err(Error::invalid(
             "This project has more than 100 active schedules. Select a job to view its calendar.",

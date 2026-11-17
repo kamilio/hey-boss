@@ -26,8 +26,24 @@ impl ThreadMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct Definition {
+pub struct Directory {
+    pub path: String,
+    #[serde(default)]
+    pub patterns: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Arrival {
     pub name: String,
+    pub blob: command::Blob,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Definition {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<Directory>,
+    pub name: String,
+    #[serde(default)]
     pub cron: String,
     pub timezone: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -106,6 +122,7 @@ impl Definition {
         if let Some(exec) = &self.execution {
             exec.validate()?;
             if self.executable.as_deref() != Some(exec.program.as_str())
+                || self.directory.is_some()
                 || !self.cron.is_empty()
                 || self.fans_out()
             {
@@ -113,6 +130,31 @@ impl Definition {
                     "One-shot commands cannot have a schedule or fanout",
                 ));
             }
+        } else if let Some(dir) = &self.directory {
+            identifier(&dir.path, "directory path", 4096)?;
+            if !std::path::Path::new(&dir.path).is_absolute()
+                || !self.cron.is_empty()
+                || self.fans_out()
+            {
+                return Err(Error::invalid(
+                    "Directory jobs require an absolute directory, no cron, and one execution per file",
+                ));
+            }
+            if dir.patterns.len() > 32
+                || dir.patterns.iter().any(|p| {
+                    p.is_empty()
+                        || p.len() > 256
+                        || p.contains('/')
+                        || glob::Pattern::new(p).is_err()
+                })
+            {
+                return Err(Error::invalid(
+                    "Use up to 32 filename globs without directory separators",
+                ));
+            }
+            jiff::tz::db()
+                .get(&self.timezone)
+                .map_err(|_| Error::invalid("Invalid display timezone"))?;
         } else {
             schedule::Schedule::parse(&self.cron, &self.timezone)?;
         }
@@ -406,6 +448,7 @@ pub(crate) fn validate_id(id: &str) -> Result<()> {
 /// Prepared outside the writer; the commit checks the revision and cursor again.
 #[derive(Debug, Clone)]
 pub struct Occurrence {
+    pub(crate) arrival: Option<Arrival>,
     pub snapshot: Snapshot,
     pub scheduled_at: i64,
     pub observed_at: i64,
@@ -416,6 +459,8 @@ pub struct Occurrence {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Run {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival: Option<Arrival>,
     pub sequence: i64,
     pub id: String,
     pub snapshot: Snapshot,

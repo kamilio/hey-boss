@@ -210,6 +210,8 @@ pub(super) fn write(
             .optional()?;
         row["next_at"] = if row["enabled"] == 0 {
             Value::Null
+        } else if snapshot.definition.directory.is_some() {
+            json!(i64::MAX)
         } else if let Some((revision, next)) = previous
             && revision == snapshot.revision
         {

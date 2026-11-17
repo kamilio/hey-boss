@@ -123,6 +123,17 @@ pub(super) fn run(
         .env_remove("HEY_BOSS_EXEC_HARNESS")
         .env_remove("HEY_BOSS_EXEC_MODEL")
         .env_remove("HEY_BOSS_EXEC_EFFORT");
+    if let Some(arrival) = &d.run.arrival {
+        command.env(
+            "HEY_BOSS_JOB_FILE",
+            ctx.state
+                .join("job-inputs")
+                .join(&d.run.id)
+                .join(&arrival.name),
+        );
+    } else {
+        command.env_remove("HEY_BOSS_JOB_FILE");
+    }
     if let Some(spec) = spec {
         if let Some(h) = &spec.harness {
             command.env("HEY_BOSS_EXEC_HARNESS", h);

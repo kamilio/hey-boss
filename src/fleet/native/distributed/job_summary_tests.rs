@@ -26,6 +26,7 @@ fn check_non_target_observations(observation_state: &str) {
         .execute(&request(Job::Create {
             id: "mac-only".into(),
             definition: Definition {
+                directory: None,
                 name: "Mac schedule".into(),
                 cron: "0 * * * *".into(),
                 timezone: "UTC".into(),
@@ -140,7 +141,11 @@ fn check_non_target_observations(observation_state: &str) {
         finished["finished_at"] = json!(execution["created_at"].as_i64().unwrap() + 10);
         import(&finished, "mac", 1000 + n as i64);
         assert_eq!(summary(&mut store)["last_run"]["state"], state);
-        assert_eq!(summary(&mut store)["status"]["state"], state, "Health follows the target machine");
+        assert_eq!(
+            summary(&mut store)["status"]["state"],
+            state,
+            "Health follows the target machine"
+        );
     }
     // Only the exact occurrence and immutable snapshot may replace an observation.
     for field in [

@@ -30,11 +30,21 @@ struct Fields {
     #[arg(long)]
     name: String,
     /// Five fields; quote the expression.
+    #[arg(
+        long,
+        required_unless_present = "directory",
+        conflicts_with = "directory"
+    )]
+    cron: Option<String>,
+    /// Watch this absolute folder on the main Mac.
     #[arg(long)]
-    cron: String,
+    directory: Option<String>,
+    /// Filename glob; repeat to match any pattern.
+    #[arg(long = "match", requires = "directory")]
+    patterns: Vec<String>,
     /// Explicit IANA timezone, e.g. America/Chicago.
-    #[arg(long)]
-    timezone: String,
+    #[arg(long, required_unless_present = "directory")]
+    timezone: Option<String>,
     #[arg(long, value_enum, required_unless_present = "executable")]
     harness: Option<hey_boss::agent_runtime::Provider>,
     /// Run this executable in the project checkout (absolute path, relative path, or name on PATH).
@@ -63,8 +73,15 @@ impl Fields {
     fn definition(&self) -> Definition {
         Definition {
             name: self.name.clone(),
-            cron: self.cron.clone(),
-            timezone: self.timezone.clone(),
+            directory: self
+                .directory
+                .as_ref()
+                .map(|path| hey_boss::jobs::Directory {
+                    path: path.clone(),
+                    patterns: self.patterns.clone(),
+                }),
+            cron: self.cron.clone().unwrap_or_default(),
+            timezone: self.timezone.clone().unwrap_or_else(|| "UTC".into()),
             executable: self.executable.clone(),
             condition: self.condition.clone(),
             execution: None,

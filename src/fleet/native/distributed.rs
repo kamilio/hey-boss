@@ -102,7 +102,7 @@ CREATE VIEW IF NOT EXISTS distributed_job_runs AS SELECT sequence,id,project_id,
  json_extract(payload,'$.task_number') AS task_number,json_extract(payload,'$.machine') AS machine,
  json_extract(payload,'$.session_id') AS session_id,json_extract(payload,'$.started_at') AS started_at,
  json_extract(payload,'$.finished_at') AS finished_at,json_extract(payload,'$.worker_id') AS worker_id,
- json_extract(payload,'$.parent_run_id') AS parent_run_id,json_extract(payload,'$.target_machine') AS target_machine
+ json_extract(payload,'$.parent_run_id') AS parent_run_id,json_extract(payload,'$.target_machine') AS target_machine,json_extract(payload,'$.arrival') AS arrival
  FROM distributed_job_attempts;
 ";
 
@@ -129,7 +129,7 @@ pub(crate) fn restore_history_row(
 
 /// Installing capture does not change scheduling, authorities, or running work.
 pub(super) fn install(db: &Connection, origin: &str) -> Result<()> {
-    if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_job_runs') AND NOT EXISTS(SELECT 1 FROM pragma_table_info('distributed_job_runs') WHERE name='parent_run_id')", [], |r| r.get::<_,bool>(0))? {
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='distributed_job_runs') AND NOT EXISTS(SELECT 1 FROM pragma_table_info('distributed_job_runs') WHERE name='arrival')", [], |r| r.get::<_,bool>(0))? {
         let tx=db.unchecked_transaction()?;
         tx.execute_batch("DROP VIEW distributed_job_runs")?;
         tx.execute_batch(&SCHEMA[SCHEMA.find("CREATE VIEW IF NOT EXISTS distributed_job_runs").unwrap()..])?;
