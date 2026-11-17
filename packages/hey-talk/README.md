@@ -18,7 +18,8 @@ starting another dictation replaces it. The transcript stays in History.
 
 **Return to Field Before Pasting** is on by default. When text is ready, Hey Talk
 brings the destination window forward and focuses the original input. It can
-find a replaced composer in T3 or Slack, or reselect a cmux terminal tab in
+recognize the same T3 message box after a thread rename or editor replacement,
+find a replaced Slack composer, or reselect a cmux terminal tab in
 the same workspace. After two seconds it stops trying to move focus. While a
 paste is pending, it only checks whether you’ve returned; Esc cancels the wait.
 Turn it off in the waveform menu or the pill’s right-click menu to return manually.

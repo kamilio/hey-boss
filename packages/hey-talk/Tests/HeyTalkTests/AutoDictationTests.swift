@@ -69,17 +69,20 @@ final class AutoDictationTests: XCTestCase {
         func field(_ element: AXUIElement, _ route: String?, _ label: String?, window: AXUIElement? = nil) -> FocusedInput {
             FocusedInput(app: app, element: element, window: window ?? first, document: route, composerLabel: label)
         }
-        let start = field(first, "t3code://app/#/thread/A", "Message A")
+        let thread = "t3code://app/#/0a75001f-0193-4acc-b0e8-abc0dd3b8a77/80d9fef0-18a1-4f4b-b1d4-9b9defac6d1d"
+        let start = field(first, thread, "Message A")
         let dm = "slack://channel?team=T123&id=D456"
         XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm, "Message B"))
         XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm, nil))
         XCTAssertEqual(field(first, dm, "Message A"), field(other, dm, "Message A"))
         XCTAssertNotEqual(field(first, dm, "Message A"), field(other, dm + "&thread_ts=1234567890.123456", "Message A"))
-        XCTAssertEqual(start, field(other, "t3code://app/#/thread/A", "Message A"))
-        XCTAssertNotEqual(start, field(first, "t3code://app/#/thread/B", "Message A"))
-        XCTAssertNotEqual(start, field(other, "t3code://app/#/thread/A", nil))
-        XCTAssertNotEqual(start, field(first, "t3code://app/#/thread/A", "Message B"))
-        XCTAssertNotEqual(start, field(other, "t3code://app/#/thread/A", "Message A", window: other))
+        XCTAssertEqual(start, field(other, thread, "Message A"))
+        XCTAssertNotEqual(start, field(other, thread, nil))
+        XCTAssertEqual(start, field(first, thread, "Message B"))
+        XCTAssertEqual(start, field(other, thread, "Message"))
+        XCTAssertNotEqual(start, field(other, thread, "Prompt font preview"))
+        XCTAssertNotEqual(start, field(other, "t3code://app/#/0a75001f-0193-4acc-b0e8-abc0dd3b8a77/80d9fef0-18a1-4f4b-b1d4-9b9defac6d1e", "Message A"))
+        XCTAssertNotEqual(start, field(other, thread, "Message A", window: other))
         XCTAssertNotEqual(field(first, nil, "Message A"), field(other, nil, "Message A"))
         let dms = "https://app.slack.com/client/T123/dms"
         XCTAssertEqual(field(first, dms, "Message A"), field(first, dms, "Message A"))

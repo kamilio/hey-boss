@@ -89,21 +89,26 @@ struct FocusedInput: Equatable {
         guard app.processIdentifier == other.app.processIdentifier else { return "app_changed" }
         guard Self.equal(window, other.window) else { return "window_changed" }
         guard document == other.document else { return "document_changed" }
+        // T3 includes the mutable thread title in the message editor’s AX description.
+        if window != nil, Self.isMessageLabel(composerLabel), Self.isMessageLabel(other.composerLabel),
+           let document, Self.composerLink(document) != nil { return nil }
         guard composerLabel == other.composerLabel else { return "composer_changed" }
-        // T3 and Slack remount editors when returning to a conversation.
         if CFEqual(element, other.element) { return nil }
         guard window != nil, composerLabel != nil, let document,
-              document.hasPrefix("slack://channel?") || document.hasPrefix("t3code://") else { return "element_changed" }
+              document.hasPrefix("slack://channel?") else { return "element_changed" }
         return nil
     }
     private static func equal(_ lhs: AXUIElement?, _ rhs: AXUIElement?) -> Bool {
         if let lhs, let rhs { return CFEqual(lhs, rhs) }
         return lhs == nil && rhs == nil
     }
+    private static func isMessageLabel(_ label: String?) -> Bool {
+        label == "Message" || label?.hasPrefix("Message ") == true
+    }
     static func isEligible(bundleID: String, role: String, subrole: String?, enabled: Bool, editable: Bool, label: String, forAuto: Bool) -> Bool {
         guard enabled, editable, subrole != "AXSecureTextField", ["AXTextField", "AXTextArea"].contains(role) else { return false }
         // T3's search, rename, and settings fields must not open the microphone.
-        return !forAuto || bundleID != "com.t3tools.t3code" || (role == "AXTextArea" && (label == "Message" || label.hasPrefix("Message ")))
+        return !forAuto || bundleID != "com.t3tools.t3code" || (role == "AXTextArea" && isMessageLabel(label))
     }
     // Nonactivating panels can own the keyboard while their host app is in the background.
     static var keyboardApp: NSRunningApplication? {
