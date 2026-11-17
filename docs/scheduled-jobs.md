@@ -36,14 +36,16 @@ hey-boss job create --id process-pdfs --name 'Process incoming PDFs' \
   --executable ./scripts/process-pdf
 ```
 
-For a schedule, replace the directory and matches with `--cron '0 9 * * *' --timezone UTC`. For an agent, replace the executable with `--harness codex --instructions ./prompts/review-pdf.md`. Omit machine flags to use any eligible machine. `job view ID` shows the saved trigger, action and revision.
+For a schedule, replace the directory and matches with `--cron '0 9 * * *' --timezone UTC`. For an agent, replace the executable with `--harness codex --instructions ./prompts/review-pdf.md`. To use the Hey Boss agent, pass `--harness hey-boss --instructions ./prompts/review-pdf.md`. It runs GPT-6.1 Sol through the worker’s local Hey Proxy with the project checkout and shell, batch and delegation tools. It does not read the active window, paste into it, or display media. A project worker needs the current Hey Boss desktop installation; other workers skip this harness. `--thread-mode resume` continues the job’s own notebook on that machine. Read the final reply with `hey-boss job logs ID RUN_ID` or **View log**.
+
+Omit machine flags to use any eligible machine. `job view ID` shows the saved trigger, action and revision.
 
 | If create or edit reports… | Recovery |
 | --- | --- |
 | Both triggers, or neither | Keep either `--directory /absolute/folder` or `--cron '…' --timezone ZONE`. To run on both events, create two jobs with different IDs. |
 | Missing, malformed or impossible schedule | Quote all five cron fields as one argument: minute, hour, day, month, weekday. Use a real date, ascending ranges and positive steps. Supply an IANA timezone such as `America/Chicago` or `UTC`. |
 | Relative directory or bad pattern | Give the absolute folder **on the main Mac**. Use up to 32 quoted filename globs (1–256 bytes each, no slash), one per `--match`. Omit the flag for all files. Remove it for cron. |
-| Missing action or mixed script and agent flags | Pick `--executable PROGRAM` alone or `--harness codex\|claude\|pi` with agent settings. Put arguments in the script. `--condition PROGRAM` can guard either action but cannot replace it. |
+| Missing action or mixed script and agent flags | Pick `--executable PROGRAM` alone or `--harness` with `codex`, `claude`, `pi`, or `hey-boss` with agent settings. Put arguments in the script. `--condition PROGRAM` can guard either action but cannot replace it. |
 | Missing model or instructions | Claude and Pi need an explicit supported `--model`; Codex can inherit it. Pass a readable, nonblank UTF-8 `.md` file, at most 1 MiB. Agent edits can keep prior instructions; switching from a script requires a file. |
 | Machine flags conflict | For ordered fallbacks, repeat `--machine NODE_ID` using unique fleet IDs without spaces. Schedules may instead use `--all-machines`, or `--each-machine` with a list. File jobs run once per file: remove both fanout flags. |
 | Missing or invalid identity | Supply a nonblank `--name` (≤256 bytes) and an `--id` of 1–128 ASCII letters, digits, hyphens or underscores. Run from a registered project checkout or pass its existing name or ID with `--project`. |

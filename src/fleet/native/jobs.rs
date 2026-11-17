@@ -39,7 +39,7 @@ pub(super) fn capability(ctx: &Context) -> Result<Value> {
             );
         }
     }
-    let runtimes: BTreeMap<_, _> = [Provider::Codex, Provider::Claude, Provider::Pi]
+    let mut runtimes: BTreeMap<_, _> = [Provider::Codex, Provider::Claude, Provider::Pi]
         .into_iter()
         .map(|p| {
             (
@@ -51,6 +51,10 @@ pub(super) fn capability(ctx: &Context) -> Result<Value> {
             )
         })
         .collect();
+    runtimes.insert(
+        "hey-boss",
+        json!({"available":workers.iter().any(|w| w["readiness"]["hey_boss_job"] == true)}),
+    );
     let checkouts = super::projects::resolved(ctx)?;
     let script_projects = checkouts
         .as_object()
@@ -180,7 +184,9 @@ fn finish(
 ) -> Result<()> {
     report.state = state.into();
     report.reason = reason.map(|r| r.chars().take(4096).collect());
-    if d.run.snapshot.definition.executable.is_some() {
+    if d.run.snapshot.definition.executable.is_some()
+        || d.run.snapshot.definition.harness == "hey-boss"
+    {
         report.log = script::read_log(ctx, report, 0)?;
     }
     report.finished_at = Some(now().max(report.started_at.unwrap_or(0)));
@@ -234,7 +240,9 @@ impl WorkerJobs {
             let ctx = self.ctx.clone();
             let worker = self.worker.clone();
             self.handles.push(std::thread::spawn(move || {
-                let readiness = crate::jobs::ready::inspect().to_string();
+                let mut readiness = crate::jobs::ready::inspect();
+                readiness["hey_boss_job"] = json!(hey_boss_agent::binary().is_ok());
+                let readiness = readiness.to_string();
                 let result = (|| -> Result<()> {
                     ctx.db()?.execute(
                         "UPDATE local_job_workers SET readiness=?2 WHERE worker_id=?1",
@@ -456,21 +464,26 @@ fn stop_agent(agent: &mut AgentSession) -> Result<()> {
 }
 
 fn previous_thread(ctx: &Context, d: &Dispatch, provider: Provider) -> Result<Option<SessionRef>> {
+    Ok(previous_session(ctx, d, provider.name())?
+        .map(|s| serde_json::from_str(&s))
+        .transpose()?)
+}
+
+fn previous_session(ctx: &Context, d: &Dispatch, provider: &str) -> Result<Option<String>> {
     if d.run.snapshot.definition.thread_mode != crate::jobs::ThreadMode::Resume {
         return Ok(None);
     }
     // References are machine-local and become eligible only once the owned
     // process group has stopped. Never resume a thread from another job/provider.
     let saved: Option<String> = ctx.db()?.query_row(
-        "SELECT t.session FROM local_job_threads t JOIN local_job_executions e ON e.run_id=t.run_id WHERE t.project_id=?1 AND t.job_id=?2 AND t.run_id<>?3 AND json_extract(e.report,'$.state') IN ('succeeded','failed','cancelled')",
-        params![d.run.snapshot.project_id, d.run.snapshot.job_id, d.run.id],
+        "SELECT t.session FROM local_job_threads t JOIN local_job_executions e ON e.run_id=t.run_id WHERE t.project_id=?1 AND t.job_id=?2 AND t.run_id<>?3 AND json_extract(t.session,'$.provider')=?4 AND json_extract(e.report,'$.state') IN ('succeeded','failed','cancelled')",
+        params![d.run.snapshot.project_id, d.run.snapshot.job_id, d.run.id,provider],
         |r| r.get(0),
     ).optional()?;
-    let saved: Option<SessionRef> = saved.map(|s| serde_json::from_str(&s)).transpose()?;
-    Ok(saved.filter(|s| s.provider == provider))
+    Ok(saved)
 }
 
-fn remember_thread(ctx: &Context, d: &Dispatch, session: &SessionRef) -> Result<()> {
+fn remember_thread(ctx: &Context, d: &Dispatch, session: &impl serde::Serialize) -> Result<()> {
     ctx.db()?.execute(
         "INSERT INTO local_job_threads(project_id,job_id,run_id,session) VALUES(?1,?2,?3,?4) ON CONFLICT(project_id,job_id) DO UPDATE SET run_id=excluded.run_id,session=excluded.session",
         params![d.run.snapshot.project_id, d.run.snapshot.job_id, d.run.id, serde_json::to_string(session)?],
@@ -562,6 +575,16 @@ fn run_session(
     }
     let cwd = job_workspace(&config, &d.run.id)?;
     report.cwd = Some(cwd.to_string_lossy().into_owned());
+    if d.run.snapshot.definition.harness == "hey-boss" {
+        return hey_boss_agent::run(
+            ctx,
+            d,
+            report,
+            &cwd,
+            input.as_deref(),
+            &hey_boss_agent::binary()?,
+        );
+    }
     let provider: Provider = serde_json::from_value(json!(d.run.snapshot.definition.harness))?;
     let model = &d.run.snapshot.definition.model;
     let model = if provider == Provider::Codex && model.is_empty() {
@@ -880,6 +903,8 @@ fn eligible_workers<'a>(
         .flatten()
         .filter(move |w| {
             (run.arrival.is_none() || w["directory_jobs"] == true)
+                && (run.snapshot.definition.harness != "hey-boss"
+                    || w["readiness"]["hey_boss_job"] == true)
                 && run
                     .snapshot
                     .definition
@@ -932,6 +957,9 @@ fn job_workspace(config: &crate::issues::worker::ProjectConfig, run: &str) -> Re
 
 #[path = "job_command.rs"]
 mod command;
+#[path = "job_hey_boss.rs"]
+mod hey_boss_agent;
+
 #[path = "job_script.rs"]
 mod script;
 

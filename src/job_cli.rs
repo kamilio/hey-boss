@@ -42,15 +42,15 @@ struct Fields {
     #[arg(long, help_heading = "When")]
     timezone: Option<String>,
     /// Agent runtime. Pair with --instructions when creating an agent job.
-    #[arg(long, value_enum, help_heading = "Do")]
-    harness: Option<hey_boss::agent_runtime::Provider>,
+    #[arg(long, help_heading = "Do", value_parser = ["codex", "claude", "pi", "hey-boss"])]
+    harness: Option<String>,
     /// Run this executable in the project checkout (absolute path, relative path, or name on PATH).
     #[arg(long, help_heading = "Do")]
     executable: Option<String>,
     /// Check this executable in the project checkout first: print JSON true to run or false to skip.
     #[arg(long, help_heading = "Do")]
     condition: Option<String>,
-    /// Exact model override; omit for Codex to follow the project setting.
+    /// Exact model. Omit for the project Codex model or the built-in Hey Boss model.
     #[arg(long, help_heading = "Do")]
     model: Option<String>,
     /// Start a new thread (default), or resume this job's previous thread on this machine.
@@ -125,7 +125,7 @@ impl Fields {
             executable: self.executable.clone(),
             condition: self.condition.clone(),
             execution: None,
-            harness: self.harness.map(|p| p.name()).unwrap_or_default().into(),
+            harness: self.harness.clone().unwrap_or_default(),
             model: self.model.clone().unwrap_or_default(),
             thread_mode: self.thread_mode.unwrap_or_default(),
             machines: self.machines.clone(),
@@ -247,7 +247,7 @@ enum Action {
     Revision { id: String, revision: i64 },
     /// Read an execution snapshot and durably cache its required Markdown.
     Run { id: String, run_id: String },
-    /// Print the combined stdout and stderr for a script run.
+    /// Print a script log or the reply from a Hey Boss agent run.
     Logs { id: String, run_id: String },
     /// Queue one execution, including when the schedule is paused.
     RunNow { id: String },
@@ -439,7 +439,7 @@ pub fn run(options: &Options) -> Result<()> {
         let mut combined = String::new();
         loop {
             let Some(output) = page["log"].as_str() else {
-                return Err(Error::invalid("No script log available for this run yet"));
+                return Err(Error::invalid("No log available for this run yet"));
             };
             if options.json {
                 combined.push_str(output);
@@ -560,7 +560,13 @@ fn print_job(job: &Value) {
         println!(
             "  Do: agent {} / {}",
             d["harness"].as_str().unwrap_or(""),
-            d["model"].as_str().unwrap_or("")
+            d["model"].as_str().filter(|m| !m.is_empty()).unwrap_or(
+                if d["harness"] == "hey-boss" {
+                    "gpt-6.1-sol"
+                } else {
+                    "project model"
+                }
+            )
         );
         println!(
             "  Thread: {}",

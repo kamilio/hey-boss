@@ -1869,3 +1869,85 @@ fn directory_job_agent_can_read_the_staged_input() {
     assert_eq!(report.state, "succeeded", "{report:?}");
     assert_eq!(fs::read(audit).unwrap(), b"agent input bytes");
 }
+
+#[test]
+fn hey_boss_jobs_require_a_capable_worker_and_preserve_their_notebook() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut f = Fixture::new();
+    let path = f.root.join("conversation-job");
+    fs::write(
+        &path,
+        r#"#!/bin/sh
+set -eu
+IFS= read -r turn
+printf '%s' "$turn" > request.json
+mkdir -p "$(dirname "$1")"
+touch "${1%.json}.jsonl"
+test -f "$HEY_BOSS_JOB_FILE"
+printf '%s\n' '{"AgentAccepted":{}}' '{"TurnCompleted":{"status":"Completed","output":"Finished"}}'
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut definition:Definition=serde_json::from_value(json!({"name":"Native","cron":"0 9 * * *","timezone":"UTC","harness":"hey-boss","thread_mode":"resume"})).unwrap();
+    definition.validate().unwrap();
+    definition.model = "other-model".into();
+    assert!(
+        definition
+            .validate()
+            .unwrap_err()
+            .message
+            .contains("Omit --model")
+    );
+    definition.model.clear();
+    f.op(Operation::Create {
+        id: "native".into(),
+        definition,
+        markdown: MARKDOWN.into(),
+        enabled: false,
+    });
+    let mut first = None;
+    for _ in 0..2 {
+        let id = f.op(Operation::RunNow {
+            id: "native".into(),
+        })["run"]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        f.store.assign_job(&id, &f.ctx.node, Some("pool")).unwrap();
+        let d = f
+            .store
+            .job_dispatches(&f.ctx.node)
+            .unwrap()
+            .into_iter()
+            .find(|d| d.run.id == id)
+            .unwrap();
+        let mut machine = f.machines().remove(0);
+        machine["jobs"]["runtimes"]["hey-boss"]["available"] = true.into();
+        assert!(eligible_workers(&machine, &d.run).next().is_none());
+        machine["jobs"]["workers"][0]["readiness"]["hey_boss_job"] = true.into();
+        assert_eq!(eligible_workers(&machine, &d.run).next(), Some("pool"));
+        receive(&f.ctx, &d, MARKDOWN).unwrap();
+        let mut report = f.report(&d);
+        let (state, reason) =
+            hey_boss_agent::run(&f.ctx, &d, &mut report, &f.root, Some(&path), &path).unwrap();
+        assert_eq!(state, "succeeded", "{reason:?}");
+        let request: Value =
+            serde_json::from_slice(&fs::read(f.root.join("request.json")).unwrap()).unwrap();
+        assert_eq!(request["turn"], MARKDOWN);
+        assert_eq!(
+            report.session_id.as_ref(),
+            Some(first.get_or_insert(id.clone()) as &String)
+        );
+        finish(&f.ctx, &d, &mut report, &state, reason).unwrap();
+        f.store.accept_job_report(&f.ctx.node, &report).unwrap();
+        assert_eq!(
+            f.op(Operation::Log {
+                id: "native".into(),
+                run_id: id,
+                offset: 0
+            })["log"],
+            "Finished\n"
+        );
+    }
+}

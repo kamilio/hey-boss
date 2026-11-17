@@ -88,6 +88,12 @@ impl Definition {
             {
                 return Err(Error::invalid("Script jobs cannot use agent settings"));
             }
+        } else if self.harness == "hey-boss" {
+            if !self.model.is_empty() && self.model != "gpt-6.1-sol" {
+                return Err(Error::invalid(
+                    "Hey Boss uses gpt-6.1-sol. Omit --model or select gpt-6.1-sol.",
+                ));
+            }
         } else if !self.model.is_empty() || self.harness != "codex" {
             if self.model.trim().is_empty() {
                 return Err(Error::invalid(
@@ -118,11 +124,11 @@ impl Definition {
                 ));
             }
         }
-        if self.executable.is_none() {
+        if self.executable.is_none() && self.harness != "hey-boss" {
             serde_json::from_value::<crate::agent_runtime::Provider>(serde_json::json!(
                 self.harness
             ))
-            .map_err(|_| Error::invalid("Job harness must be codex, claude, or pi"))?;
+            .map_err(|_| Error::invalid("Job harness must be codex, claude, pi, or hey-boss"))?;
         }
         if let Some(exec) = &self.execution {
             exec.validate()?;

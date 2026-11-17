@@ -220,4 +220,8 @@ fn directory_job_editor_saves_reopens_and_switches_triggers() {
     p.wait("document.documentElement.scrollWidth<=innerWidth && document.querySelector('#job-dialog').scrollWidth<=innerWidth");
     p.eval("document.querySelector('#job-trigger input[value=schedule]').click();").unwrap();
     assert_eq!(p.eval("document.querySelector('#job-folder-fields').disabled && document.querySelector('#job-cron').checkVisibility()").unwrap(),true);
+    p.eval(&format!("window.el=id=>document.getElementById(id); el('job-kind').querySelector('input[value=agent]').click(); el('job-model').value='old-model'; el('job-harness').value='hey-boss'; el('job-harness').onchange(); el('job-markdown').value={};", json!(include_str!("../../src/jobs/fixtures/original.md")))).unwrap();
+    p.wait("el('job-model-status').textContent.includes('GPT-6.1 Sol') && !el('job-model').checkVisibility() && el('job-form').checkValidity()");
+    p.eval("el('job-save').click()").unwrap();
+    p.wait("el('job-harness')?.value==='hey-boss' && el('job-model').value==='' && document.querySelector('.job-panel-subtitle')?.textContent.startsWith('Revision 2')");
 }

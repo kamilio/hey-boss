@@ -253,8 +253,10 @@ impl Store {
                 progress(&tx, &run, "running", None, started_at)?;
             }
             if let Some(log) = &report.log {
-                if run.snapshot.definition.executable.is_none() {
-                    return Err(Error::invalid("Unexpected script log"));
+                if run.snapshot.definition.executable.is_none()
+                    && run.snapshot.definition.harness != "hey-boss"
+                {
+                    return Err(Error::invalid("Unexpected job log"));
                 }
                 tx.execute("INSERT INTO scheduled_job_logs(run_id,offset,output,next_offset) VALUES(?1,?2,?3,?4) ON CONFLICT(run_id,offset) DO UPDATE SET output=excluded.output,next_offset=excluded.next_offset WHERE length(excluded.output)>=length(scheduled_job_logs.output)",params![run.id,log.offset,log.output,log.next])?;
                 if log.next.is_some() {
