@@ -34,3 +34,5 @@
 
 .job-outcome.stalled { color: var(--warning); }
 .job-outcome.stalled:before { background: var(--warning); }
+
+.job-trigger-fields{min-width:0;border:0;margin:0;padding:0}.job-trigger-fields.job-fields{margin-top:1rem}#job-patterns{min-height:4.5rem;font-family:ui-monospace,monospace}.job-trigger-fields legend{font-weight:600;font-size:.8rem;color:var(--muted);margin-bottom:.75rem}.job-trigger-fields[hidden]{display:none}.job-schedule span,.job-schedule code{overflow-wrap:anywhere}

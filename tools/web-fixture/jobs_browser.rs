@@ -190,3 +190,29 @@ mod schedules;
 
 #[path = "job_placement.rs"]
 mod placement;
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn directory_job_editor_saves_reopens_and_switches_triggers() {
+    let f=fixture();
+    let project="Jobs UI QA";
+    f.init(project).unwrap();
+    seed::seed(&f,Scenario::JobsUi,project).unwrap();
+    let _supervisor=agents::supervisor(&f).unwrap();
+    let (_web,base)=web(&f,project);
+    let mut p=Page::open(&format!("{base}/jobs#project=named%3AJobs%20UI%20QA"));
+    p.wait("document.querySelector('#job-new')?.disabled === false");
+    p.eval("document.querySelector('#job-new').click()").unwrap();
+    p.wait("!!document.querySelector('#job-trigger')");
+    p.eval("window.el=id=>document.getElementById(id); window.pick=(id,value)=>{el(id).value=value;el(id).dispatchEvent(new Event('change',{bubbles:true}));}; pick('job-trigger','file'); pick('job-kind','script'); el('job-name').value='Process arrivals'; el('job-executable').value='/usr/bin/true';").unwrap();
+    assert_eq!(p.eval("el('job-clock-fields').disabled && !el('job-directory').validity.valid && !el('job-form').checkValidity()").unwrap(),true);
+    p.eval("el('job-directory').value='/example/incoming';el('job-patterns').value='*.png\\n*.jpg';el('job-enabled').checked=false;el('job-save').click()").unwrap();
+    p.wait("document.querySelector('.job-panel-subtitle')?.textContent.startsWith('Revision 1')");
+    p.command("Page.reload",json!({})).unwrap();
+    p.wait("document.querySelector('#job-directory')?.value==='/example/incoming'");
+    assert_eq!(p.eval("document.querySelector('#job-patterns').value").unwrap(),"*.png\n*.jpg");
+    p.command("Emulation.setDeviceMetricsOverride",json!({"width":390,"height":800,"mobile":false,"deviceScaleFactor":1})).unwrap();
+    p.wait("document.documentElement.scrollWidth<=innerWidth && document.querySelector('#job-dialog').scrollWidth<=innerWidth");
+    p.eval("const trigger=document.querySelector('#job-trigger');trigger.value='schedule';trigger.onchange();").unwrap();
+    assert_eq!(p.eval("document.querySelector('#job-folder-fields').disabled && document.querySelector('#job-cron').checkVisibility()").unwrap(),true);
+}
