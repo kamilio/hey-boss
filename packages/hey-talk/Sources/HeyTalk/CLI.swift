@@ -39,7 +39,7 @@ enum CLI {
     hey-talk doctor                            Check permissions, model, and hotkey
     hey-talk quit                              Stop only Hey Talk and its worker
 
-    Hyper+V inserts the last dictation without changing the clipboard. In Auto: focus a message field, speak, and pause to submit.
+    Hyper+V inserts the last dictation and restores your previous clipboard. In Auto: focus a message field, speak, and pause to submit.
     Press Hyper+R to start; press again to finish. Esc cancels.
     \(DictationShortcut.help).
     Commands start the app on demand. No login service or account is required.

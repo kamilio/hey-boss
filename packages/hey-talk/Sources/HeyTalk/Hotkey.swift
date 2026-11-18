@@ -238,12 +238,8 @@ enum Paste {
                 return post(key, flags: flags, to: target.processIdentifier)
             }
             if case .paste = action {
-                send(action.text, shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, insert: { text in
-                    guard let target, let field = FocusedInput.read(app: target, forAuto: false),
-                          originalField == nil || field == originalField else { return false }
-                    return insert(text, into: field.element)
-                }, post: keypress,
-                     afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
+                send(action.text, shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: keypress,
+                     afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: $0) }) { delivery, reason in
                     if delivery == "history", reason == .focusChanged, let onWait { retry(onWait) }
                     else { completion(delivery, reason) }
                 }
@@ -279,27 +275,53 @@ enum Paste {
         } else { paste() }
     }
 
+    // Only one temporary clipboard owner at a time (including repeated Hyper+V).
+    private static var pasting = false
+
     static func send(_ text: String, shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
-                     insert: (String) -> Bool, post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
+                     board: NSPasteboard = .general, post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
                      completion: @escaping (String, PasteBlockReason?) -> Void) {
         if let reason = check() { completion("history", reason); return }
-        guard insert(text) else { completion("history", .eventUnavailable); return }
-        guard shouldPressEnter() else { completion("pasted", nil); return }
+        guard !pasting else { completion("history", .eventUnavailable); return }
+        let originalCount = board.changeCount
+        var saved: [NSPasteboardItem] = []
+        for item in board.pasteboardItems ?? [] {
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                // Materialize promised data before taking ownership; never lose an unreadable item.
+                guard let data = item.data(forType: type), copy.setData(data, forType: type) else {
+                    completion("history", .eventUnavailable); return
+                }
+            }
+            saved.append(copy)
+        }
+        guard board.changeCount == originalCount else { completion("history", .eventUnavailable); return }
+        let temporary = NSPasteboardItem()
+        temporary.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        temporary.setString(text, forType: .string)
+        pasting = true
+        board.clearContents()
+        let written = board.writeObjects([temporary])
+        let ownedCount = board.changeCount
+        func restore() {
+            if board.changeCount == ownedCount {
+                board.clearContents()
+                if !saved.isEmpty { board.writeObjects(saved) }
+            }
+            pasting = false
+        }
+        guard written, post(9, .maskCommand) else {
+            restore(); completion("history", .eventUnavailable); return
+        }
+        // Keep the text available while the target handles Command-V, even in paste-only mode.
         afterPaste {
+            restore()
             guard isCurrent() else { completion("pasted", nil); return }
             if let reason = check() { completion("pasted", reason); return }
             guard shouldPressEnter() else { completion("pasted", nil); return }
             guard post(36, []) else { completion("pasted", .eventUnavailable); return }
             completion("submitted", nil)
         }
-    }
-
-    static func insert(_ text: String, into field: AXUIElement) -> Bool {
-        var writable: DarwinBoolean = false
-        guard AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &writable) == .success,
-              writable.boolValue else { return false }
-        // Replace only the selection (or insert at the caret), never rewrite the whole field.
-        return AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, text as CFString) == .success
     }
 
     static func post(_ key: CGKeyCode, flags: CGEventFlags, to pid: pid_t) -> Bool {

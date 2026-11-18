@@ -27,7 +27,7 @@ Turn it off in the waveform menu or the pill’s right-click menu to return manu
 To inspect a missed paste, run `/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "local.hey-talk" AND category == "paste"'`.
 It records the target app, what stopped focus from matching, and whether Hey Talk inserted the text. It omits transcript text, clipboard contents, field labels, and URLs.
 
-**Hyper+V inserts the last dictation** (Caps Lock + V with the same Hyper mapping) into the focused field without submitting or changing the clipboard. Failed insertions stay in History; focus the destination and press Hyper+V to retry.
+**Hyper+V inserts the last dictation** (Caps Lock + V with the same Hyper mapping) into the focused field without submitting. It temporarily uses the clipboard, then restores what you had copied. Failed insertions stay in History; focus the destination and press Hyper+V to retry.
 
 Enable **Auto mode** in the menu or with `hey-talk auto on`.
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
@@ -86,7 +86,7 @@ Hey Proxy at `127.0.0.1:8080` with reasoning disabled and storage off. By defaul
 To use Bedrock, choose an OpenAI profile ID from `/bedrock/v1/models` and run `defaults write local.hey-talk correctionBedrockProfile -string 'PROFILE_ID'`. Correction then uses `/bedrock/v1/responses` on the default tier. Delete that preference to restore ordinary proxy routing.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
-If correction fails during dictation, Hey Talk keeps the raw transcript in History; Hyper+V inserts it. Dictation never changes the clipboard. Escape discards pending correction too.
+If correction fails during dictation, Hey Talk keeps the raw transcript in History; Hyper+V inserts it. Dictation restores the previous clipboard after pasting. Escape discards pending correction too.
 If correction times out, click the retry arrow next to the close button to continue with the same transcript and original destination. Completed actions won’t run again.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
@@ -368,7 +368,7 @@ the installed app in Finder if it needs adding, and detects when permission is o
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation stays in History. While waiting for focus, the clipboard stays untouched.
-Dictation inserts text at the caret through Accessibility without touching the clipboard. If insertion fails, focus a text field and press Hyper+V to insert the last dictation. Only an explicit Copy in History changes the clipboard.
+Dictation sends Command-V using a temporary clipboard entry, then restores all previous clipboard items and formats after half a second. A newer copy is never overwritten. Temporary entries are marked `org.nspasteboard.TransientType` so Hey Clipboard and compatible history apps ignore them. Flycut 1.9.6 has a bug that ignores this marker. If insertion fails, focus a text field and press Hyper+V to retry; the transcript stays in History.
 The stop response reports `delivery: "waiting"`; status reports `waiting_to_paste`. `--no-paste` and file
 transcription leave the clipboard untouched. Switching from the old ad-hoc
 signature to the persistent certificate requires one final permission approval.
