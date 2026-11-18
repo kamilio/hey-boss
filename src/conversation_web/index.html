@@ -17,10 +17,11 @@
 </div></header>
 <main id="timeline">
   <div id="empty" hidden><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 14v4m5-9v14m5-20v26m6-22v18m5-14v10m5-8v6"/></svg><h1></h1><p></p></div>
-  <button class="button" id="earlier" hidden>Earlier messages</button><div id="messages"></div><button class="button" id="latest" hidden>Back to latest</button>
+  <button class="button" id="earlier" hidden>Earlier messages</button><div id="messages"></div><section id="outbox" aria-label="Queued messages"></section><button class="button" id="latest" hidden>Back to latest</button>
 </main>
 <footer class="glass">
   <section hidden id="approval"><pre></pre><button class="button" id="decline">Decline</button> <button class="button primary" id="allow">Allow once</button></section>
+  <p id="connection" role="status"></p>
   <p id="notice" role="alert"></p><div id="caption"></div>
   <form id="composer"><textarea id="draft" rows="1" enterkeyhint="send" autocomplete="off" placeholder="Message Hey Boss…" aria-label="Message"></textarea>
     <button class="icon-button" aria-label="Send message"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="currentColor" stroke="none"/><path d="M12 17V7m-4 4 4-4 4 4" stroke="var(--solid)"/></svg></button>

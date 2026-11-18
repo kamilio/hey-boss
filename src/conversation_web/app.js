@@ -1,21 +1,83 @@
 'use strict';
 const $ = id => document.getElementById(id);
 let chat, voice, starting, snapshot, after, refreshCount = 0, rendered, before;
-const drafts = new Map();
+let connected = null, sending = false;
+const draftKey = id => 'conversation-draft:' + (id || 'new');
+const queuePrefix = 'conversation-send:';
+function queued() {
+  return Object.keys(localStorage).filter(key=>key.startsWith(queuePrefix))
+    .map(key=>JSON.parse(localStorage.getItem(key))).sort((a,b)=>a.created-b.created || a.id.localeCompare(b.id));
+}
+function connection() {
+  text($('connection'), connected ? '' : connected===null ? 'Connecting to your Mac…' : 'Offline · messages stay on this device until your Mac reconnects.');
+  $('talk').disabled = !!starting || (!voice && (!connected || (!!snapshot && snapshot.voice.phase!=='idle')));
+  if(!connected && !voice) text($('status'),connected===null ? 'Connecting…' : 'Offline');
+  $('fresh').disabled = !connected; $('history').disabled = !connected;
+  $('composer').querySelector('button').disabled = !chat;
+}
+function outbox() {
+  const list=$('outbox'), old=new Map(Array.from(list.children,el=>[el.key,el]));
+  const items=queued();
+  for(const item of items) {
+    let row=old.get(item.id); old.delete(item.id);
+    if(!row) {
+      row=document.createElement('article'); row.key=item.id; row.className='user queued';
+      row.append(document.createElement('div'),document.createElement('small'),document.createElement('button'));
+      row.lastChild.className='button'; list.append(row);
+    }
+    text(row.firstChild,item.text);
+    text(row.children[1],item.error || (item.chat!==chat ? 'Queued in another chat' : connected ? (snapshot?.canSend ? 'Queued · ready to send' : 'Queued · waiting for this turn to finish') : 'Queued · waiting for connection'));
+    const action=row.lastChild;
+    action.hidden=!item.error && item.chat===chat;
+    text(action,item.chat!==chat ? 'Open chat' : 'Retry');
+    action.onclick=async()=>{try{
+      if(item.chat!==chat) { await api('open',{chat:item.chat}); before=null; rendered=null; await refresh(); }
+      else { text($('notice'),''); delete item.error; localStorage.setItem(queuePrefix+item.id,JSON.stringify(item)); outbox(); await flushQueue(); }
+    }catch(e){notice(e);}};
+  }
+  for(const row of old.values())row.remove();
+}
+async function flushQueue() {
+  if(sending || !connected || !snapshot?.queuedSend || !snapshot.canSend || $('pair').open) return;
+  sending=true;
+  try {
+    await navigator.locks.request('conversation-send',{ifAvailable:true},async lock=>{
+      if(!lock) return;
+      const item=queued().find(item=>item.chat===chat);
+      if(!item || item.error) return;
+      try {
+        const state=await api('state');
+        if(state.chat!==item.chat || !state.canSend || !state.queuedSend) return;
+        const result=await api('send',{chat:item.chat,text:item.text,message:item.id});
+        if(result.accepted?.toLowerCase()!==item.id) throw Error('The Mac did not confirm this queued message. Update Hey Boss before retrying.');
+        localStorage.removeItem(queuePrefix+item.id);
+      } catch(e) {
+        if(connected && !$('pair').open) { item.error=e.message; localStorage.setItem(queuePrefix+item.id,JSON.stringify(item)); }
+        notice(e,!connected);
+      }
+      outbox();
+      await refresh().catch(e=>notice(e,true));
+    });
+  } catch(e) { notice(e); }
+  finally { sending=false; }
+}
 function text(el, value) { if (el.textContent !== value) el.textContent = value; }
 function notice(e, polling = false) {
-  text($('notice'), e.message || String(e));
+  text($('notice'), polling && !connected ? '' : e.message || String(e));
   $('notice').toggleAttribute('data-connection', polling);
 }
 async function api(action, fields = {}) {
-  const res = await fetch('/api', {method:'POST', headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({action, chat, session:voice?.id, ...fields}), signal:AbortSignal.timeout(6500)});
+  let res;
+  try { res = await fetch('/api', {method:'POST', headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action, chat, session:voice?.id, ...fields}), signal:AbortSignal.timeout(6500)}); }
+  catch { connected=false; connection(); throw Error('The Mac is unavailable. Check the connection and try again.'); }
   if (res.status === 403) {
     if (!$('pair').open) $('pair').showModal();
     throw Error('Pair this device to continue.');
   }
-  if (!res.ok) throw Error('The Mac is unavailable. Check the connection and try again.');
-  const data = await res.json();
+  if (!res.ok) { connected=false; connection(); throw Error('The Mac is unavailable. Check the connection and try again.'); }
+  let data;
+  try { data=await res.json(); } catch { connected=false; connection(); throw Error('The Mac’s reply was interrupted. Reconnecting…'); }
   if (data.status !== 'ok') throw Error(data.error || 'The Mac could not complete this action.');
   return data;
 }
@@ -31,12 +93,18 @@ async function refresh() {
   }
   if (chat && chat !== s.chat) {
     if (starting) cleanup(starting);
-    if ($('draft').value) drafts.set(chat,$('draft').value); else drafts.delete(chat);
-    $('draft').value=drafts.get(s.chat) || ''; drafts.delete(s.chat);
+    try { saveDraft(); $('draft').value=localStorage.getItem(draftKey(s.chat)) || ''; }
+    catch { notice(Error('Could not save the draft on this device.')); }
     if (before!=null) { before=null; rendered=null; chat=s.chat; return refresh(); }
   }
+  connected=true;
   const previous = snapshot;
+  if(!chat) {
+    try { $('draft').value=localStorage.getItem(draftKey(s.chat)) || $('draft').value; }
+    catch { notice(Error('Could not read the saved draft on this device.')); }
+  }
   chat = s.chat; snapshot = s;
+  try { localStorage.setItem('conversation-chat',chat); } catch { notice(Error('Could not save on this device.')); }
   const v = s.voice, mine = !!voice && s.mine;
   $('empty').hidden = v.phase!=='idle' || s.end>0;
   text($('status'), v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message);
@@ -110,6 +178,8 @@ async function refresh() {
     if (before!=null) { if (entering) timeline.scrollTop=0; }
     else if (follow) timeline.scrollTop = timeline.scrollHeight;
   }
+  connection();
+  try { outbox(); void flushQueue(); } catch { notice(Error('Could not read queued messages on this device.')); }
 }
 function cleanup(v) {
   if (!v || v.closed) return;
@@ -267,16 +337,20 @@ $('draft').onkeydown = e => {
     e.preventDefault(); if (!e.repeat) $('composer').requestSubmit();
   }
 };
-$('composer').onsubmit = async e => { e.preventDefault(); const selected=chat, draft=$('draft').value, text=draft.trim(); if (!text) return;
-  const submit=e.submitter || $('composer').querySelector('button'); if (submit.disabled) return; submit.disabled=true;
-  $('notice').textContent='';
+function saveDraft() {
+  if($('draft').value) localStorage.setItem(draftKey(chat),$('draft').value);
+  else localStorage.removeItem(draftKey(chat));
+}
+$('draft').oninput=()=>{try{saveDraft();}catch{notice(Error('Could not save on this device. Keep this page open or copy your message.'));}};
+$('composer').onsubmit = async e => {
+  e.preventDefault(); const text=$('draft').value.trim(); if(!text || !chat) return;
   try {
-    await api('send',{text});
-    if (chat===selected) { if ($('draft').value===draft) $('draft').value=''; }
-    else if (drafts.get(selected)===draft) drafts.delete(selected);
-    await refresh();
-  }
-  catch(e){notice(e);} finally{submit.disabled=false;}
+    const item={id:crypto.randomUUID(),chat,text,created:Math.max(Date.now(),...queued().map(item=>item.created+1))};
+    localStorage.setItem(queuePrefix+item.id,JSON.stringify(item));
+    $('draft').value=''; saveDraft(); $('notice').textContent=''; outbox();
+    $('timeline').scrollTop=$('timeline').scrollHeight;
+    await flushQueue();
+  } catch { notice(Error('Could not save on this device. Keep this page open or copy your message.')); }
 };
 async function list() {
   const data=await api('list',{after}); after=data.next;
@@ -304,6 +378,15 @@ function leave() {
   cleanup(v); navigator.sendBeacon('/api',JSON.stringify({action:'stop',chat,session:v.id}));
 }
 addEventListener('pagehide',leave);
+addEventListener('offline',()=>{connected=false;connection();outbox();});
+addEventListener('online',()=>refresh().catch(e=>notice(e,true)));
+addEventListener('storage',()=>{outbox();void flushQueue();});
+try {
+  chat=localStorage.getItem('conversation-chat');
+  $('draft').value=localStorage.getItem(draftKey(chat)) || '';
+  connection(); outbox();
+} catch { notice(Error('Could not read saved messages on this device.')); }
+if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{if(!navigator.serviceWorker.controller)notice(Error('Offline opening is unavailable. Keep this page open to retain access.'));});
 document.addEventListener('visibilitychange',()=>{if(document.hidden)leave();});
 (async function observe(){if(!document.hidden && !$('pair').open){try{await refresh();}catch(e){notice(e,true);}}
   setTimeout(observe,voice || snapshot?.voice.phase==='thinking' ? 450 : 1400);

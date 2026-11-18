@@ -20,6 +20,11 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("conversation_web/app.js"),
     ),
     (
+        "/sw.js",
+        "text/javascript",
+        include_bytes!("conversation_web/sw.js"),
+    ),
+    (
         "/mic.js",
         "text/javascript",
         include_bytes!("conversation_web/mic.js"),

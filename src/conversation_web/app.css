@@ -52,3 +52,8 @@ dialog h2 { flex: 1; margin: 0; font-size: 21px }
 
 #list button { display: block; min-height: 46px; padding: 8px; width: 100%; color: var(--text); background: transparent; overflow-wrap: anywhere; text-align: left; border-bottom: 1px solid var(--line); border-radius: 0 }
 #list button[aria-current] { background: var(--accent-soft); color: var(--accent); font-weight: 600 }
+
+#connection, .queued small { color: var(--muted); font-size: 12px; line-height: 1.4 }
+#connection:empty { display: none }
+.queued small { display: block; margin-top: 6px; white-space: normal }
+.queued .button { display: block; min-height: 44px; margin-top: 4px }

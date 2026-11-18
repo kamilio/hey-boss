@@ -12,7 +12,7 @@ async page => {
       polls++;
       if (failed) return route.fulfill({status:503,body:''});
       const end=Math.min(p.before ?? Infinity,messages.get(chat).length), start=Math.max(0,end-50);
-      Object.assign(r,{chat,voice:{phase:'idle',detail:'Voice off'},start,end,revision});
+      Object.assign(r,{chat,queuedSend:true,canSend:true,voice:{phase:'idle',detail:'Voice off'},start,end,revision});
       if (p.revision!==revision || p.chat!==chat)
         Object.assign(r,{heading:'Start a conversation',messages:messages.get(chat).slice(start,end),tools,visuals});
     } else if (p.action === 'image') {
@@ -20,7 +20,7 @@ async page => {
       r.png=(await image.body()).toString('base64');
     } else if (p.action === 'send') {
       if (denySend) return route.fulfill({json:{status:'error',error:'Wait for the current turn to finish.'}});
-      messages.get(chat).push({speaker:'You',text:p.text}); revision++; sends++;
+      messages.get(chat).push({speaker:'You',text:p.text}); revision++; sends++; r.accepted=p.message;
       if (delayedReply) { sendAccepted(); await delayedReply; }
     } else if (p.action === 'open') { chat=p.chat; revision++; }
     else if (p.action === 'list') {
@@ -49,10 +49,10 @@ async page => {
   await open('First chat');
   await page.waitForFunction(()=>document.querySelector('#draft').value==='Keep this draft.');
   await page.getByRole('button',{name:'Send message'}).click();
-  await page.getByText('Wait for the current turn to finish.').waitFor();
-  if(await field.inputValue()!=='Keep this draft.') throw Error('Rejected send discarded the draft');
+  await notice.getByText('Wait for the current turn to finish.').waitFor();
+  if(await page.locator('#outbox').getByText('Keep this draft.',{exact:true}).count()!==1) throw Error('Rejected send discarded the queued message');
   denySend=false;
-  await page.getByRole('button',{name:'Send message'}).click();
+  await page.getByRole('button',{name:'Retry',exact:true}).click();
   await page.getByRole('article',{name:'You'}).getByText('Keep this draft.').waitFor();
   if(sends!==1 || await field.inputValue()!=='') throw Error('Retry did not send the draft exactly once');
   let release;
@@ -69,12 +69,12 @@ async page => {
   await field.press('Shift+Enter'); await page.keyboard.insertText('Third line');
   const multiline='First line\nSecond line\nThird line';
   if(await field.inputValue()!==multiline) throw Error('Paste or Shift+Return lost a line break');
-  await field.press('Enter'); await page.waitForFunction(()=>!document.querySelector('#draft').value);
-  if(messages.get(chat).at(-1).text!==multiline || sends!==3) throw Error('Return did not send the multiline message once');
-  failed=true; await notice.getByText('The Mac is unavailable.',{exact:false}).waitFor();
+  await field.press('Enter'); await page.waitForFunction(()=>!document.querySelector('#draft').value && !document.querySelector('#outbox').children.length);
+  if(messages.get(chat).at(-1).text!==multiline || sends!==3) throw Error('Return did not send the multiline message once: '+JSON.stringify({sends,last:messages.get(chat).at(-1),expected:multiline}));
+  failed=true; await page.locator('#connection').getByText('Offline',{exact:false}).waitFor();
   await field.fill('Offline draft.');
   failed=false;
-  await notice.waitFor({state:'hidden',timeout:6000});
+  await page.locator('#connection').waitFor({state:'hidden',timeout:6000});
   if(await field.inputValue()!=='Offline draft.') throw Error('Reconnect discarded the draft');
   // A live region should announce a change, not every identical polling response.
   await page.evaluate(()=>{
