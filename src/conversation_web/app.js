@@ -100,7 +100,11 @@ async function refresh() {
   connected=true;
   const previous = snapshot;
   if(!chat) {
-    try { $('draft').value=localStorage.getItem(draftKey(s.chat)) || $('draft').value; }
+    try {
+      $('draft').value=$('draft').value || localStorage.getItem(draftKey(s.chat)) || '';
+      if($('draft').value) localStorage.setItem(draftKey(s.chat),$('draft').value);
+      localStorage.removeItem(draftKey(null));
+    }
     catch { notice(Error('Could not read the saved draft on this device.')); }
   }
   chat = s.chat; snapshot = s;

@@ -3,14 +3,18 @@
 async (page, fixture) => {
   const origin=new URL(page.url()).origin, context=page.context();
   const first='10000000-0000-4000-8000-000000000000', second='20000000-0000-4000-8000-000000000000';
-  Object.assign(fixture,{chat:first,offline:false,busy:false,loseReply:false,revision:1,attempts:0,
+  Object.assign(fixture,{blockState:true,chat:first,offline:false,busy:false,loseReply:false,revision:1,attempts:0,
     accepted:new Map(),messages:new Map([[first,[]],[second,[]]])});
   const {accepted,messages}=fixture;
   // WebKit simulates a lost Mac connection; Chrome also disables browser networking.
   const disconnect=async offline=>{fixture.offline=offline;if(fixture.browser==='chrome')await context.setOffline(offline);};
+  const field=page.getByRole('textbox',{name:'Message'});
+  await field.fill('Draft before the first connection.');
+  fixture.blockState=false;
   await page.waitForFunction(()=>!!snapshot?.queuedSend);
   await page.waitForFunction(()=>!!navigator.serviceWorker.controller);
-  const field=page.getByRole('textbox',{name:'Message'});
+  await page.reload({waitUntil:'domcontentloaded'});
+  if(await field.inputValue()!=='Draft before the first connection.') throw Error('First connection lost the draft on reload');
   const send=async text=>{await field.fill(text);await page.getByRole('button',{name:'Send message'}).click();};
   await field.fill('Draft survives closing.');
   await disconnect(true);

@@ -9,6 +9,7 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/api' && fixture.messages){
   let body='';req.on('data',b=>body+=b);req.on('end',()=>{
    const p=JSON.parse(body),r={status:'ok'},chat=fixture.chat;
+   if(p.action==='state' && fixture.blockState){res.writeHead(503);res.end();return;}
    if(p.action==='state')Object.assign(r,{chat,queuedSend:true,canSend:!fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
    if(p.action==='send'){
     fixture.attempts++;
