@@ -5231,7 +5231,11 @@ func auditInterruptedChat(_ root: String) {
         guard let file = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).first(where: { $0.lastPathComponent.hasSuffix(".agent.jsonl") }),
               let data = try? Data(contentsOf: file) else { return false }
         let history = data.split(separator: 10).compactMap { try? JSONSerialization.jsonObject(with: Data($0)) as? [String: Any] }
-        return history.contains { $0["role"] as? String == "user" && $0["content"] as? String == sent }
+        return history.contains { row in
+            guard row["role"] as? String == "user", let content = row["content"] as? String,
+                  content.hasPrefix("Observed pre-focus desktop context: "), let separator = content.range(of: "\n\n") else { return false }
+            return content[separator.upperBound...] == sent
+        }
     }
     chat.stop("Done")
     chat.connect(ReviewAudio())
