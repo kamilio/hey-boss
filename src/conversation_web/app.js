@@ -113,14 +113,32 @@ async function refresh() {
 }
 function cleanup(v) {
   if (!v || v.closed) return;
-  v.closed = true; clearTimeout(v.timer); v.track?.getTracks().forEach(t => t.stop());
-  // An open worklet port keeps the finished call reachable in Safari.
-  if (v.mic) { v.mic.port.onmessage = null; v.mic.port.close(); }
+  v.closed = true; clearTimeout(v.timer);
+  v.track?.getTracks().forEach(t => { t.onended=null; t.stop(); });
+  for (const node of v.nodes) { try { node.stop(); } catch {} }
+  v.nodes.clear();
   v.wake?.release().catch(()=>{});
-  const closeAudio = () => v.ctx.close().catch(()=>{});
-  // Safari can deliver a pending unlock after close() has finished.
-  v.ctx.onstatechange = () => { if (v.ctx.state === 'running') closeAudio(); };
-  if (v.ctx.state !== 'closed') closeAudio();
+  let closing;
+  const closeAudio = () => {
+    clearTimeout(closing);
+    v.source?.disconnect(); v.mic?.disconnect();
+    // Close both the processor and its port: Chrome and Safari retain different edges.
+    if (v.mic) { v.mic.port.onmessage = null; v.mic.port.close(); }
+    const close = () => v.ctx.close().catch(()=>{});
+    // Safari can deliver a pending unlock after close() has finished.
+    v.ctx.onstatechange = () => { if (v.ctx.state === 'running') close(); };
+    if (v.ctx.state !== 'closed') close();
+  };
+  if (v.mic && v.ctx.state === 'running') {
+    v.mic.port.onmessage = ({data}) => {
+      if (data !== null) return;
+      clearTimeout(closing); v.source?.disconnect(); v.mic.disconnect();
+      // Let Chrome render the disconnected graph before closing its context.
+      closing = setTimeout(closeAudio,50);
+    };
+    v.mic.port.postMessage(null);
+    closing = setTimeout(closeAudio,250); // A suspended or failed worklet cannot acknowledge.
+  } else closeAudio();
   if (voice === v) voice = null;
   if (starting === v) starting = null;
   $('talk').disabled = false; $('talk').ariaLabel = 'Start voice'; $('talk').dataset.phase = 'idle';

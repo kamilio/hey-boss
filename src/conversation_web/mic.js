@@ -3,11 +3,13 @@ class ConversationMic extends AudioWorkletProcessor {
   constructor() {
     super(); this.chunk = new Int16Array(1280); this.used = this.phase = this.sum = this.n = 0;
     this.port.onmessage = ({data: muted}) => {
+      if (muted === null) { this.closed = true; return; }
       this.muted = muted;
       if (muted) this.used = this.phase = this.sum = this.n = 0;
     };
   }
   process(inputs) {
+    if (this.closed) { this.port.postMessage(null); return false; }
     if (this.muted) return true;
     for (const sample of inputs[0][0] || []) {
       this.sum += sample; this.n++; this.phase += 16000;

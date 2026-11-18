@@ -63,7 +63,10 @@ async (page) => {
         worklet.addModule=async url=>{await load(url); window.cancelledCall=starting; dispatchEvent(new PageTransitionEvent('pagehide'));};
       }
       oscillator.connect(dest); oscillator.start();
-      window.testMic=dest.stream.getAudioTracks()[0];
+      const track=dest.stream.getAudioTracks()[0], stop=track.stop.bind(track);
+      // The synthetic source must end with its track, as a real microphone does.
+      track.stop=()=>{oscillator.stop();oscillator.disconnect();stop();};
+      window.testMic=track;
       if(window.holdMic) await new Promise(resolve=>window.grantMic=resolve);
       return dest.stream;
     }});
