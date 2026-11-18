@@ -2,6 +2,8 @@
 const $ = id => document.getElementById(id);
 let chat, voice, starting, snapshot, after, refreshCount = 0, rendered, before;
 let connected = null, sending = false;
+let listing = false;
+const wide = matchMedia('(min-width: 800px)');
 const draftKey = id => 'conversation-draft:' + (id || 'new');
 const queuePrefix = 'conversation-send:';
 function queued() {
@@ -13,6 +15,8 @@ function connection() {
   $('talk').disabled = !!starting || (!voice && (!connected || (!!snapshot && snapshot.voice.phase!=='idle')));
   if(!connected && !voice) text($('status'),connected===null ? 'Connecting…' : 'Offline');
   $('fresh').disabled = !connected; $('history').disabled = !connected;
+  $('newChat').disabled = !connected;
+  for(const row of $('list').children) row.disabled=!connected;
   $('composer').querySelector('button').disabled = !chat;
 }
 function outbox() {
@@ -73,6 +77,7 @@ async function api(action, fields = {}) {
   catch { connected=false; connection(); throw Error('The Mac is unavailable. Check the connection and try again.'); }
   if (res.status === 403) {
     connected=false; connection();
+    $('chats').close();
     if (!$('pair').open) $('pair').show();
     throw Error('Pair this device to continue.');
   }
@@ -98,6 +103,7 @@ async function refresh() {
     catch { notice(Error('Could not save the draft on this device.')); }
     if (before!=null) { before=null; rendered=null; chat=s.chat; return refresh(); }
   }
+  const wasConnected = connected;
   connected=true;
   const previous = snapshot;
   if(!chat) {
@@ -184,6 +190,12 @@ async function refresh() {
     else if (follow) timeline.scrollTop = timeline.scrollHeight;
   }
   connection();
+  if(wide.matches && !$('pair').open && !$('chats').open) {
+    const focused=document.activeElement; $('chats').show(); focused?.focus({preventScroll:true});
+  }
+  let selectedRow=false;
+  for(const row of $('list').children) { const selected=row.dataset.chat===chat; if(selected)row.setAttribute('aria-current','true');else row.removeAttribute('aria-current'); selectedRow ||= selected; }
+  if($('chats').open && (!previous || (previous.chat!==chat && !selectedRow) || !wasConnected || (!after && $('list').children.length<=30 && (previous.end!==s.end || (previous.voice.phase!=='idle' && v.phase==='idle'))))) void list(true);
   try { outbox(); void flushQueue(); } catch { notice(Error('Could not read queued messages on this device.')); }
 }
 function cleanup(v) {
@@ -336,7 +348,7 @@ for (const id of ['mute','pause','interrupt']) act(id,async()=>{await api(id); a
 act('earlier',async()=>{before=snapshot.start;rendered=null;await refresh();});
 act('latest',async()=>{before=null;rendered=null;await refresh();});
 for (const action of ['allow','decline']) act(action,async()=>{await api(action,{text:snapshot.approval.id});await refresh();});
-act('fresh',async()=>{ if (voice) await stop(voice); await api('new'); before=null; rendered=null; await refresh(); });
+for(const id of ['fresh','newChat']) act(id,async()=>{ if (voice) await stop(voice); await api('new'); if(!wide.matches)$('chats').close(); before=null; rendered=null; await refresh(); });
 $('draft').onkeydown = e => {
   if (e.key==='Enter' && !e.shiftKey && !e.isComposing && e.keyCode!==229) {
     e.preventDefault(); if (!e.repeat) $('composer').requestSubmit();
@@ -357,23 +369,34 @@ $('composer').onsubmit = async e => {
     await flushQueue();
   } catch { notice(Error('Could not save on this device. Keep this page open or copy your message.')); }
 };
-async function list() {
-  const data=await api('list',{after}); after=data.next;
+async function list(reset=false) {
+  if(listing) return;
+  listing=true; $('more').disabled=true; $('retryChats').hidden=true;
+  try {
+  const data=await api('list',{after:reset ? null : after});
+  after=data.next;
+  if(reset) $('list').replaceChildren();
   for (const c of data.chats) {
-    const b=document.createElement('button'); b.textContent=c.title;
+    const b=document.createElement('button'); b.textContent=c.title; b.title=c.title; b.dataset.chat=c.id;
     if (c.id===chat) b.setAttribute('aria-current','true');
     b.onclick=async()=>{
-      $('chats').close();
+      if(!wide.matches) $('chats').close();
       if (c.id===chat) return;
       try{if(voice)await stop(voice);await api('open',{chat:c.id});before=null;rendered=null;await refresh();}catch(e){notice(e);}
     };
     $('list').append(b);
   }
-  if (!$('list').children.length) $('list').textContent='No saved chats yet.';
+  text($('chatStatus'),$('list').children.length ? '' : 'No saved chats yet.');
   $('more').hidden=!after;
+  } catch(e) {
+    text($('chatStatus'),'Couldn’t load chats. Check your Mac’s connection and retry.'); $('retryChats').hidden=false;
+  } finally { listing=false; $('more').disabled=false; }
 }
-act('history',async()=>{after=null;$('list').replaceChildren();await list();$('chats').showModal();});
-act('more',list); act('close',()=>$('chats').close());
+act('history',async()=>{await list(true);if(!$('pair').open && !$('chats').open)$('chats').showModal();$('history').ariaExpanded=String($('chats').open);});
+act('more',()=>list()); act('retryChats',()=>list(true)); act('close',()=>$('chats').close());
+$('chats').addEventListener('close',()=>{$('history').ariaExpanded=String($('chats').open);});
+$('chats').onclick=e=>{if(wide.matches || e.target!==$('chats'))return;const r=$('chats').getBoundingClientRect();if(e.clientX<r.left || e.clientX>r.right || e.clientY<r.top || e.clientY>r.bottom)$('chats').close();};
+wide.addEventListener('change',()=>{$('chats').close();if(wide.matches && !$('pair').open){$('chats').show();if(connected)void list(true);}});
 $('pairForm').onsubmit=async e=>{e.preventDefault();try{
   $('pairForm').querySelector('button').disabled=true; $('pairError').textContent='';
   const r=await fetch('/pair',{method:'POST',body:$('code').value.trim(),signal:AbortSignal.timeout(6500)});

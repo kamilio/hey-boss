@@ -1,0 +1,47 @@
+async (page, fixture) => {
+  page.setDefaultTimeout(15000);
+  const chats=Array.from({length:35},(_,i)=>({id:`10000000-0000-4000-8000-${String(i).padStart(12,'0')}`,title:i===0?'A long conversation title that should stay inside the sidebar':`Conversation ${i+1}`}));
+  const first=chats[0], second=chats[1], last=chats.at(-1);
+  Object.assign(fixture,{chat:first.id,chats,revision:1,messages:new Map(chats.map(c=>[c.id,[]]))});
+  await page.setViewportSize({width:1365,height:900});await page.reload();
+  await page.waitForFunction(()=>document.querySelectorAll('#list button').length===30);
+  if(!await page.locator('#chats').isVisible() || await page.locator('#chats').evaluate(el=>el.matches(':modal'))) throw Error('Desktop history is not a persistent sidebar');
+  const side=await page.locator('#chats').boundingBox(),main=await page.locator('#timeline').boundingBox();
+  if(side.x!==0 || side.x+side.width>main.x || side.height<700) throw Error('Sidebar overlaps or fails to fill the desktop');
+  if(await page.locator('#list button[aria-current]').getAttribute('data-chat')!==first.id) throw Error('Selected chat is not marked');
+  const draft=page.getByRole('textbox',{name:'Message',exact:true});await draft.fill('Keep my draft.');
+  await page.getByRole('button',{name:'More chats',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelectorAll('#list button').length===35);
+  await page.getByRole('button',{name:'Conversation 35',exact:true}).click();
+  await page.waitForFunction(id=>snapshot.chat===id,last.id);
+  if(!await page.locator('#chats').isVisible() || await draft.inputValue()!=='') throw Error('Switching chats closes desktop history or keeps the wrong draft');
+  if(await page.locator('#list button[aria-current]').getAttribute('data-chat')!==last.id) throw Error('Switching a later-page chat lost its selected row');
+  if(await page.locator('#list button[aria-current]').getAttribute('aria-current')!=='true') throw Error('Selected chat is not announced to assistive technology');
+  await page.getByRole('button',{name:first.title,exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#draft').value==='Keep my draft.');
+  await page.getByRole('button',{name:'New chat',exact:true}).click();
+  await page.waitForFunction(id=>snapshot.chat!==id,first.id);
+  await page.waitForFunction(()=>document.querySelector('#list button[aria-current]')?.textContent==='New chat');
+  if(await draft.inputValue()!=='') throw Error('New chat reused the old draft');
+  // The same list becomes a dismissible drawer on narrow screens.
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>!document.querySelector('#chats').open);
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.locator('#chats').waitFor({state:'visible'});
+  if(!await page.locator('#chats').evaluate(el=>el.matches(':modal'))) throw Error('Phone sidebar does not contain keyboard focus');
+  await page.keyboard.press('Escape');await page.waitForFunction(()=>!document.querySelector('#chats').open);
+  await page.waitForFunction(()=>document.querySelector('#history').getAttribute('aria-expanded')==='false');
+  await page.getByRole('button',{name:'Chats',exact:true}).click();
+  await page.getByRole('button',{name:'Conversation 2',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('#chats').open);
+  await page.waitForFunction(id=>snapshot.chat===id,second.id);
+  await page.setViewportSize({width:1365,height:900});
+  await page.waitForFunction(()=>document.querySelector('#chats').open);
+  if(await page.locator('#chats').evaluate(el=>el.matches(':modal'))) throw Error('Desktop resize retains a modal backdrop');
+  fixture.failList=true;await page.evaluate(()=>list(true));
+  if(!await page.locator('#retryChats').isVisible() || !await page.locator('#list button').count()) throw Error('List failure discards saved rows or has no retry');
+  fixture.failList=false;await page.locator('#retryChats').click();
+  await page.waitForFunction(()=>document.querySelector('#chatStatus').textContent==='');
+  if(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)) throw Error('Sidebar overflows the page');
+  return 'Conversations sidebar checks passed: persistent desktop list, selection, pagination, draft preservation, new chat, phone drawer, resize and retry';
+}

@@ -16,6 +16,12 @@ const server=http.createServer((req,res)=>{
  if(req.url==='/api' && fixture.messages){
   let body='';req.on('data',b=>body+=b);req.on('end',()=>{
    const p=JSON.parse(body),r={status:'ok'},chat=fixture.chat;
+   if(p.action==='list'){
+    if(fixture.failList){res.writeHead(503);res.end();return;}
+    const chats=fixture.chats || [...fixture.messages.keys()].map(id=>({id,title:'Saved conversation'}));
+    const start=p.after ? chats.findIndex(c=>c.id===p.after)+1 : 0;
+    r.chats=chats.slice(start,start+30);r.next=start+30<chats.length?r.chats.at(-1).id:null;
+   }
    if(p.action==='state' && fixture.blockState){res.writeHead(503);res.end();return;}
    if(p.action==='state')Object.assign(r,{chat,queuedSend:true,canSend:!fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
    if(p.action==='send'){
@@ -28,6 +34,10 @@ const server=http.createServer((req,res)=>{
     if(fixture.loseReply){fixture.loseReply=false;fixture.offline=true;req.socket.destroy();return;}
    }
    if(p.action==='open'){fixture.chat=p.chat;fixture.revision++;}
+   if(p.action==='new'){
+    fixture.chat=require('node:crypto').randomUUID();fixture.messages.set(fixture.chat,[]);fixture.revision++;
+    fixture.chats?.unshift({id:fixture.chat,title:'New chat'});
+   }
    res.setHeader('Content-Type','application/json');res.end(JSON.stringify(r));
   });return;
  }
@@ -41,7 +51,7 @@ const server=http.createServer((req,res)=>{
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
  try {
   for(const [name,engine] of [['webkit',webkit],['chrome',chromium]]) {
-   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js','conversation_pairing_checks.js']) {
+   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js','conversation_pairing_checks.js','conversation_sidebar_checks.js']) {
     const browser=await engine.launch(name==='chrome'?{channel:'chrome',headless:true}:{headless:true});
     try {
      for(const key of Object.keys(fixture))delete fixture[key];fixture.browser=name;
