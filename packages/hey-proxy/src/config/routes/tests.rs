@@ -273,13 +273,13 @@ fn file_parser_rejects_duplicate_keys_without_echoing_values() {
         r#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private","default":"other"}}"#,
     ] {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let path = dir.path().join("config.yaml");
         fs::write(&path, raw).unwrap();
         let error = match super::super::load(&path) {
             Ok(_) => panic!("accepted duplicate keys"),
             Err(error) => error.to_string(),
         };
-        assert!(error.contains("Invalid config JSON"));
+        assert!(error.contains("Invalid config YAML"));
         assert!(!error.contains("synthetic-private"));
     }
 }
@@ -301,8 +301,10 @@ fn paid_only_routes_and_explicit_leg_models_need_no_recommendations() {
 #[test]
 fn documented_rules_resolve_to_the_expected_order_and_billing() {
     let c = Arc::new(
-        config(serde_json::from_str(include_str!("../../../examples/routes.config.json")).unwrap())
-            .unwrap(),
+        config(
+            serde_yaml_ng::from_str(include_str!("../../../examples/routes.config.yaml")).unwrap(),
+        )
+        .unwrap(),
     );
     for (model, path, expected) in [
         (

@@ -2,7 +2,9 @@ use super::*;
 use hey_proxy::usage::{Client, State as UsageState};
 
 fn config() -> Arc<Config> {
-    Arc::new(serde_json::from_str(include_str!("../../../../examples/routes.config.json")).unwrap())
+    Arc::new(
+        serde_yaml_ng::from_str(include_str!("../../../../examples/routes.config.yaml")).unwrap(),
+    )
 }
 fn readings(config: &Config) -> BTreeMap<String, AccountUsage> {
     config.worker_candidates.iter().map(|c| {

@@ -881,69 +881,20 @@ pub fn validate_root_url(value: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn default_path(home: &Path) -> Result<std::path::PathBuf> {
-    let directory = home.join(".hey-boss/proxy");
-    let legacy = home.join(".hey-proxy");
-    if legacy.exists() && !directory.exists() {
-        fs::create_dir_all(directory.parent().unwrap())?;
-        fs::rename(&legacy, &directory)
-            .context("Cannot move proxy directory to ~/.hey-boss/proxy")?;
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&directory, &legacy)?;
-    }
-    let path = directory.join("config.yaml");
-    let old = directory.join("config.json");
-    if !path.exists() && old.exists() {
-        // Convert the encrypted document, not the decrypted runtime configuration.
-        // Sibling OAuth stores and encryption keys retain their names.
-        load(&old)?;
-        let value = read_value(&fs::read(&old)?, &old)?;
-        let mut file = tempfile::NamedTempFile::new_in(&directory)?;
-        file.write_all(&encode(&value, &path)?)?;
-        file.as_file().sync_all()?;
-        file.persist_noclobber(&path)?;
-        load(&path)?;
-        fs::remove_file(old)?;
-    }
-    Ok(path)
+pub fn default_path(home: &Path) -> std::path::PathBuf {
+    home.join(".hey-boss/proxy/config.yaml")
 }
 
-pub(super) fn read_value(content: &[u8], path: &Path) -> Result<serde_json::Value> {
-    let value = if matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("yaml" | "yml")
-    ) {
-        serde_yaml_ng::from_slice::<json::UniqueValue>(content).map_err(|e| {
-            let location = e.location();
-            anyhow::anyhow!(
-                "Invalid config YAML at line {}, column {}",
-                location.as_ref().map_or(0, |l| l.line()),
-                location.as_ref().map_or(0, |l| l.column())
-            )
-        })?
-    } else {
-        serde_json::from_slice::<json::UniqueValue>(content).map_err(|e| {
-            anyhow::anyhow!(
-                "Invalid config JSON at line {}, column {}",
-                e.line(),
-                e.column()
-            )
-        })?
-    };
+pub(super) fn read_value(content: &[u8]) -> Result<serde_json::Value> {
+    let value = serde_yaml_ng::from_slice::<json::UniqueValue>(content).map_err(|e| {
+        let location = e.location();
+        anyhow::anyhow!(
+            "Invalid config YAML at line {}, column {}",
+            location.as_ref().map_or(0, |l| l.line()),
+            location.as_ref().map_or(0, |l| l.column())
+        )
+    })?;
     Ok(value.0)
-}
-
-pub(super) fn encode(value: &serde_json::Value, path: &Path) -> Result<Vec<u8>> {
-    if matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("yaml" | "yml")
-    ) {
-        Ok(serde_yaml_ng::to_string(value)?.into_bytes())
-    } else {
-        let mut bytes = serde_json::to_vec_pretty(value)?;
-        bytes.push(b'\n');
-        Ok(bytes)
-    }
 }
 
 pub fn load_or_create(path: &Path) -> Result<Config> {
@@ -969,15 +920,13 @@ pub fn load_or_create(path: &Path) -> Result<Config> {
         }
         match options.open(path) {
             Ok(mut file) => {
-                let content = encode(
-                    &serde_json::json!({
-                        "listen":"127.0.0.1:8080",
-                        "providers":{"openai":{"api_keys":{}}},
-                        "aliases":[], "fallbacks":{}
-                    }),
-                    path,
-                )?;
-                file.write_all(&content).context("Cannot write config")?;
+                let content = serde_yaml_ng::to_string(&serde_json::json!({
+                    "listen":"127.0.0.1:8080",
+                    "providers":{"openai":{"api_keys":{}}},
+                    "aliases":[], "fallbacks":{}
+                }))?;
+                file.write_all(content.as_bytes())
+                    .context("Cannot write config")?;
                 file.sync_all()?;
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1000,7 +949,7 @@ pub fn protect(path: &Path) -> Result<Config> {
 }
 
 fn parse(content: &[u8], path: &Path) -> Result<Config> {
-    let mut value = read_value(content, path)?;
+    let mut value = read_value(content)?;
     secrets::decrypt(&mut value, path)?;
     let config: Config =
         serde_json::from_value(value).map_err(|_| anyhow::anyhow!("Invalid config fields"))?;
@@ -1051,28 +1000,23 @@ mod tests {
         }
     }
     #[test]
-    fn auto_approve_loads_and_roundtrips_across_json_and_yaml() {
+    fn auto_approve_loads_and_roundtrips_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        for extension in ["json", "yaml"] {
-            let path = dir.path().join(format!("config.{extension}"));
-            for enabled in [false, true] {
-                let raw = encode(
-                    &serde_json::json!({
-                        "listen": "127.0.0.1:8080",
-                        "auto_approve": enabled,
-                        "providers": {"claude": {}}
-                    }),
-                    &path,
-                )
-                .unwrap();
-                fs::write(&path, &raw).unwrap();
-                let config = load(&path).unwrap();
-                assert_eq!(config.auto_approve, enabled);
-                assert!(config.claude.is_some());
-                assert!(!config.skip_blocked_security_work);
-                let exported = serde_json::to_value(&config).unwrap();
-                assert_eq!(exported["auto_approve"], enabled);
-            }
+        let path = dir.path().join("config.yaml");
+        for enabled in [false, true] {
+            let raw = serde_yaml_ng::to_string(&serde_json::json!({
+                "listen": "127.0.0.1:8080",
+                "auto_approve": enabled,
+                "providers": {"claude": {}}
+            }))
+            .unwrap();
+            fs::write(&path, &raw).unwrap();
+            let config = load(&path).unwrap();
+            assert_eq!(config.auto_approve, enabled);
+            assert!(config.claude.is_some());
+            assert!(!config.skip_blocked_security_work);
+            let exported = serde_json::to_value(&config).unwrap();
+            assert_eq!(exported["auto_approve"], enabled);
         }
     }
 
@@ -1160,7 +1104,7 @@ mod tests {
     #[test]
     fn protects_literal_api_keys_in_opaque_encrypted_fields_and_preserves_references() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let path = dir.path().join("config.yaml");
         let raw = serde_json::json!({
             "listen": "127.0.0.1:8080",
             "providers": {
@@ -1189,7 +1133,7 @@ mod tests {
         let on_disk = fs::read_to_string(&path).unwrap();
         assert!(!on_disk.contains("sk-literal-openai-secret"));
         assert!(!on_disk.contains("AIza-literal-gemini-secret"));
-        let stored: serde_json::Value = serde_json::from_str(&on_disk).unwrap();
+        let stored: serde_json::Value = serde_yaml_ng::from_str(&on_disk).unwrap();
         assert!(
             stored["providers"]["openai"]["api_keys"]["default"]["encrypted"]
                 .as_str()
@@ -1240,7 +1184,7 @@ mod tests {
                 "connection":{"url":"http://127.0.0.1:9090","api_key":"synthetic-host"}}),
         ] {
             let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("config.json");
+            let path = dir.path().join("config.yaml");
             fs::write(&path, serde_json::to_vec(&raw).unwrap()).unwrap();
             let expected = serde_json::to_value(load(&path).unwrap()).unwrap();
             protect(&path).unwrap();
@@ -1252,7 +1196,7 @@ mod tests {
 
             // Editing a single key leaves all other encrypted fields intact.
             let mut stored: serde_json::Value =
-                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+                serde_yaml_ng::from_slice(&fs::read(&path).unwrap()).unwrap();
             let pointer = if raw.get("connection").is_some() {
                 "/connection/api_key"
             } else {
@@ -1276,7 +1220,7 @@ mod tests {
     #[test]
     fn damaged_encryption_fails_closed_without_rewriting_or_disclosing_credentials() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let path = dir.path().join("config.yaml");
         fs::write(
             &path,
             br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private-key"}}"#,
@@ -1310,7 +1254,7 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), encrypted);
         fs::write(&key_path, key).unwrap();
 
-        let mut stored: serde_json::Value = serde_json::from_slice(&encrypted).unwrap();
+        let mut stored: serde_json::Value = serde_yaml_ng::from_slice(&encrypted).unwrap();
         let ciphertext = stored["api_keys"]["default"]["encrypted"]
             .as_str()
             .unwrap()
@@ -1339,13 +1283,13 @@ mod tests {
     fn encrypted_config_symlinks_use_the_target_key_and_reject_public_key_permissions() {
         use std::os::unix::{fs::PermissionsExt, fs::symlink};
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let path = dir.path().join("config.yaml");
         fs::write(
             &path,
             br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"synthetic-private-key"}}"#,
         )
         .unwrap();
-        let link = dir.path().join("linked.json");
+        let link = dir.path().join("linked.yaml");
         symlink(&path, &link).unwrap();
         protect(&link).unwrap();
         assert!(link.is_symlink());
@@ -1363,10 +1307,10 @@ mod tests {
     }
 
     #[test]
-    fn reference_only_and_invalid_configs_are_not_migrated() {
+    fn reference_only_and_invalid_configs_are_not_encrypted() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
-        let references = br#"{"listen":"127.0.0.1:8080","api_keys":{"default":"op://Vault/Item/key","shell":"sh://printf synthetic"}}"#;
+        let path = dir.path().join("config.yaml");
+        let references = b"listen: 127.0.0.1:8080\napi_keys:\n  default: op://Vault/Item/key\n  shell: sh://printf synthetic\n";
         fs::write(&path, references).unwrap();
         protect(&path).unwrap();
         assert_eq!(fs::read(&path).unwrap(), references);
@@ -1382,7 +1326,7 @@ mod tests {
     #[test]
     fn creates_private_config_and_preserves_edits() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("nested/config.json");
+        let path = dir.path().join("nested/config.yaml");
         let mut config = load_or_create(&path).unwrap();
         config.api_keys.insert("default".into(), "edited".into());
         fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();

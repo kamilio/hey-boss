@@ -1,4 +1,4 @@
-//! Reject duplicate JSON keys before serde_json::Value can silently erase them.
+//! Reject duplicate config keys before serde_json::Value can silently erase them.
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use std::fmt;
@@ -10,7 +10,7 @@ impl<'de> Deserialize<'de> for UniqueValue {
         impl<'de> Visitor<'de> for UniqueVisitor {
             type Value = UniqueValue;
             fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("JSON without duplicate object keys")
+                f.write_str("config without duplicate object keys")
             }
             fn visit_bool<E: de::Error>(self, value: bool) -> Result<Self::Value, E> {
                 Ok(UniqueValue(Value::Bool(value)))

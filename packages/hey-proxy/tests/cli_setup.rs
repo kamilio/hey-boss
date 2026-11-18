@@ -56,7 +56,7 @@ fn init_is_minimal_private_and_preserves_existing_proxy_and_codex_files() {
     let path = home.join(".hey-boss/proxy/config.yaml");
     let generated: Value = serde_yaml_ng::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     let expected: Value =
-        serde_json::from_str(include_str!("../examples/minimal.config.json")).unwrap();
+        serde_yaml_ng::from_str(include_str!("../examples/minimal.config.yaml")).unwrap();
     assert_eq!(generated, expected);
     #[cfg(unix)]
     {
@@ -151,49 +151,41 @@ fn yaml_comments_can_disable_the_egress_proxy_without_rewriting_the_file() {
 }
 
 #[test]
-fn legacy_proxy_directory_moves_with_credentials_and_no_config_copy() {
+fn help_shows_default_path_without_migrating_legacy_config() {
     let dir = tempfile::tempdir().unwrap();
     let old = dir.path().join(".hey-proxy");
     std::fs::create_dir(&old).unwrap();
-    std::fs::write(old.join("config.json"), r#"{"listen":"127.0.0.1:8080","providers":{"openai":{"api_keys":{"default":"synthetic-migration-secret"}}}}"#).unwrap();
+    let legacy = old.join("config.json");
+    let sentinel = b"legacy config must remain untouched";
+    std::fs::write(&legacy, sentinel).unwrap();
+    let path = dir.path().join(".hey-boss/proxy/config.yaml");
+    for args in [vec!["--help"], vec!["verify", "--help"]] {
+        let output = cli(dir.path()).args(args).output().unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains(path.to_str().unwrap()));
+        assert!(!path.parent().unwrap().exists());
+    }
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let old_json = path.with_extension("json");
+    std::fs::write(&old_json, sentinel).unwrap();
     assert!(
         cli(dir.path())
-            .args(["--config"])
-            .arg(old.join("config.json"))
-            .arg("encrypt-config")
+            .arg("--init")
             .output()
             .unwrap()
             .status
             .success()
     );
-    let key = std::fs::read(old.join("config.credentials.key")).unwrap();
-    std::fs::write(old.join("config.codex.json"), "credential-sentinel").unwrap();
-    let output = cli(dir.path()).arg("--init").output().unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let new = dir.path().join(".hey-boss/proxy");
-    // Launch agents and helpers keep absolute ~/.hey-proxy paths.
-    assert_eq!(std::fs::read_link(&old).unwrap(), new);
-    assert!(!new.join("config.json").exists());
-    let yaml = std::fs::read_to_string(new.join("config.yaml")).unwrap();
-    assert!(!yaml.contains("synthetic-migration-secret"));
-    assert_eq!(
-        std::fs::read(new.join("config.credentials.key")).unwrap(),
-        key
-    );
-    assert_eq!(
-        std::fs::read_to_string(new.join("config.codex.json")).unwrap(),
-        "credential-sentinel"
-    );
+    assert!(path.exists());
+    assert!(!old.is_symlink());
+    assert_eq!(std::fs::read(legacy).unwrap(), sentinel);
+    assert_eq!(std::fs::read(old_json).unwrap(), sentinel);
 }
 
 #[test]
 fn explicit_missing_config_fails_instead_of_creating_one_without_credentials() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("moved/config.json");
+    let path = dir.path().join("moved/config.yaml");
     let output = cli(dir.path())
         .arg("--config")
         .arg(&path)
@@ -218,7 +210,7 @@ fn all_user_examples_validate_without_resolving_credentials_or_changing_files() 
     for entry in std::fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("examples")).unwrap()
     {
         let path = entry.unwrap().path();
-        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        if path.extension().and_then(|s| s.to_str()) != Some("yaml") {
             continue;
         }
         let bytes = std::fs::read(&path).unwrap();
@@ -674,8 +666,8 @@ fn configure_pi_registry_rejects_invalid_budgets_before_writes() {
 #[test]
 fn routing_diagnostic_is_offline_redacted_and_does_not_rewrite_profiles() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("routes.json");
-    let raw = include_bytes!("../examples/routes.config.json");
+    let path = dir.path().join("routes.yaml");
+    let raw = include_bytes!("../examples/routes.config.yaml");
     std::fs::write(&path, raw).unwrap();
     let codex = dir.path().join("codex");
     std::fs::create_dir(&codex).unwrap();

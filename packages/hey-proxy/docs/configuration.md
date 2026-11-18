@@ -37,10 +37,10 @@ An alias's `api_key` is the project name, never the key itself. A reasoning rout
 Starting the proxy, applying a valid hot reload, or installing remotely replaces literal OpenAI and Gemini API keys, bearer tokens, and client `connection.api_key` values with objects of the form `{"encrypted":"v1:..."}`. Both the current `providers` layout and legacy top-level `api_keys` / `gemini` fields are supported. `sh://` and `op://` references stay unchanged and resolve at runtime. To encrypt without starting the service, run:
 
 ```sh
-hey-proxy --config /path/to/config.json encrypt-config
+hey-proxy --config /path/to/config.yaml encrypt-config
 ```
 
-Encryption uses AES-256-GCM-SIV with a random nonce and a local 32-byte key. For `config.json`, that key is `config.credentials.key` beside the config. On Unix, the migrated config and key have mode `600`; encryption rejects a key readable by other users. Migration validates first and replaces the config atomically without making a plaintext backup. Existing encrypted fields are preserved when another key is edited.
+Encryption uses AES-256-GCM-SIV with a random nonce and a local 32-byte key. For `config.yaml`, that key is `config.credentials.key` beside the config. On Unix, the encrypted config and key have mode `600`; encryption rejects a key readable by other users. Encryption validates first and replaces the config atomically without making a plaintext backup. Existing encrypted fields are preserved when another key is edited.
 
 Keep the config and its matching key together when backing up or moving them. A symlink uses the target config's key. Missing keys, damaged ciphertext, and unsupported encryption versions fail validation; an invalid hot reload leaves the last valid config active. To rotate an API key, replace its encrypted object with the new string and reload or run `encrypt-config`. The key file protects against disclosure of the config alone; anyone who can read both files can decrypt the credentials.
 

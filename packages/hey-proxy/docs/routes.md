@@ -4,7 +4,7 @@ Top-level routes select named providers in order for inference, independently of
 
 Use `"model":"*", "api_shape":"responses"` for a default Responses route, preserving the requested model. Defaults require an API shape so they cannot capture another provider's API. Exact routes, legacy aliases, and non-OpenAI provider prefixes take precedence. `openai/gpt-6-astra` uses the default route with upstream model `gpt-6-astra`, bypassing rules for the bare name; rules explicitly matching the prefixed name still win. A default Codex subscription leg can coexist with a `gpt-6-astra → ultima-alpha` alias using its Alpha API key. Omit paid legs to keep API credentials available without automatic paid fallback.
 
-The existing [`accounts`](named-accounts.md) map names provider instances. Top-level `routes` matches the original logical model exactly and lists provider legs in attempt order. It is independent of worker settings. [`routes.config.json`](../examples/routes.config.json) is a complete synthetic example:
+The existing [`accounts`](named-accounts.md) map names provider instances. Top-level `routes` matches the original logical model exactly and lists provider legs in attempt order. It is independent of worker settings. [`routes.config.yaml`](../examples/routes.config.yaml) is a complete synthetic example:
 
 ```json
 "routes": [
@@ -41,9 +41,9 @@ Billing mode is derived from the selected account: `included_subscription` or `p
 A revision identifies one loaded snapshot, survives clones/selection, and changes on a new load. It is neither a credential fingerprint nor a cross-process content hash. Hot reload validates the whole file before publication; invalid edits retain the previous snapshot. In-flight plans retain their original account definitions and overrides across later attempts. No profile setup command is invoked by loading or resolving routes.
 
 ```sh
-hey-proxy --config examples/routes.config.json resolve-route gpt-6-astra
-hey-proxy --config examples/routes.config.json resolve-route gpt-6.1-sol
-hey-proxy --config examples/routes.config.json resolve-route claude-sonnet-5-5 --path /v1/messages
+hey-proxy --config examples/routes.config.yaml resolve-route gpt-6-astra
+hey-proxy --config examples/routes.config.yaml resolve-route gpt-6.1-sol
+hey-proxy --config examples/routes.config.yaml resolve-route claude-sonnet-5-5 --path /v1/messages
 ```
 
 The diagnostic emits safe metadata and `forwarding: "active"`, never resolves credentials or sends inference requests. An unmatched model reports `legacy`; a relay reports `relay`.

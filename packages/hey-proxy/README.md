@@ -11,24 +11,20 @@ cargo install --path packages/hey-proxy --locked
 hey-proxy --init
 ```
 
-Configuration, credentials and state live in `~/.hey-boss/proxy/`. Existing
-`~/.hey-proxy/` installations move there on first use. JSON configs passed with
-`--config` remain supported. YAML supports commented settings, for example
+Configuration, credentials and state live in `~/.hey-boss/proxy/`.
+`hey-proxy --help` shows the full default config path. Config files use YAML,
+which supports commented settings, for example
 `# proxy_url: socks5h://127.0.0.1:18083`.
 
 This creates `~/.hey-boss/proxy/config.yaml` if it is missing:
 
-```json
-{
-  "listen": "127.0.0.1:8080",
-  "providers": {
-    "openai": {
-      "api_keys": {}
-    }
-  },
-  "aliases": [],
-  "fallbacks": {}
-}
+```yaml
+listen: 127.0.0.1:8080
+providers:
+  openai:
+    api_keys: {}
+aliases: []
+fallbacks: {}
 ```
 
 Normal startup also creates this file if needed. Existing proxy configs are preserved. The initial config has no credentials, model overwrites, or remote hosts. Configure a provider below, then start:
@@ -189,7 +185,7 @@ Restrict a rule to an API shape with `"api_shape": "responses"`, `"chat_completi
 
 For a chat-only client using a Responses model or Gemini, set its base URL to **`http://127.0.0.1:8080/v1/custom`**. The [custom Chat Completions adapter](docs/custom-chat-completions.md) supports streaming, tools, and OpenRouter-style reasoning replay.
 
-Model routing and credential changes apply to new requests without restarting. Invalid edits leave the last valid config active. See the complete [overwrite example](examples/overwrites.config.json).
+Model routing and credential changes apply to new requests without restarting. Invalid edits leave the last valid config active. See the complete [overwrite example](examples/overwrites.config.yaml).
 
 ## Custom Messages / Claude Code
 
@@ -222,7 +218,7 @@ Add `gemini` beside `openai` in `providers`:
 }
 ```
 
-The default Gemini endpoint is Google's Generative Language API. See the complete [API-key example](examples/gemini-api-key.config.json).
+The default Gemini endpoint is Google's Generative Language API. See the complete [API-key example](examples/gemini-api-key.config.yaml).
 
 ### Google Cloud / Vertex AI with ADC
 
@@ -253,7 +249,7 @@ Use ADC to connect with your Google Cloud identity instead of managing an API ke
    hey-proxy check-credentials
    ```
 
-ADC uses the Google Rust SDK to discover, cache, and refresh credentials. No `api_key` field or per-request `gcloud` command is needed. In a cloud environment, ADC can use the attached service identity. See [Google's ADC setup guide](https://cloud.google.com/docs/authentication/provide-credentials-adc) and the complete [Vertex AI example](examples/gemini-adc.config.json).
+ADC uses the Google Rust SDK to discover, cache, and refresh credentials. No `api_key` field or per-request `gcloud` command is needed. In a cloud environment, ADC can use the attached service identity. See [Google's ADC setup guide](https://cloud.google.com/docs/authentication/provide-credentials-adc) and the complete [Vertex AI example](examples/gemini-adc.config.yaml).
 
 ### Use Gemini's native API
 
@@ -322,7 +318,7 @@ hey-proxy configure-pi
 pi
 ```
 
-Everything comes from your proxy config, so there is nothing to type. The command writes a `hey-proxy` provider to `~/.pi/agent/models.json` using the address the proxy listens on and the Responses API, and generates its model list from your overwrites: every overwrite name plus the model each one routes to. With the [overwrite example](examples/overwrites.config.json) above, Pi offers `coding`, `fast` and `reasoning` alongside `gpt-4.1`, `gpt-4.1-mini`, `gpt-5` and `gpt-5-mini`. An overwrite with `reasoning` or `reasoning_routes` is marked as a thinking model, so Pi sends the effort level your routes select on. It then points `defaultProvider` and `defaultModel` in `~/.pi/agent/settings.json` at the proxy and your first overwrite. Switch models inside Pi with Ctrl+P, and save a different startup model with `/model` and Ctrl+S.
+Everything comes from your proxy config, so there is nothing to type. The command writes a `hey-proxy` provider to `~/.pi/agent/models.json` using the address the proxy listens on and the Responses API, and generates its model list from your overwrites: every overwrite name plus the model each one routes to. With the [overwrite example](examples/overwrites.config.yaml) above, Pi offers `coding`, `fast` and `reasoning` alongside `gpt-4.1`, `gpt-4.1-mini`, `gpt-5` and `gpt-5-mini`. An overwrite with `reasoning` or `reasoning_routes` is marked as a thinking model, so Pi sends the effort level your routes select on. It then points `defaultProvider` and `defaultModel` in `~/.pi/agent/settings.json` at the proxy and your first overwrite. Switch models inside Pi with Ctrl+P, and save a different startup model with `/model` and Ctrl+S.
 
 Put model limits and compaction budgets in the proxy config's [`model_registry`](docs/configuration.md#model-budget-registry). This is the authoritative source for `configure-pi`: define each backend once and every alias inherits it. For example:
 
@@ -369,7 +365,7 @@ Add alternatives in the order you want them tried:
 
 Fallback lookup uses the model **after overwrites**, including reasoning routes. A `coding → gpt-4.1` overwrite uses this rule. A route directly to `gpt-4.1-mini` does not inherit it.
 
-The proxy waits for the current model to succeed or fail. It does not switch because a response is slow. Transient failures before output can advance to the next model; once text, reasoning, or a tool call starts, the current stream remains intact. Authentication, invalid-request, billing, and policy errors are returned directly. See [fallback behavior](docs/fallbacks.md) and a complete [config example](examples/fallback.config.json).
+The proxy waits for the current model to succeed or fail. It does not switch because a response is slow. Transient failures before output can advance to the next model; once text, reasoning, or a tool call starts, the current stream remains intact. Authentication, invalid-request, billing, and policy errors are returned directly. See [fallback behavior](docs/fallbacks.md) and a complete [config example](examples/fallback.config.yaml).
 
 ## Credentials
 

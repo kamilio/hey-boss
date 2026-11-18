@@ -21,8 +21,7 @@ use std::{net::SocketAddr, path::PathBuf};
 struct Args {
     #[arg(long, global = true, help = format!(
         "Config file (default: {})",
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "~".into()))
-            .join(".hey-boss/proxy/config.yaml")
+        config::default_path(&PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "~".into())))
             .display()
     ))]
     config: Option<PathBuf>,
@@ -159,9 +158,9 @@ enum Command {
 fn config_path(config: Option<PathBuf>) -> Result<PathBuf> {
     match config {
         Some(path) => Ok(path),
-        None => config::default_path(&PathBuf::from(
+        None => Ok(config::default_path(&PathBuf::from(
             std::env::var_os("HOME").context("HOME is not set; use --config")?,
-        )),
+        ))),
     }
 }
 

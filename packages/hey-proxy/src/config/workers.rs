@@ -95,7 +95,7 @@ mod tests {
     use serde_json::json;
     fn config() -> Config {
         let mut value: serde_json::Value =
-            serde_json::from_str(include_str!("../../examples/routes.config.json")).unwrap();
+            serde_yaml_ng::from_str(include_str!("../../examples/routes.config.yaml")).unwrap();
         value["worker_candidates"] = json!([
             {"provider":"codex-work","model":"gpt-6.1-sol","runtime":"codex"},
             {"provider":"claude-personal","model":"claude-sonnet-5-5","runtime":"claude"}]);

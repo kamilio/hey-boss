@@ -1807,7 +1807,7 @@ mod tests {
             "src/proxy/messages.rs",
             "src/proxy/messages/gemini.rs",
             "build.rs",
-            "examples/minimal.config.json",
+            "examples/minimal.config.yaml",
         ] {
             assert!(
                 package.join(file).exists(),

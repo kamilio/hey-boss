@@ -135,7 +135,7 @@ pub(super) fn decrypt(value: &mut Value, path: &Path) -> Result<()> {
 pub(super) fn protect(path: &Path) -> Result<super::Config> {
     let path = fs::canonicalize(path).context("Cannot locate config")?;
     let config = super::load(&path)?;
-    let mut value = super::read_value(&fs::read(&path)?, &path)?;
+    let mut value = super::read_value(&fs::read(&path)?)?;
     let mut needs_encryption = false;
     visit(&mut value, |v| {
         needs_encryption |= v.as_str().is_some_and(|s| {
@@ -143,10 +143,8 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         });
         Ok(())
     })?;
-    let convert_yaml = matches!(
-        path.extension().and_then(|s| s.to_str()),
-        Some("yaml" | "yml")
-    ) && fs::read(&path)?
+    // Persist rollout transport JSON as YAML even when no keys need encryption.
+    let convert_yaml = fs::read(&path)?
         .iter()
         .copied()
         .find(|c| !c.is_ascii_whitespace())
@@ -166,7 +164,7 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         .context("Credential migration is busy; retry shortly")?;
     let original = fs::read(&path)?;
     let config = super::parse(&original, &path)?;
-    let mut value = super::read_value(&original, &path)?;
+    let mut value = super::read_value(&original)?;
     let cipher = Aes256GcmSiv::new((&key(&path, true)?).into());
     visit(&mut value, |value| {
         let Some(secret) = value.as_str().filter(|s| {
@@ -190,7 +188,7 @@ pub(super) fn protect(path: &Path) -> Result<super::Config> {
         Ok(())
     })?;
     let mut file = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
-    file.write_all(&super::encode(&value, &path)?)?;
+    file.write_all(serde_yaml_ng::to_string(&value)?.as_bytes())?;
     file.as_file().sync_all()?;
     // Do not overwrite an editor's changes made while encryption was running.
     if fs::read(&path)? != original {

@@ -14,7 +14,7 @@ Add `claude` to `providers` in `~/.hey-boss/proxy/config.yaml` (keep any existin
 }
 ```
 
-Or use the complete [Claude-only config](../examples/claude.config.json).
+Or use the complete [Claude-only config](../examples/claude.config.yaml).
 
 Sign in once on the machine running the proxy:
 
@@ -51,7 +51,7 @@ Upstream inference errors, `Retry-After`, and Anthropic rate-limit headers pass 
 
 ## Credential ownership
 
-For `config.json`, the default encrypted store is `config.claude.json`, with a private sibling `config.claude.key` and a lock file. Access and refresh tokens are encrypted together with AES-256-GCM-SIV. Token/key files are mode 0600 on Unix. Keep the store and key together; anyone able to read both can decrypt the tokens. They are never returned to clients or included in request history/config exports.
+For `config.yaml`, the default encrypted store is `config.claude.json`, with a private sibling `config.claude.key` and a lock file. Access and refresh tokens are encrypted together with AES-256-GCM-SIV. Token/key files are mode 0600 on Unix. Keep the store and key together; anyone able to read both can decrypt the tokens. They are never returned to clients or included in request history/config exports.
 
 Access tokens are cached in memory. Active traffic revalidates the proxy-owned files in the background after 250 ms; file errors invalidate cached credentials. After two seconds without successful validation, requests revalidate before using the token, including the first request after idle time. HTTP 401 invalidates the rejected token immediately. Cold reads, decryption and durable saves run outside the async request workers.
 
@@ -91,7 +91,7 @@ For the optional installed-client smoke test, run `uv run --with cryptography te
 
 ```sh
 hey-proxy usage
-hey-proxy --config /path/to/config.json usage --json
+hey-proxy --config /path/to/config.yaml usage --json
 hey-proxy usage --accounts --json
 hey-proxy usage --provider claude --account default
 hey-proxy usage --base-url https://your-proxy --token-env HEY_PROXY_TOKEN
