@@ -5,6 +5,7 @@ async page => {
   let chat = chatA, failed = false, denySend = true, sends = 0, revision = 1, polls = 0, lists = 0;
   const messages = new Map([[chatA, []], [chatB, []]]);
   const tools=[], visuals=[];
+  let sendAccepted, delayedReply;
   await page.route(origin+'/api', async route => {
     const p = route.request().postDataJSON(), r = {status:'ok'};
     if (p.action === 'state') {
@@ -20,6 +21,7 @@ async page => {
     } else if (p.action === 'send') {
       if (denySend) return route.fulfill({json:{status:'error',error:'Wait for the current turn to finish.'}});
       messages.get(chat).push({speaker:'You',text:p.text}); revision++; sends++;
+      if (delayedReply) { sendAccepted(); await delayedReply; }
     } else if (p.action === 'open') { chat=p.chat; revision++; }
     else if (p.action === 'list') {
       lists++;
@@ -53,6 +55,16 @@ async page => {
   await page.getByRole('button',{name:'Send message'}).click();
   await page.getByRole('article',{name:'You'}).getByText('Keep this draft.').waitFor();
   if(sends!==1 || await field.inputValue()!=='') throw Error('Retry did not send the draft exactly once');
+  let release;
+  delayedReply=new Promise(resolve=>release=resolve);
+  const accepted=new Promise(resolve=>sendAccepted=resolve);
+  await field.fill('Another draft.'); await page.getByRole('button',{name:'Send message'}).click(); await accepted;
+  chat=chatB; revision++;
+  await page.waitForFunction(id=>snapshot.chat===id,chatB);
+  release(); await page.waitForFunction(()=>!document.querySelector('#composer button').disabled);
+  if(await field.inputValue()!=='Another draft.') throw Error('Send acknowledgment erased the other chat’s draft');
+  await open('First chat'); await page.waitForFunction(id=>snapshot.chat===id,chatA);
+  if(await field.inputValue()!=='') throw Error('Returning to the original chat restored an already sent draft');
   failed=true; await notice.getByText('The Mac is unavailable.',{exact:false}).waitFor();
   await field.fill('Offline draft.');
   failed=false;

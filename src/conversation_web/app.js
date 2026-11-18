@@ -216,10 +216,15 @@ act('earlier',async()=>{before=snapshot.start;rendered=null;await refresh();});
 act('latest',async()=>{before=null;rendered=null;await refresh();});
 for (const action of ['allow','decline']) act(action,async()=>{await api(action,{text:snapshot.approval.id});await refresh();});
 act('fresh',async()=>{ if (voice) await stop(voice); await api('new'); before=null; rendered=null; await refresh(); });
-$('composer').onsubmit = async e => { e.preventDefault(); const text = $('draft').value.trim(); if (!text) return;
+$('composer').onsubmit = async e => { e.preventDefault(); const selected=chat, draft=$('draft').value, text=draft.trim(); if (!text) return;
   const submit=e.submitter || $('composer').querySelector('button'); if (submit.disabled) return; submit.disabled=true;
   $('notice').textContent='';
-  try { await api('send',{text}); if ($('draft').value.trim()===text) $('draft').value=''; await refresh(); }
+  try {
+    await api('send',{text});
+    if (chat===selected) { if ($('draft').value===draft) $('draft').value=''; }
+    else if (drafts.get(selected)===draft) drafts.delete(selected);
+    await refresh();
+  }
   catch(e){notice(e);} finally{submit.disabled=false;}
 };
 async function list() {
