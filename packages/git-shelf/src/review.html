@@ -14,7 +14,17 @@ h1 { font-size: 28px; letter-spacing: -.02em; }
 </style>
 <main>
   <p id="status" role="status">Loading commit…</p>
-  <h1></h1><p class="review-byline"></p><div id="message"></div>
+  <div id="message-reader">
+    <h1></h1><p class="review-byline"></p><div id="message"></div>
+    <button class="button small" id="edit-message" hidden>Edit commit message</button>
+    <p id="edit-help"></p>
+  </div>
+  <form id="message-form" hidden>
+    <label for="commit-message">Commit message</label>
+    <textarea id="commit-message" rows="12" maxlength="65536" required spellcheck="false"></textarea>
+    <p id="edit-branch"></p>
+    <div class="message-actions"><span id="message-error" role="alert"></span><button type="button" class="button" id="cancel-message">Cancel</button><button class="button primary" id="save-message">Save message</button></div>
+  </form>
   <div class="changes-heading"><strong id="summary"></strong><div id="layout"></div></div>
   <div id="files"></div>
 </main>

@@ -1,5 +1,6 @@
 mod browser;
 mod checkout;
+mod edit;
 mod tui;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use clap::{Parser, Subcommand};

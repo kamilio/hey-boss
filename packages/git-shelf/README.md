@@ -24,6 +24,9 @@ use the arrows to select a line and Ctrl+C to comment.
   haven't been shelved open in the connected Mac's browser, including when run
   by an agent on devbox. The private local viewer expires after 30 idle minutes;
   opening it does not shelve, publish, or change the commit.
+  Use **Edit commit message** to rewrite an unpublished commit and its descendants
+  on the owning branch. Saving preserves their trees and authors, leaves local
+  files and the index untouched, and refuses a branch that changed since opening.
 - `g apply-commit SHA`: cherry-pick into the current worktree. Conflicts use normal
   Git resolution: stage the fixes and run `git cherry-pick --continue`, or use
   `git cherry-pick --abort`. The saved commit and comments stay on the shelf.
