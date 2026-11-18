@@ -21,7 +21,9 @@ use the arrows to select a line and Ctrl+C to comment.
   Capture the SHA with `git rev-parse HEAD` after committing. Passing it
   guards against shelving a different tip; omitting it selects the current tip.
 - `g open SHA`: read the saved diff and review comments. Local commits that
-  haven't been shelved open in Git's normal diff viewer.
+  haven't been shelved open in the connected Mac's browser, including when run
+  by an agent on devbox. The private local viewer expires after 30 idle minutes;
+  opening it does not shelve, publish, or change the commit.
 - `g apply-commit SHA`: cherry-pick into the current worktree. Conflicts use normal
   Git resolution: stage the fixes and run `git cherry-pick --continue`, or use
   `git cherry-pick --abort`. The saved commit and comments stay on the shelf.

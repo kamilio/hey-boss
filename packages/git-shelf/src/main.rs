@@ -1,3 +1,4 @@
+mod browser;
 mod checkout;
 mod tui;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -23,8 +24,10 @@ struct Cli {
 enum Action {
     /// Browse the project shelf without opening the terminal UI.
     List,
-    /// Inspect a stored diff and its review comments.
+    /// Inspect a saved review, or open a local commit on the connected Mac.
     Open { sha: String },
+    #[command(hide = true)]
+    ServeReview,
     /// Shelve the current branch tip. Linking its task is recommended.
     #[command(alias = "stash")]
     StashCommit {
@@ -138,6 +141,9 @@ fn review(v: &Value) -> Result<String> {
 }
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Action::ServeReview)) {
+        return browser::serve();
+    }
     checkout::to_root()?;
     match cli.command {
         None if std::io::stdout().is_terminal() && std::io::stdin().is_terminal() => tui::browse()?,
@@ -190,20 +196,11 @@ fn run() -> Result<()> {
                 } else {
                     println!("{}", review(&open(&sha)?)?);
                 }
-            } else if !Command::new("git")
-                .args([
-                    "show",
-                    "--no-ext-diff",
-                    "--no-textconv",
-                    &format!("{sha}^{{commit}}"),
-                    "--",
-                ])
-                .status()?
-                .success()
-            {
-                return Err("Commit is not available in the shelf or checkout".into());
+            } else {
+                browser::open(&sha)?;
             }
         }
+        Some(Action::ServeReview) => unreachable!(),
         Some(Action::StashCommit { sha, task }) => {
             println!("{}", checkout::stash(sha.as_deref(), task)?)
         }

@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Commit review</title>
+<link rel="stylesheet" href="components.css">
+<link rel="stylesheet" href="commit-review.css">
+<style>
+main { max-width: 1440px; margin: auto; padding: 32px 24px; }
+h1 { font-size: 28px; letter-spacing: -.02em; }
+#message { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--muted); }
+.changes-heading { margin: 24px 0 16px; justify-content: space-between; }
+.add-comment { visibility: hidden; }
+</style>
+<main>
+  <p id="status" role="status">Loading commit…</p>
+  <h1></h1><p class="review-byline"></p><div id="message"></div>
+  <div class="changes-heading"><strong id="summary"></strong><div id="layout"></div></div>
+  <div id="files"></div>
+</main>
+<script type="module" src="review.js"></script>
+</html>

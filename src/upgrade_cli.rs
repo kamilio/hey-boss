@@ -239,6 +239,10 @@ fn shelf_id(root: &Path) -> io::Result<String> {
             "packages/git-shelf/Cargo.lock",
             "packages/git-shelf/build.rs",
             "packages/git-shelf/src",
+            "packages/hey-boss-http",
+            "src/issues/web/components.css",
+            "src/issues/web/commit-review.css",
+            "src/issues/web/git-review",
         ],
     )
 }
