@@ -37,7 +37,16 @@ struct IssueReference: Codable, Equatable {
     }
 }
 
+struct PhoneRequest: Codable {
+    let action: String
+    let session, chat: UUID?
+    let pcm, text: String?
+    let generation, played, received, revision, before: Int?
+    let media: UUID?
+}
+
 struct Request: Codable {
+    var phone: PhoneRequest?
     let command: String
     let chat_id: UUID?
     let archived: Bool?
@@ -7122,6 +7131,57 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             deliver?(buffer)
         }
     }
+    // Safari acknowledges frames actually heard. Keep using the desktop passage
+    // queue and word timings, but never open the Mac's input or output device.
+    var phoneSession: UUID?
+    private var phoneGeneration = 0
+    private var phonePlayed = 0
+    private var phoneSent = 0
+    private var phonePassage: Passage?
+    private var phoneFinish: (() -> Void)?
+    func exchange(_ request: PhoneRequest) throws -> [String: Any] {
+        if let encoded = request.pcm {
+            guard let bytes = Data(base64Encoded: encoded), bytes.count <= 16384, bytes.count % 2 == 0 else {
+                throw StorageError(description: "Invalid microphone audio.")
+            }
+            if !suspended && !inputMuted && !bytes.isEmpty {
+                let ok = detectorInput.withLock { writer in
+                    guard let writer else { return false }
+                    return bytes.withUnsafeBytes { Darwin.write(writer.fileDescriptor, $0.baseAddress, $0.count) == $0.count }
+                }
+                guard ok else { throw StorageError(description: "Microphone stream interrupted.") }
+                bytes.withUnsafeBytes { _ = microphoneFrame($0.bindMemory(to: Int16.self)) }
+            }
+        }
+        if request.generation == phoneGeneration {
+            phonePlayed = max(phonePlayed, min(phoneSent, request.played ?? 0))
+            if let passage = phonePassage, passage.complete && phonePlayed >= passage.frames { phoneFinish?() }
+        }
+        var result: [String: Any] = ["generation":phoneGeneration, "paused":paused || suspended]
+        guard let passage = phonePassage, !paused, !suspended else { return result }
+        let start = request.generation == phoneGeneration ? min(phoneSent, max(phonePlayed, request.received ?? 0)) : 0
+        var offset = 0, bytes = Data()
+        for buffer in passage.buffers {
+            let rate = Int(buffer.format.sampleRate)
+            let end = offset + Int(buffer.frameLength)
+            defer { offset = end }
+            let from = max(0, start - offset)
+            let count = min(end - offset - from, phonePlayed + rate / 2 - max(start, offset))
+            if count <= 0 { if end <= start { continue }; break }
+            if let samples = buffer.floatChannelData {
+                let pcm = (from..<from+count).map { Int16(max(-1, min(1, samples[0][$0])) * 32767) }
+                pcm.withUnsafeBytes { bytes.append(contentsOf: $0) }
+            } else if let samples = buffer.int16ChannelData {
+                bytes.append(Data(bytes: samples[0] + from, count: count * 2))
+            } else { throw StorageError(description: "Unsupported reply audio format.") }
+            result["rate"] = rate
+        }
+        if !bytes.isEmpty {
+            result["offset"] = start; result["pcm"] = bytes.base64EncodedString()
+            phoneSent = max(phoneSent, start + bytes.count / 2)
+        }
+        return result
+    }
     private var passages: [Passage] = []
     // Absolute PCM frame in the current passage. A route change can invalidate
     // AVAudioPlayerNode's timeline while another app has the device.
@@ -7394,6 +7454,24 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         }
         passages.append(contentsOf: window.dropFirst(passages.count).map(Passage.init))
         let passage = passages[0]
+        if phoneSession != nil {
+            phoneGeneration += 1; phonePlayed = 0; phoneSent = 0; phonePassage = passage
+            var nextWord = 0, announced = false
+            phoneFinish = { [weak self] in
+                guard let self else { return }
+                self.timer?.invalidate(); self.phonePassage = nil; self.phoneFinish = nil
+                self.passages.removeFirst(); finished()
+            }
+            timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                guard let self, !self.paused, self.phonePlayed > 0 else { return }
+                if !announced { announced = true; self.playbackStarted() }
+                while nextWord < passage.words.count, passage.words[nextWord].0 <= self.phonePlayed {
+                    highlight(passage.words[nextWord].1); nextWord += 1
+                }
+            }
+            renderNextPassage()
+            return
+        }
         playbackBase = 0; playedThrough = 0
         var nextWord = 0, outstanding = 0, scheduledThrough = 0, started = false, announced = false
         func checkEnd() {
@@ -7473,7 +7551,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
     func reactivate(cli: String, play: Bool) throws {
         guard suspended else { return }
-        if tapped { _ = try listen(cli: cli, duplex: true) }
+        if tapped || phoneSession != nil { _ = try listen(cli: cli, duplex: tapped) }
         inputSince.withLock { $0 = mach_absolute_time() }
         if restartEngine { try engine.start() }
         suspended = false
@@ -7490,6 +7568,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
         worker = nil
     }
     func stopPlayback() {
+        phoneGeneration += 1; phonePassage = nil; phoneFinish = nil; phonePlayed = 0; phoneSent = 0
         parkedFrame = nil; schedulePassage = nil; scheduleGeneration += 1
         paused = false
         passages.forEach { $0.deliver = nil }; passages.removeAll(); rendering = nil
@@ -7931,7 +8010,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
     private(set) var media = ConversationMediaView()
     private struct Visual: Codable, Equatable { let id: UUID; let afterMessage: Int; let title: String; let kind: String; var cardHeight: CGFloat? = nil }
-    private var visuals: [Visual] = []
+    private var phoneRevision = Int.random(in: 0..<Int(Int32.max))
+    private var visuals: [Visual] = [] { didSet { phoneRevision += 1 } }
     private var pendingVisuals: [ConversationMediaView] = []
     private var visibilityQueued = false
     private var compactFrame: NSRect?
@@ -8000,7 +8080,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var request: String?
         var link: String?
     }
-    private var activities: [ToolActivity] = []
+    private var activities: [ToolActivity] = [] { didSet { phoneRevision += 1 } }
     struct Capture: Codable, Equatable { let source: String; let text: String? }
     private struct PlaybackInterruption: Codable, Equatable {
         let spoken: String
@@ -8162,7 +8242,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         checkpoint = Checkpoint(saved: saved, end: end + UInt64(data.count), size: end + UInt64(data.count))
     }
     private let saveURL: URL
-    private var messages: [Message] = []
+    private var messages: [Message] = [] { didSet { phoneRevision += 1 } }
     private var thread: String?
     private var restoreError: String?
     var directory: URL?
@@ -8561,12 +8641,101 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
         refreshHistory()
     }
+    private var phoneDeadline: Timer?
+    private var phoneLastSeen = TimeInterval.zero
+    func phone(_ p: PhoneRequest) throws -> [String: Any] {
+        let owns = p.session != nil && audio?.phoneSession == p.session
+        if p.action == "exchange" {
+            guard owns, let audio else { throw StorageError(description: "Voice session ended.") }
+            phoneLastSeen = ProcessInfo.processInfo.systemUptime
+            return try audio.exchange(p)
+        }
+        if p.action == "state" {
+            let end = min(messages.count, max(0, p.before ?? messages.count)), start = max(0, end - Self.pageSize)
+            var result: [String:Any] = ["chat":library.selected.uuidString, "voice":voiceStatus, "mine":owns,
+                "passage":owns && reading ? playingPassage : "", "spoken":playingThrough,
+                "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end]
+            if let alert = approvalSheet, let id = approvals.first?.0 {
+                let view = (alert.accessoryView as? NSScrollView)?.documentView as? NSTextView
+                result["approval"] = ["id":id, "text":[alert.messageText, alert.informativeText, view?.string ?? ""].joined(separator:"\n")]
+            }
+            if p.revision != phoneRevision || p.chat != library.selected {
+                result["messages"] = messages[start..<end].map { ["speaker":$0.speaker, "text":$0.text] }
+                result["tools"] = activities.filter { $0.afterMessage >= start && $0.afterMessage <= end }.map {
+                    ["at":$0.afterMessage,"label":$0.description,"state":$0.state,"detail":tools[$0.id].flatMap { details[$0] } ?? $0.output] as [String:Any]
+                }
+                result["visuals"] = visuals.filter { $0.afterMessage >= start && $0.afterMessage <= end }.map {
+                    ["at":$0.afterMessage, "id":$0.id.uuidString,"title":$0.title] as [String:Any]
+                }
+            }
+            return result
+        }
+        if p.action == "image", p.chat == library.selected, let id = p.media, visuals.contains(where: { $0.id == id }) {
+            let bytes = try Data(contentsOf: visualDirectory.appendingPathComponent(id.uuidString))
+            guard let image = NSImage(data: bytes), let tiff = image.tiffRepresentation,
+                  let png = NSBitmapImageRep(data:tiff)?.representation(using:.png,properties:[:]) else { throw StorageError(description:"Image unavailable.") }
+            return ["png":png.base64EncodedString()]
+        }
+        if owns, p.action == "stop" { stop("Voice off"); return [:] }
+        if owns, p.chat == library.selected, let alert = approvalSheet, p.text == approvals.first?.0,
+           p.action == "allow" || p.action == "decline" {
+            window.endSheet(alert.window, returnCode:p.action == "allow" ? .alertSecondButtonReturn : .alertFirstButtonReturn)
+            return [:]
+        }
+        guard restoreError == nil, pauseID == nil, terminal == nil, approvalSheet == nil,
+              owns || phase == .idle else { throw StorageError(description: "Finish the active conversation on the Mac first.") }
+        guard p.chat == library.selected || p.action == "open" else { throw StorageError(description: "The selected conversation changed. Refresh and try again.") }
+        switch p.action {
+        case "start", "new", "open", "send":
+            guard owns || phase == .idle, input.stringValue.isEmpty, pendingCapture == nil, selections.isEmpty else {
+                throw StorageError(description: "Finish the desktop draft first.")
+            }
+            if p.action == "start" {
+                guard phase == .idle, let session = p.session, let recognizer, recognizer.isAvailable,
+                      recognizer.supportsOnDeviceRecognition else { throw StorageError(description: "Voice unavailable. Check on-device Dictation on the Mac.") }
+                guard beginSession() else { throw StorageError(description: status.stringValue) }
+                let remote = ReviewAudio(); remote.conversation = true; remote.phoneSession = session
+                remote.setHeadphoneOutput(true)
+                remote.failed = { [weak self] message in self?.stop(message) }
+                do { _ = try remote.listen(cli: cli) } catch { remote.stop(); state(.idle, error.localizedDescription); throw error }
+                connect(remote)
+                phoneLastSeen = ProcessInfo.processInfo.systemUptime
+                phoneDeadline = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self, weak remote] timer in
+                    guard let self, let remote, self.audio === remote else { timer.invalidate(); return }
+                    if ProcessInfo.processInfo.systemUptime - self.phoneLastSeen > 5 { self.stop("Phone disconnected") }
+                }
+            } else if p.action == "send" {
+                guard acceptsTypedMessage, let text = p.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else {
+                    throw StorageError(description: "Wait for the current turn to finish.")
+                }
+                interruptPlayback(); respond(text)
+            } else if p.action == "new" {
+                guard selectDirectory(nil) else { throw StorageError(description: status.stringValue) }
+            } else {
+                guard let id = p.chat, library.chats.contains(where: { $0.id == id && $0.archived != true }) else { throw StorageError(description: "Chat not found.") }
+                try openChat(id)
+            }
+        default:
+            guard owns else { throw StorageError(description: "Voice session ended.") }
+            switch p.action {
+            case "mute": toggleMute()
+            case "pause": togglePlayback()
+            case "interrupt": listenForNextTurn()
+            case "finish" where phase == .recording: endRecording("manual")
+            default: throw StorageError(description: "Action unavailable.")
+            }
+        }
+        return ["chat":library.selected.uuidString]
+    }
     private func failTerminal(_ message: String) {
         terminal?.event(["type":"turn.failed","error":["message":message]], final: true); terminal = nil
     }
     func handleChat(_ request: Request, _ reply: Reply) {
         do {
             if let restoreError { throw StorageError(description: restoreError) }
+            if request.command == "chat_phone", let p = request.phone {
+                reply.send(try phone(p).merging(["status":"ok"]) { _, new in new }); return
+            }
             if request.command == "chat_list" {
                 let matching = library.chats.lazy.filter { ($0.archived == true) == (request.archived == true) }
                 var rows: [[String:String]] = [], pastCursor = request.chat_id == nil
@@ -9792,6 +9961,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         return true
     }
     func stop(_ message: String) {
+        phoneDeadline?.invalidate(); phoneDeadline = nil
         hideMedia()
         pauseID = nil
         if answering || heldReply { interruptPlayback() }
@@ -11493,7 +11663,7 @@ struct Daemon {
                     } catch { reply.send(["status": "error", "error": "Invalid request"]); return }
                     if request.command == "protocol" {
                         reply.send(["task_id": "protocol", "status": "ok", "result": "1"])
-                    } else if ["chat_exec", "chat_list", "chat_read", "chat_rename", "chat_delete", "chat_archive", "chat_restore", "conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
+                    } else if ["chat_phone", "chat_exec", "chat_list", "chat_read", "chat_rename", "chat_delete", "chat_archive", "chat_restore", "conversation_start", "conversation_context", "conversation_status", "conversation_control", "conversation_pause", "conversation_resume"].contains(request.command) {
                         #if canImport(FoundationModels)
                         if #available(macOS 26, *) {
                             onMain {

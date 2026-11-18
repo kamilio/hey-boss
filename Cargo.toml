@@ -38,7 +38,7 @@ base64 = "0.22.1"
 rusqlite = { version = "0.40.2", features = ["bundled", "backup", "functions"] }
 tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 socket2 = "0.6"
-tiny_http = { package = "hey-boss-http", version = "0.1.0", path = "packages/hey-boss-http" }
+tiny_http = { package = "hey-boss-http", version = "0.1.0", path = "packages/hey-boss-http", features = ["ssl-rustls"] }
 linkify = "0.11.0"
 memchr = "2"
 ctrlc = { version = "3.5.2", features = ["termination"] }

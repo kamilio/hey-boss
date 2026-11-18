@@ -1,0 +1,9 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Conversations</title><meta name="theme-color" content="#10201e"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.webmanifest"><link rel="stylesheet" href="/app.css"><script defer src="/app.js"></script></head><body>
+<header><strong>Conversations</strong><button id="history">Chats</button><button id="fresh">New</button></header>
+<main id="timeline"><div id="empty"><span>HEY BOSS</span><h1>What’s on your mind?</h1><p>Start voice or write a message below.</p></div><button id="earlier" hidden>Earlier messages</button><div id="messages"></div><button id="latest" hidden>Back to latest</button></main>
+<footer><section hidden id="approval"><pre></pre><button id="decline">Decline</button> <button id="allow">Allow once</button></section><p id="notice" role="alert"></p><div id="caption"></div><div class="bar"><button id="talk">Start voice</button><span role="status" id="status">Connecting…</span></div>
+<div class="controls"><button hidden id="mute">Mute mic</button><button hidden id="pause">Pause reply</button><button hidden id="interrupt">Interrupt</button><button hidden id="finish">Send now</button></div>
+<form id="composer"><input id="draft" autocomplete="off" placeholder="Message Hey Boss" aria-label="Message"><button>Send</button></form></footer>
+<dialog id="chats"><div class="bar"><h2>Chats</h2><button id="close">Done</button></div><div id="list"></div><button id="more" hidden>More chats</button></dialog>
+<dialog id="pair"><h2>Pair with your Mac</h2><p>Enter the pairing code from your laptop.</p><form id="pairForm"><input id="code" type="password" aria-label="Pairing code" autocomplete="current-password" required><button>Pair</button></form><p role="alert" id="pairError"></p></dialog>
+</body></html>

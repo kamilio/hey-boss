@@ -97,6 +97,14 @@ fn restart_desktop(binary: &Path) -> io::Result<()> {
         &home()?.join("Library/LaunchAgents/local.hey-boss.plist"),
         "local.hey-boss",
     )?;
+    let web = home()?.join("Library/LaunchAgents/local.hey-boss.conversation-web.plist");
+    if web.try_exists()? {
+        reload_registration(
+            Path::new("/bin/launchctl"),
+            &web,
+            "local.hey-boss.conversation-web",
+        )?;
+    }
     let connector = home()?.join("Library/LaunchAgents/local.hey-boss-companion.plist");
     if connector.try_exists()? {
         reload_registration(

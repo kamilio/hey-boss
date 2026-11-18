@@ -52,6 +52,9 @@ func audit() {
         print("PASS sidebar filtering and individual attachment removal, renumbering and draft persistence")
         return
     }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PHONE"] {
+        app.finishLaunching(); try! auditPhone(root); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_MANAGEMENT"] {
         app.finishLaunching(); auditChatManagement(root); return
     }
@@ -4817,6 +4820,55 @@ func auditDictationHandoff(_ root: String) {
     precondition(chat.rows.map(\.stringValue) == history && !chat.resumeSession(speech))
     chat.stop("Done")
     print("PASS: same chat resumed listening and mid-passage playback at frame \(before); stale resumes and paused input ignored")
+}
+
+@available(macOS 26, *)
+func auditPhone(_ path: String) throws {
+    let root = URL(fileURLWithPath:path), session = UUID().uuidString
+    let chat = VoiceConversation(cli:ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"]!, saveURL:root.appendingPathComponent("phone/current.json"))
+    var id = "", generation = -1, received = 0, played = 0
+    func call(_ action: String, _ fields: [String:Any] = [:]) throws -> [String:Any] {
+        var p: [String:Any] = ["action":action, "session":session, "generation":generation,"received":received,"played":played]
+        if !id.isEmpty { p["chat"] = id }
+        p.merge(fields) { _,n in n }
+        return try chat.phone(JSONDecoder().decode(PhoneRequest.self, from: JSONSerialization.data(withJSONObject:p)))
+    }
+    id = try call("state")["chat"] as! String
+    _ = try call("start")
+    precondition(chat.phase == .listening && !chat.audio!.engine.isRunning)
+    let stale = try? call("stop", ["session":UUID().uuidString]); precondition(stale == nil)
+    _ = try call("mute"); precondition(chat.audio!.inputMuted); _ = try call("mute")
+    // Keep the agent side deterministic; the detector, Mac transcription and voice are real.
+    let pipe = Pipe(); chat.process = Process(); chat.writer = pipe.fileHandleForWriting
+    var bytes = Data(count: 25600); bytes.append(try Data(contentsOf:root.appendingPathComponent("first.pcm"))); bytes.append(Data(count:128000))
+    var offset = 0, answered = false, heard = false, paused = false
+    let deadline = Date().addingTimeInterval(90)
+    while Date() < deadline {
+        let end = min(bytes.count, offset + 2560)
+        let packet = bytes.subdata(in:offset..<end); offset = end
+        let r = try call("exchange", ["pcm":packet.base64EncodedString()])
+        if generation != r["generation"] as! Int { generation = r["generation"] as! Int; received = 0; played = 0 }
+        if let encoded = r["pcm"] as? String {
+            precondition(r["offset"] as? Int == received)
+            let data = Data(base64Encoded:encoded)!
+            heard = heard || data.contains(where: { $0 != 0 }); received += data.count / 2
+        }
+        played = min(received, played+1600)
+        if !answered, chat.phase == .thinking {
+            precondition(chat.conversationHistory.last?["content"]?.lowercased().contains("fruit") == true)
+            chat.event(["TurnCompleted":["status":"Completed","output":"An apple."]]); answered = true
+        }
+        if heard, !paused, chat.phase == .speaking {
+            _ = try call("pause"); let p = try call("exchange"); precondition(p["paused"] as? Bool == true && p["pcm"] == nil)
+            _ = try call("pause"); paused = true
+        }
+        if answered && heard && paused && chat.phase == .listening { break }
+        RunLoop.main.run(until:Date(timeIntervalSinceNow:0.08))
+    }
+    precondition(answered && heard && paused && chat.phase == .listening, "Phone turn failed: " + chat.status.stringValue)
+    RunLoop.main.run(until:Date(timeIntervalSinceNow:6.2))
+    precondition(chat.audio == nil && chat.phase == .idle)
+    print("PASS phone PCM → detector → transcript → shared reply → acknowledged narration; stale sessions, pause and disconnect")
 }
 
 @available(macOS 26, *)

@@ -17,3 +17,5 @@
 - A few concrete examples; leave command details to `--help`.
 - Link advanced details in references; read only when needed.
 - Preserve the user's cuts; don't grow the manual back.
+
+- Keep desktop and iPhone Safari/Home Screen Conversations in parity. Use `VoiceConversation` for chat state, turn detection, transcription, playback and controls; `src/conversation_web/` handles phone input and presentation. For a change to either client, exercise the same turn on both.

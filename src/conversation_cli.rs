@@ -20,6 +20,9 @@ pub struct Exec {
     json: bool,
 }
 
+#[path = "conversation_web.rs"]
+mod web;
+
 fn request(body: Value) -> io::Result<BufReader<UnixStream>> {
     let exe = std::env::current_exe()?.canonicalize()?;
     super::initialize(&exe)?;
@@ -99,6 +102,12 @@ impl Exec {
 
 #[derive(Subcommand)]
 pub enum Chats {
+    /// Serve Conversations over paired HTTPS on this Mac.
+    Web {
+        /// Set up Wi-Fi HTTPS and start the service at login.
+        #[arg(long)]
+        install: bool,
+    },
     /// Show one page, newest first.
     List {
         #[arg(long)]
@@ -132,6 +141,7 @@ pub enum Chats {
 impl Chats {
     pub fn run(&self) -> io::Result<()> {
         let body = match self {
+            Self::Web { install } => return web::run(*install),
             Self::List {
                 archived, after, ..
             } => {
