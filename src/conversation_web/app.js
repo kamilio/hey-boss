@@ -49,6 +49,9 @@ async function refresh() {
     const track=voice.track.getAudioTracks()[0];
     track.enabled=!s.muted;
     if (s.muted) voice.input.length=0;
+    if (previous?.voice.listeningPaused && !v.listeningPaused && voice.timer) {
+      clearTimeout(voice.timer); pump(voice);
+    }
   }
   button('mute', mine && v.phase !== 'starting', v.listeningPaused != null
     ? (v.listeningPaused ? 'Resume listening' : 'Pause listening') : (s.muted ? 'Unmute microphone' : 'Mute microphone'));
@@ -145,6 +148,7 @@ function play(v, r) {
   v.nodes.add(n); n.onended = () => v.nodes.delete(n); n.start(at);
 }
 async function pump(v) {
+  v.timer = null;
   if (v.closed) return;
   try {
     if (v.ctx.state !== 'running') throw Error('Audio interrupted. Tap Start voice to reconnect.');
@@ -164,7 +168,11 @@ async function pump(v) {
     chunks.forEach((c,i)=>bytes.set(new Uint8Array(c),i*2560));
     const r = await api('exchange',{session:v.id,generation:v.gen,played:v.played,received:v.received,
       pcm:bytes.length ? btoa(String.fromCharCode(...bytes)) : undefined});
-    if (!v.closed) { play(v,r); v.timer = setTimeout(()=>pump(v),v.input.length >= 6 ? 0 : 65); }
+    if (!v.closed) {
+      play(v,r);
+      const delay = snapshot?.voice.listeningPaused && !v.segments.length ? 450 : 65;
+      v.timer = setTimeout(()=>pump(v),v.input.length >= 6 ? 0 : delay);
+    }
   } catch(e) { if (!v.closed) { stop(v).catch(()=>{}); notice(e); } }
 }
 async function start() {

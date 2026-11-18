@@ -108,6 +108,10 @@ async (page) => {
   await page.locator("#levels:visible").waitFor();
   await page.getByRole("button",{name:"Pause listening"}).click();
   await page.waitForFunction(()=>!window.testMic.enabled);
+  const exchanges=()=>requests.filter(action=>action==='exchange').length, beforePause=exchanges();
+  await new Promise(r=>setTimeout(r,1500));
+  const heartbeats=exchanges()-beforePause;
+  if(heartbeats<1 || heartbeats>5) throw Error('Unexpected paused microphone exchange count: '+heartbeats);
   await page.getByRole("button",{name:"Resume listening"}).click();
   await page.waitForFunction(()=>window.testMic.enabled);
   phase='speaking';
