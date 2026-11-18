@@ -4,7 +4,7 @@ async (page) => {
   const origin = new URL(page.url()).origin;
   let chat = "10000000-0000-4000-8000-000000000000";
   let active = false, muted = false, recorded = false, heard = false, stall = false;
-  let phase = 'listening', paused = false, approval = null, failStartPoll = true;
+  let phase = 'listening', paused = false, approval = null, failStartPoll = true, interruptLabel = 'Interrupt reply';
   const frames = [];
   const requests = [];
   await page.route(origin + "/api", async route => {
@@ -30,7 +30,7 @@ async (page) => {
       chat, mine:active, voice:{phase:active ? phase:"idle", message:phase, interrupt:phase==='speaking', approval:!!approval,
         listeningPaused:active && ['listening','recording'].includes(phase) ? muted : undefined},
       heading:"Work with Codex", hint:"Folder conversation", placeholder:"Message Codex…",
-      paused, muted, approval, passage:phase==='speaking'?'A spoken reply':'', spoken:2,
+      paused, muted, approval, interruptLabel, passage:phase==='speaking'?'A spoken reply':'', spoken:2,
       start:0, end:0, revision:1, messages:[], tools:[], visuals:[]
     });
     if (p.action === "exchange") {
@@ -115,7 +115,9 @@ async (page) => {
   await page.getByRole("button",{name:"Pause reply"}).click();
   await page.getByRole("button",{name:"Resume reply"}).click();
   if (paused || await page.locator('#caption b').textContent()!=='A ') throw Error("Playback controls or spoken caption lost their place");
-  await page.getByRole("button",{name:"Interrupt"}).click();
+  await page.getByRole("button",{name:"Interrupt reply",exact:true}).waitFor();
+  interruptLabel='Skip reading';
+  await page.getByRole("button",{name:"Skip reading",exact:true}).click();
   await page.getByRole("button",{name:"End voice",exact:true}).waitFor();
   await page.getByRole("button",{name:"Pause listening"}).click();
   await page.getByRole("button",{name:"Resume listening"}).click();

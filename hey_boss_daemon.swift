@@ -8660,6 +8660,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             var result: [String:Any] = ["chat":library.selected.uuidString, "voice":voiceStatus, "mine":owns,
                 "passage":owns && reading ? playingPassage : "", "spoken":playingThrough,
                 "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end]
+            if owns && canListenNext { result["interruptLabel"] = listenNext.title }
             if let alert = approvalSheet, let id = approvals.first?.0 {
                 let view = (alert.accessoryView as? NSScrollView)?.documentView as? NSTextView
                 result["approval"] = ["id":id, "text":[alert.messageText, alert.informativeText, view?.string ?? ""].joined(separator:"\n")]

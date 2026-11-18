@@ -53,7 +53,7 @@ async function refresh() {
   button('mute', mine && v.phase !== 'starting', v.listeningPaused != null
     ? (v.listeningPaused ? 'Resume listening' : 'Pause listening') : (s.muted ? 'Unmute microphone' : 'Mute microphone'));
   button('pause', mine && v.phase === 'speaking', s.paused ? 'Resume reply' : 'Pause reply');
-  button('interrupt', mine && v.interrupt);
+  button('interrupt', mine && v.interrupt, s.interruptLabel || 'Interrupt reply');
   button('end', recording);
   if (previous?.passage !== s.passage || previous?.spoken !== s.spoken) {
     $('caption').replaceChildren();
