@@ -1,6 +1,6 @@
 use super::*;
 use crate::issues::code_reviews::Operation as Review;
-use reqwest::blocking::Client;
+use reqwest::blocking::{Client, RequestBuilder};
 use std::process::{Command, Stdio};
 #[cfg(target_os = "macos")]
 #[path = "code_reviews_macos.rs"]
@@ -119,21 +119,34 @@ pub(super) fn diff(app: &App, bytes: &[u8]) -> Result<Value> {
         ));
     }
     let token = personal_token()?;
-    let client = Client::builder()
-        .user_agent("hey-gh")
-        .timeout(Duration::from_secs(12))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
+    let client =
+        github_client().map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
     let root = format!("https://api.github.com/repos/{repo}");
     let get = |url: String, accept: &str| {
-        client
-            .get(url)
-            .bearer_auth(token.trim())
-            .header("Accept", accept)
-            .send()
-            .and_then(|res| res.error_for_status())
-            .map_err(|_| Error::invalid("Could not load the PR diff from GitHub."))
+        let mut client = client.clone();
+        for attempt in 0..2 {
+            let response = client
+                .get(&url)
+                .bearer_auth(token.trim())
+                .header("Accept", accept)
+                .send()
+                .map_err(|_| Error::invalid("Could not load the PR diff from GitHub."))?;
+            let status = response.status();
+            if status.is_success() {
+                return Ok(response);
+            }
+            let body = response.json::<Value>().unwrap_or_default();
+            if attempt == 0 && repair_route(&url, status, &body) {
+                client = github_client()
+                    .map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
+                continue;
+            }
+            return Err(Error::invalid(format!(
+                "Could not load the PR diff from GitHub ({status}): {}",
+                body["message"].as_str().unwrap_or("No reason provided")
+            )));
+        }
+        unreachable!()
     };
     let number = r["number"]
         .as_i64()
@@ -175,6 +188,72 @@ pub(super) fn diff(app: &App, bytes: &[u8]) -> Result<Value> {
     Ok(json!({"ok": true, "patch": String::from_utf8_lossy(&bytes), "truncated": truncated}))
 }
 
+fn github_client() -> reqwest::Result<Client> {
+    Client::builder()
+        .user_agent("hey-gh")
+        .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
+fn repair_route(url: &str, status: reqwest::StatusCode, body: &Value) -> bool {
+    if !url.starts_with("https://api.github.com/")
+        || status != reqwest::StatusCode::FORBIDDEN
+        || !body["message"].as_str().is_some_and(|message| {
+            message.contains("IP allow list enabled")
+                && message.contains("your IP address is not permitted")
+        })
+    {
+        return false;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("/usr/bin/sudo")
+            .args([
+                "-n",
+                "/Library/PrivilegedHelperTools/local.github-api-vpn-route.sh",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+fn github_json(
+    request: RequestBuilder,
+    repair: impl Fn(&str, reqwest::StatusCode, &Value) -> bool,
+) -> reqwest::Result<(reqwest::StatusCode, Value)> {
+    // These requests have replayable bodies. Retry only an explicit rejection,
+    // never a connection failure or an uncertain publication response.
+    let mut request = request;
+    for attempt in 0..2 {
+        let retry = request.try_clone();
+        let response = request.send()?;
+        let url = response.url().to_string();
+        let status = response.status();
+        let body = match response.json() {
+            Ok(body) => body,
+            Err(_) if matches!(status.as_u16(), 401 | 403 | 404 | 422) => Value::Null,
+            Err(error) => return Err(error),
+        };
+        if attempt == 0
+            && status == reqwest::StatusCode::FORBIDDEN
+            && let Some(retry) = retry
+            && repair(&url, status, &body)
+        {
+            // The rejected connection may still use the previous network path.
+            request = RequestBuilder::from_parts(github_client()?, retry.build()?);
+            continue;
+        }
+        return Ok((status, body));
+    }
+    unreachable!()
+}
+
 fn publish_with(
     op: &impl Fn(Review) -> Result<Value>,
     repo: &str,
@@ -195,24 +274,11 @@ fn publish_with(
             "Reload the submitted review before publishing",
         ));
     }
-    let client = Client::builder()
-        .user_agent("hey-gh")
-        .timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
+    let client =
+        github_client().map_err(|_| Error::invalid("Cannot initialize GitHub transport"))?;
     let get = |url: &str| -> Result<Value> {
-        let response = client
-            .get(url)
-            .bearer_auth(token)
-            .send()
+        let (status, body) = github_json(client.get(url).bearer_auth(token), repair_route)
             .map_err(|_| Error::invalid("Could not reach GitHub to verify this review."))?;
-        let status = response.status();
-        let body = response.json::<Value>().map_err(|_| {
-            Error::invalid(format!(
-                "GitHub returned an unreadable response ({status})."
-            ))
-        })?;
         if !status.is_success() {
             return Err(Error::invalid(format!(
                 "GitHub could not verify this review ({status}): {}",
@@ -259,32 +325,31 @@ fn publish_with(
         version,
         digest: digest.into(),
     })?;
-    let response = client
-        .post(format!("{url}/reviews"))
-        .bearer_auth(token)
-        .json(&payload)
-        .send()
-        .map_err(|_| {
-            Error::conflict("GitHub did not confirm publication. Check the PR before retrying.")
-        })?;
-    if matches!(response.status().as_u16(), 401 | 403 | 404 | 422) {
+    let (status, receipt) = github_json(
+        client
+            .post(format!("{url}/reviews"))
+            .bearer_auth(token)
+            .json(&payload),
+        repair_route,
+    )
+    .map_err(|_| {
+        Error::conflict("GitHub did not confirm publication. Check the PR before retrying.")
+    })?;
+    if matches!(status.as_u16(), 401 | 403 | 404 | 422) {
         op(Review::RejectedPublication {
             id,
             version: version + 1,
         })?;
-        let status = response.status();
-        let body = response.json::<Value>().unwrap_or_default();
-        let reason = body["message"].as_str().unwrap_or("No reason provided");
+        let reason = receipt["message"].as_str().unwrap_or("No reason provided");
         return Err(Error::invalid(format!(
             "GitHub declined this review ({status}): {reason}. Your edits are saved."
         )));
     }
-    let receipt = response
-        .error_for_status()
-        .and_then(|r| r.json::<Value>())
-        .map_err(|_| {
-            Error::conflict("No confirmed GitHub receipt. Check the PR before retrying.")
-        })?;
+    if !status.is_success() {
+        return Err(Error::conflict(
+            "No confirmed GitHub receipt. Check the PR before retrying.",
+        ));
+    }
     op(Review::FinishPublication {
         id,
         version: version + 1,
@@ -302,6 +367,107 @@ fn publish_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn github_retries_only_repaired_rejections_and_only_once() {
+        for method in [reqwest::Method::GET, reqwest::Method::POST] {
+            for (first, message, repaired, last, requests) in [
+                (
+                    403,
+                    "IP allow list enabled; your IP address is not permitted",
+                    true,
+                    200,
+                    2,
+                ),
+                (
+                    403,
+                    "IP allow list enabled; your IP address is not permitted",
+                    true,
+                    403,
+                    2,
+                ),
+                (
+                    403,
+                    "IP allow list enabled; your IP address is not permitted",
+                    false,
+                    403,
+                    1,
+                ),
+                (403, "Resource not accessible", true, 403, 1),
+                (500, "Server error", true, 500, 1),
+                (200, "OK", true, 200, 1),
+            ] {
+                let server = Server::http(("127.0.0.1", 0)).unwrap();
+                let url = format!("http://{}/repos/o/r/pulls/7/reviews", server.server_addr());
+                let expected_method = method.to_string();
+                let t = std::thread::spawn(move || {
+                    for i in 0..requests {
+                        let mut req = server
+                            .recv_timeout(Duration::from_secs(5))
+                            .unwrap()
+                            .unwrap();
+                        assert_eq!(req.method().as_str(), expected_method);
+                        assert_eq!(
+                            header(&req, "authorization"),
+                            Some("Bearer fixture-personal")
+                        );
+                        let body: Value = serde_json::from_reader(req.as_reader()).unwrap();
+                        assert_eq!(body, json!({"body":"exact review"}));
+                        req.respond(
+                            Response::from_string(json!({"message":message}).to_string())
+                                .with_status_code(StatusCode(if i == 0 { first } else { last })),
+                        )
+                        .unwrap();
+                    }
+                });
+                let repairs = std::cell::Cell::new(0);
+                let (status, _) = github_json(
+                    Client::new()
+                        .request(method.clone(), &url)
+                        .bearer_auth("fixture-personal")
+                        .json(&json!({"body":"exact review"})),
+                    |_, _, body| {
+                        if !body["message"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .contains("IP allow list enabled")
+                        {
+                            return false;
+                        }
+                        repairs.set(repairs.get() + 1);
+                        repaired
+                    },
+                )
+                .unwrap();
+                assert_eq!(status.as_u16(), last);
+                assert_eq!(
+                    repairs.get(),
+                    usize::from(first == 403 && message.starts_with("IP allow"))
+                );
+                t.join().unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn route_repair_ignores_other_hosts_and_other_errors() {
+        let body = json!({"message":"IP allow list enabled; your IP address is not permitted"});
+        assert!(!repair_route(
+            "https://api.github.com.evil.test/",
+            reqwest::StatusCode::FORBIDDEN,
+            &body
+        ));
+        assert!(!repair_route(
+            "https://api.github.com/",
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR,
+            &body
+        ));
+        assert!(!repair_route(
+            "https://api.github.com/",
+            reqwest::StatusCode::FORBIDDEN,
+            &json!({"message":"Resource not accessible"})
+        ));
+    }
+
     #[test]
     fn publish_uses_personal_identity_and_exact_edits_and_never_retries_an_unknown_result() {
         for (state, own, head, status) in [
