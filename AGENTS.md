@@ -12,6 +12,8 @@
 - The user writes prompts. Request prompt wording through `hey-boss notif ask`; do not invent or expand it.
 - Store all prompt text in Markdown (`.md`) files. Code must load prompts from those files, never embed them.
 
+- When building Swift UI, visually check rounded window corners: no square backing, borders, or shadows outside the rounded glass surface.
+
 ## Prompt style
 
 - Index-card length. One-liners.
