@@ -4,7 +4,7 @@ async (page) => {
   const origin = new URL(page.url()).origin;
   let chat = "10000000-0000-4000-8000-000000000000";
   let active = false, muted = false, recorded = false, heard = false, stall = false;
-  let phase = 'listening', paused = false, approval = null;
+  let phase = 'listening', paused = false, approval = null, failStartPoll = true;
   const frames = [];
   const requests = [];
   await page.route(origin + "/api", async route => {
@@ -13,6 +13,10 @@ async (page) => {
     const r = {status:"ok"};
     if (p.action === "list") r.chats=[{id:chat,title:"Current chat"}];
     if (p.action === "start") active = true;
+    if (active && p.action === "state" && failStartPoll) {
+      failStartPoll = false;
+      return route.fulfill({status:503,body:''});
+    }
     if (p.action === "stop") active = false;
     if (p.action === "mute") muted = !muted;
     if (p.action === "pause") paused = !paused;
@@ -73,8 +77,17 @@ async (page) => {
     }
   }
   await page.setViewportSize({width:390,height:844});
+  await page.evaluate(()=>{
+    window.screenLocks=0;
+    Object.defineProperty(navigator,'wakeLock',{value:{request:async type=>{
+      if(type!=='screen') throw Error('Unexpected wake lock');
+      window.screenLocks++;
+      return {release:async()=>{window.screenLocks--;}};
+    }}});
+  });
   await page.getByRole("button",{name:"Start voice"}).click();
   await page.getByRole("button",{name:"End voice"}).waitFor();
+  if(await page.evaluate(()=>window.screenLocks)!==1) throw Error("Foreground voice did not request the screen");
   await page.getByRole("button",{name:"Chats",exact:true}).click();
   await page.getByRole("button",{name:"Current chat"}).click();
   if (requests.includes("open") || requests.includes("stop")) throw Error("Selecting the current chat interrupted voice");
@@ -109,6 +122,7 @@ async (page) => {
   }
   await page.getByRole("button",{name:"End voice"}).click();
   await page.waitForFunction(()=>window.testMic.readyState==="ended");
+  if(await page.evaluate(()=>window.screenLocks)!==0) throw Error("Ending voice kept the display awake");
   await page.getByRole("button",{name:"Start voice"}).waitFor();
   if (!requests.includes("stop")) throw Error("The Mac session was left running");
   // The Mac can switch chats while Safari's microphone permission sheet is open.

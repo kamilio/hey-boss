@@ -95,6 +95,7 @@ async function refresh() {
 function cleanup(v) {
   if (!v || v.closed) return;
   v.closed = true; clearTimeout(v.timer); v.track?.getTracks().forEach(t => t.stop());
+  v.wake?.release().catch(()=>{});
   if (v.ctx.state !== 'closed') v.ctx.close().catch(()=>{});
   if (voice === v) voice = null;
   if (starting === v) starting = null;
@@ -178,7 +179,12 @@ async function start() {
     if (v.closed) return;
     await api('start',{session:v.id,chat:selected});
     if (v.closed) { await api('stop',{session:v.id}); return; }
-    voice = v; starting = null; pump(v); await refresh();
+    voice = v; starting = null; pump(v);
+    navigator.wakeLock?.request('screen').then(lock=>{
+      if (v.closed) return lock.release();
+      v.wake=lock;
+    }).catch(()=>{});
+    await refresh().catch(e=>notice(e,true));
   } catch(e) { cleanup(v); throw e; }
 }
 const act = (id, fn) => { const el=$(id); el.onclick=async()=>{
