@@ -32,7 +32,7 @@ final class Hotkey {
             }
             return noErr
         }, 2, &types, Unmanaged.passUnretained(self).toOpaque(), &handler)
-        let codes = DictationShortcut.allCases.map(\.keyCode) + [8, 9, 46] // Hyper+C: attach selection; Hyper+V: Auto; Hyper+M: catch up and talk.
+        let codes = DictationShortcut.allCases.map(\.keyCode) + [8, 9, 46] // Hyper+C: attach selection; Hyper+V: insert last dictation; Hyper+M: catch up and talk.
         for code in codes {
             var ref: EventHotKeyRef?
             let id = EventHotKeyID(signature: 0x48544C4B, id: UInt32(code))
@@ -76,7 +76,7 @@ enum PasteBlockReason: String {
     case slackUnavailable = "slack_unavailable"
     case t3Unavailable = "t3_unavailable"
     case unidentifiedField = "unidentified_field"
-    case ownWindow = "own_window", eventUnavailable = "event_unavailable", clipboardUnavailable = "clipboard_unavailable"
+    case ownWindow = "own_window", eventUnavailable = "event_unavailable"
 
     static func check(trusted: Bool, targetAlive: Bool, targetIsSelf: Bool, targetIsFrontmost: Bool) -> Self? {
         if !trusted { return .accessibility }
@@ -97,13 +97,12 @@ enum PasteBlockReason: String {
         case .slackUnavailable: return "Couldn’t navigate in Slack."
         case .t3Unavailable: return "Couldn’t finish the T3 action. Check the selected chat."
         case .newThreadUnavailable: return "Couldn’t open a new thread. Check the project in T3."
-        case .accessibility: return "Text copied. Allow automatic paste."
-        case .targetClosed: return "Reopen \(app). Press ⌘V."
-        case .focusChanged: return "Return to \(app). Press ⌘V."
-        case .unidentifiedField: return "Text copied. Choose the field and press ⌘V."
-        case .ownWindow: return "Choose an app, then press ⌘V."
-        case .eventUnavailable: return "Couldn’t insert text. Press ⌘V."
-        case .clipboardUnavailable: return "Clipboard unavailable. Open History."
+        case .accessibility: return "Allow Accessibility, then press Hyper+V."
+        case .targetClosed: return "Reopen \(app). Press Hyper+V."
+        case .focusChanged: return "Return to \(app). Press Hyper+V."
+        case .unidentifiedField: return "Choose a text field and press Hyper+V."
+        case .ownWindow: return "Choose an app, then press Hyper+V."
+        case .eventUnavailable: return "Couldn’t insert here. Choose another field or copy from History."
         }
     }
 }
@@ -111,18 +110,6 @@ enum PasteBlockReason: String {
 enum Paste {
     static let log = Logger(subsystem: "local.hey-talk", category: "paste")
     static let eventTag: Int64 = 0x48544C4B
-    static func recoverTranscript(_ original: String, to board: NSPasteboard?) -> (delivery: String, reason: PasteBlockReason?) {
-        guard let board else { return ("stdout", nil) }
-        board.clearContents()
-        return board.setString(original, forType: .string) ? ("clipboard", nil) : ("history", .clipboardUnavailable)
-    }
-
-    static func copyAndStopWaiting(_ text: String, retry: Timer, to board: NSPasteboard) -> Bool {
-        board.clearContents()
-        guard board.setString(text, forType: .string) else { return false }
-        retry.invalidate()
-        return true
-    }
     static func deliver(_ action: CorrectionAction, target: NSRunningApplication?, originalField: FocusedInput?, visibleThread: VisibleT3Thread? = nil, shouldPressEnter: @escaping () -> Bool, returnToField: FocusedInput?,
                         needsField: Bool, onWait: ((Timer) -> Void)?,
                         isCurrent: @escaping () -> Bool, onNewField: ((FocusedInput) -> Void)? = nil, listedThreads: [T3ThreadRow]? = nil,
@@ -251,13 +238,13 @@ enum Paste {
                 return post(key, flags: flags, to: target.processIdentifier)
             }
             if case .paste = action {
-                send(action.text, to: .general, shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, insert: { text in
+                send(action.text, shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, insert: { text in
                     guard let target, let field = FocusedInput.read(app: target, forAuto: false),
                           originalField == nil || field == originalField else { return false }
                     return insert(text, into: field.element)
                 }, post: keypress,
                      afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
-                    if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
+                    if delivery == "history", reason == .focusChanged, let onWait { retry(onWait) }
                     else { completion(delivery, reason) }
                 }
             }
@@ -292,16 +279,11 @@ enum Paste {
         } else { paste() }
     }
 
-    static func send(_ text: String, to board: NSPasteboard, shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
+    static func send(_ text: String, shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
                      insert: (String) -> Bool, post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
                      completion: @escaping (String, PasteBlockReason?) -> Void) {
-        func failed(_ reason: PasteBlockReason) {
-            board.clearContents()
-            if board.setString(text, forType: .string) { completion("clipboard", reason) }
-            else { completion("history", .clipboardUnavailable) }
-        }
-        if let reason = check() { failed(reason); return }
-        guard insert(text) else { failed(.eventUnavailable); return }
+        if let reason = check() { completion("history", reason); return }
+        guard insert(text) else { completion("history", .eventUnavailable); return }
         guard shouldPressEnter() else { completion("pasted", nil); return }
         afterPaste {
             guard isCurrent() else { completion("pasted", nil); return }

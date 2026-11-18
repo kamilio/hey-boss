@@ -564,7 +564,7 @@ final class Overlay {
             ("Dictation", [
                 ("AI Correction", #selector(toggleCorrection), correctionEnabled, ""),
                 ("Auto Submit", #selector(toggleAutoSubmit), autoSubmitEnabled, "e"),
-                ("Auto Dictation", #selector(toggleAutoMode), autoMode, "v"),
+                ("Auto Dictation", #selector(toggleAutoMode), autoMode, ""),
                 ("Return to Field Before Pasting", #selector(toggleReturnToField), returnToFieldEnabled(), "")
             ]),
             ("Speech", [("Read Aloud", #selector(toggleSpeechMode), speechEnabled(), "t")])
@@ -634,8 +634,8 @@ final class Overlay {
         identity.color = autoMode ? TalkDesign.automatic : TalkDesign.accent
         wave.color = autoMode ? TalkDesign.automatic : TalkDesign.active
         pillContent.toolTip = autoMode
-            ? "Auto · Speak to record · Pause to submit · Enter to send now · Esc to cancel · Hyper+V to turn off · \(DictationShortcut.help)"
-            : "\(DictationShortcut.help) · Hyper+V: Auto mode · Click to start / stop · Drag to move · Right-click for modes"
+            ? "Auto · Speak to record · Pause to submit · Enter to send now · Esc to cancel · Right-click to turn Auto off · \(DictationShortcut.help)"
+            : "\(DictationShortcut.help) · Hyper+V: insert last dictation · Click to start / stop · Drag to move · Right-click for modes"
         pillContent.toolTip = "AI correction \(correctionEnabled ? "on" : "off") · Auto Submit \(autoSubmitEnabled ? "on" : "off") · " + (pillContent.toolTip ?? "")
     }
     private func updateAccessibilityLabel() {

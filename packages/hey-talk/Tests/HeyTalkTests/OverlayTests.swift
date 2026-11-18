@@ -250,7 +250,7 @@ final class OverlayTests: XCTestCase {
         let read = try XCTUnwrap(menu.items.first { $0.title == "Read Aloud" })
         let automatic = try XCTUnwrap(menu.items.first { $0.title == "Auto Dictation" })
         let submission = try XCTUnwrap(menu.items.first { $0.title == "Auto Submit" })
-        for (item, key) in [(read, "t"), (automatic, "v"), (submission, "e")] {
+        for (item, key) in [(read, "t"), (automatic, ""), (submission, "e")] {
             XCTAssertEqual(item.keyEquivalent, key)
             XCTAssertEqual(item.keyEquivalentModifierMask, [.control, .command, .option, .shift])
         }

@@ -64,7 +64,7 @@ private struct AccessibilitySetupView: View {
                     .font(.body).lineSpacing(4)
                 Spacer()
             } else {
-                Text("Accessibility lets Hey Talk press ⌘V in the app where you started dictating.")
+                Text("Accessibility lets Hey Talk insert text directly without changing your clipboard. Hyper+V inserts the last dictation again.")
                     .font(.body).lineSpacing(4)
                 VStack(alignment: .leading, spacing: 14) {
                     step("1", "Open Accessibility settings below.")

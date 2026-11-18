@@ -167,7 +167,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         menu.insertItem(selectionCapture.menuItem(), at: 4)
         menuItem?.menu = menu
-        let autoItem = NSMenuItem(title: "Auto Mode · Hyper+V", action: #selector(toggleAutoMode), keyEquivalent: "")
+        let autoItem = NSMenuItem(title: "Auto Mode", action: #selector(toggleAutoMode), keyEquivalent: "")
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
         let correctionItem = NSMenuItem(title: "AI Correction", action: #selector(toggleCorrection), keyEquivalent: "")
         correctionItem.target = self; menu.insertItem(correctionItem, at: 3); correctionMenuItem = correctionItem
@@ -411,7 +411,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         switch action {
         case .toggle(.submit): recordShortcut()
         case .toggle(.autoSubmit): toggleAutoSubmit()
-        case .toggleAuto: toggleAutoMode()
+        case .insertLast: insertLast()
         case .toggleSpeech: speech.toggle()
         case .toggleSpeechMode: speech.toggleEnabled()
         case .captureSelection: selectionCapture.insertSelection()
@@ -615,12 +615,39 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     @objc private func cancelDictation() {
         guard conversation == nil else { return }
-        if let wait = waitingPaste, wait.timer.isValid,
-           !Paste.copyAndStopWaiting(wait.text, retry: wait.timer, to: .general) {
-            overlay?.waitToPaste("Clipboard unavailable. Try copying again.", while: wait.timer)
-            return
-        }
         cancel()
+    }
+    private func insertLast() {
+        guard session.phase != .recording, session.phase != .processing || waitingPaste != nil else {
+            showOverlay(true); overlay?.error("Finish dictating before inserting the last transcript."); return
+        }
+        let app = FocusedInput.keyboardApp
+        let field = app.flatMap { FocusedInput.read(app: $0, forAuto: false) }
+        if waitingPaste != nil || autoTarget != nil || autoRestart != nil { cancel() }
+        let generation = session.generation
+        func insert(_ text: String?) {
+            guard session.generation == generation else { return }
+            guard let text, !text.isEmpty else { showOverlay(true); overlay?.error("No dictation saved yet."); return }
+            Paste.deliver(.paste(text), target: app, originalField: field, shouldPressEnter: { false }, returnToField: nil,
+                          needsField: true, onWait: nil,
+                          isCurrent: { self.session.generation == generation }) { _, reason in
+                self.lastPasteBlock = reason
+                if let reason {
+                    self.showOverlay(true)
+                    self.overlay?.error(reason.message(targetName: app?.localizedName), accessibilityAction: reason == .accessibility)
+                }
+            }
+        }
+        if let entry = history.entries.first, entry.createdAt >= HistoryStore.cutoff || history.unsaved.contains(entry.id) { insert(entry.text) }
+        else {
+            history.read { result in
+                guard self.session.generation == generation else { return }
+                switch result {
+                case .success(let entries): insert(entries.first?.text)
+                case .failure: self.showOverlay(true); self.overlay?.error("Couldn’t load the last dictation. Open History.")
+                }
+            }
+        }
     }
     @objc private func quit() { NSApp.terminate(nil) }
 
@@ -629,7 +656,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             "ok": true, "state": session.phase.rawValue, "pid": getpid(),
             "model": "orukeet-v0.1.0", "model_ready": ModelPaths.available,
             "hotkey_mode": "toggle", "hotkey": DictationShortcut.submit.name, "hotkey_registered": hotkey?.registered ?? false,
-            "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "auto": "Control+Command+Option+Shift+V", "conversation": "Control+Command+Option+Shift+C", "context": "Control+Command+Option+Shift+M"],
+            "hotkeys": ["auto_submit": DictationShortcut.autoSubmit.name, "submit": DictationShortcut.submit.name, "insert_last": "Control+Command+Option+Shift+V", "conversation": "Control+Command+Option+Shift+C", "context": "Control+Command+Option+Shift+M"],
             "enter_exceptions": enterExceptions.bundleIDs, "enter_exception_sites": enterExceptions.sites,
             "auto": autoSettings.json, "auto_ready": autoSubmitKey.ready,
             "correction": correctionSettings.json,
@@ -1034,7 +1061,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
 
         var response: [String: Any] = [:]
-        var copiedOriginal = false
         var info: [String: Any] = ["status": correctionEnabled ? "applied" : "off",
                                    "context_ms": context?.milliseconds ?? 0, "context_characters": context?.text?.count ?? 0]
         func report(_ delivery: String, _ reason: PasteBlockReason? = nil) {
@@ -1052,13 +1078,13 @@ final class TalkService: NSObject, NSApplicationDelegate {
             waitingPaste = nil; self.automatic = nil; hotkey?.reset()
             overlay?.finishProcessing(); scheduleRelease()
             lastPasteBlock = reason
-            if response["history_saved"] as? Bool == false { overlay?.error(copiedOriginal ? "Raw transcript copied. History couldn’t be saved." : "Not saved. Copy from History before quitting.", retry: retry) }
+            if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.", retry: retry) }
             else if reason == .slackUnavailable { overlay?.showActivity(info["error"] as? String ?? "Slack unavailable", failed: true) }
             else if let action, reason == .t3Unavailable || reason == .newThreadUnavailable {
                 overlay?.confirmAction(action, failed: true)
             }
             else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility, retry: retry) }
-            else if let error = info["error"] as? String { overlay?.error(copiedOriginal ? "Raw transcript copied. " + error : error, retry: retry) }
+            else if let error = info["error"] as? String { overlay?.error(error, retry: retry) }
             if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated", "vocabulary_added"].contains(delivery) {
                 restartAutomatic(id: id)
             }
@@ -1176,20 +1202,18 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 info["error"] = error.localizedDescription
                 info["status"] = lastDelivery == nil ? "fallback" : "partial"
                 func recover() {
-                    let result = Paste.recoverTranscript(original, to: self.paste ? .general : nil)
-                    copiedOriginal = result.delivery == "clipboard"
                     var retry: (() -> Void)?
                     if self.paste, let timeout = error as? CorrectionTimeout {
                         retry = { [finishedID = id] in
                             guard let next = self.session.retryProcessing(finishedID) else { return }
                             id = next; started = ProcessInfo.processInfo.systemUptime
-                            copiedOriginal = false; info["status"] = "applied"; info["error"] = nil
+                            info["status"] = "applied"; info["error"] = nil
                             self.idleRelease?.cancel(); self.hotkey?.captureEscape(true)
                             self.overlay?.processing(audioSeconds: audioSeconds, correction: true)
                             timeout.retry()
                         }
                     }
-                    finish(lastDelivery ?? result.delivery, result.reason, retry: retry)
+                    finish(lastDelivery ?? (self.paste ? "history" : "stdout"), retry: retry)
                 }
                 if lastDelivery != nil || response["history_saved"] as? Bool == true { recover() }
                 else { save(.paste(original), then: recover) }

@@ -13,7 +13,7 @@ Auto Submit setting. CLI commands without `--submit` paste by default.
 
 Brief focus changes are silent. If the original destination is still unfocused after 0.8 seconds, the pill shows **Waiting to paste**.
 Return to the original app to paste automatically. In T3, return to the starting
-thread **and focus the original field**. Esc or × copies the waiting transcript to the clipboard and cancels the automatic paste;
+thread **and focus the original field**. Esc or × cancels the automatic insertion without changing the clipboard;
 starting another dictation replaces it. The transcript stays in History.
 
 **Return to Field Before Pasting** is on by default. When text is ready, Hey Talk
@@ -25,9 +25,11 @@ paste is pending, it only checks whether you’ve returned; Esc cancels the wait
 Turn it off in the waveform menu or the pill’s right-click menu to return manually.
 
 To inspect a missed paste, run `/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "local.hey-talk" AND category == "paste"'`.
-It records the target app, what stopped focus from matching, and whether Hey Talk posted ⌘V. It omits transcript text, clipboard contents, field labels, and URLs.
+It records the target app, what stopped focus from matching, and whether Hey Talk inserted the text. It omits transcript text, clipboard contents, field labels, and URLs.
 
-**Hyper+V toggles Auto mode** (Caps Lock + V with the same Hyper mapping).
+**Hyper+V inserts the last dictation** (Caps Lock + V with the same Hyper mapping) into the focused field without submitting or changing the clipboard. Failed insertions stay in History; focus the destination and press Hyper+V to retry.
+
+Enable **Auto mode** in the menu or with `hey-talk auto on`.
 The compact pill has a soft purple glow and purple recording bars. Focus T3's
 **Message** field to listen. Speaking starts a recording; pausing for about
 2½ seconds transcribes, pastes, and submits. Auto uses the same local speech
@@ -84,7 +86,7 @@ Hey Proxy at `127.0.0.1:8080` with reasoning disabled and storage off. By defaul
 To use Bedrock, choose an OpenAI profile ID from `/bedrock/v1/models` and run `defaults write local.hey-talk correctionBedrockProfile -string 'PROFILE_ID'`. Correction then uses `/bedrock/v1/responses` on the default tier. Delete that preference to restore ordinary proxy routing.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
-If correction fails during dictation, Hey Talk copies the raw transcript so you can press ⌘V. File transcription and `--no-paste` leave the clipboard alone. Escape discards pending correction too.
+If correction fails during dictation, Hey Talk keeps the raw transcript in History; Hyper+V inserts it. Dictation never changes the clipboard. Escape discards pending correction too.
 If correction times out, click the retry arrow next to the close button to continue with the same transcript and original destination. Completed actions won’t run again.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
@@ -273,7 +275,7 @@ hey-talk history show
 hey-talk history --json
 hey-talk warm
 hey-talk auto                               # Show mode and allowed apps
-hey-talk auto on                            # Also available in the menu or Hyper+V
+hey-talk auto on                            # Also available in the menu
 hey-talk auto off
 hey-talk auto toggle                        # App-side toggle; no status/read race
 hey-talk auto add com.example.Editor        # Allow another desktop app
@@ -365,8 +367,8 @@ or recording resumes. The guide opens the Accessibility settings page, reveals
 the installed app in Finder if it needs adding, and detects when permission is on.
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
-that permission, dictation copies to the clipboard. While waiting for focus, the clipboard stays untouched.
-Dictation inserts text at the caret through Accessibility without touching the clipboard. If the target cannot accept direct insertion, the transcript is copied for manual recovery with ⌘V.
+that permission, dictation stays in History. While waiting for focus, the clipboard stays untouched.
+Dictation inserts text at the caret through Accessibility without touching the clipboard. If insertion fails, focus a text field and press Hyper+V to insert the last dictation. Only an explicit Copy in History changes the clipboard.
 The stop response reports `delivery: "waiting"`; status reports `waiting_to_paste`. `--no-paste` and file
 transcription leave the clipboard untouched. Switching from the old ad-hoc
 signature to the persistent certificate requires one final permission approval.
@@ -376,7 +378,7 @@ off and on. If that fails, remove
 the old entry and add `~/Applications/Hey Talk.app` again. The guide checks the
 running process, so “Automatic paste is ready” is the confirmation. Rebuilds
 must use the same certificate; replacing it changes the permission identity.
-Clipboard-only results include `paste_block` in JSON; `status` exposes the most
+Failed insertions report `delivery: "history"` and include `paste_block` in JSON; `status` exposes the most
 recent failure as `last_paste_block`. Notifications distinguish missing access
 from an app switch or a closed target. Quit OpenWhispr if it owns the same hotkey.
 
@@ -460,7 +462,7 @@ macOS permission and the user's keyboard mapping.
 The vocabulary test leaves the running app, microphone, clipboard, preferences,
 and history untouched. Set `HEY_TALK_TEST_APP` to an installed app path to test it.
 
-Auto checks: toggle Hyper+V and inspect the glow; focus T3's Message field and
+Auto checks: toggle Auto mode in the menu and inspect the glow; focus T3's Message field and
 check it listens without recording; Escape or focus a search field and check it stops.
 Refocus, dictate, and pause: exactly one message should submit and the
 microphone should reopen. Move between inputs while speaking and verify the

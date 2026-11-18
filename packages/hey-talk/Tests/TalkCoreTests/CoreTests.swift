@@ -129,10 +129,10 @@ final class CoreTests: XCTestCase {
         XCTAssertEqual(hotkey.keyDown(code: 15, hyper: true, repeated: false), .toggle(.submit))
     }
 
-    func testHyperVTogglesAutoOnceWithoutChangingExistingShortcuts() {
+    func testHyperVInsertsLastOnceWithoutChangingExistingShortcuts() {
         var hotkey = HotkeyState()
         XCTAssertEqual(hotkey.keyDown(code: 9, hyper: false, repeated: false), .none)
-        XCTAssertEqual(hotkey.keyDown(code: 9, hyper: true, repeated: false), .toggleAuto)
+        XCTAssertEqual(hotkey.keyDown(code: 9, hyper: true, repeated: false), .insertLast)
         XCTAssertEqual(hotkey.keyDown(code: 9, hyper: true, repeated: true), .none)
         XCTAssertEqual(hotkey.keyDown(code: 14, hyper: true, repeated: false), .none)
         _ = hotkey.keyUp(code: 9)
