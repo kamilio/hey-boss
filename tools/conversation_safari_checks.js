@@ -123,6 +123,7 @@ async (page) => {
   while (!(recorded&&heard) && Date.now()<deadline) await page.waitForTimeout(50);
   if (!recorded || !heard) throw Error("Missing microphone frames or playback acknowledgment");
   await page.evaluate(()=>{
+    window.finishedCall = new WeakRef(voice.ctx);
     const port=voice.mic.port, receive=port.onmessage;
     window.micPackets=0;
     port.onmessage=e=>{const pcm=new Int16Array(e.data);pcm[0]=-31337;pcm[1]=++window.micPackets;receive(e);};
@@ -187,6 +188,8 @@ async (page) => {
   await page.evaluate(()=>voice.mic.port.onmessage=null);
   await page.getByText("No microphone audio. Tap Start voice to reconnect.").waitFor({timeout:12000});
   if(await page.evaluate(()=>!!voice || window.testMic.readyState!=="ended")) throw Error("An unresponsive microphone left voice running");
+  await page.requestGC();
+  if (await page.evaluate(()=>!!window.finishedCall.deref())) throw Error("Safari retained a finished voice call");
   // Two seconds of input must reach the Mac at the same duration and pitch at 16 kHz.
   await page.evaluate(async()=>{
     for (const rate of [8000,11025,44100,48000]) {
