@@ -30,7 +30,8 @@ async function refresh() {
   chat = s.chat; snapshot = s;
   const v = s.voice, mine = !!voice && s.mine;
   $('status').textContent = v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message;
-  $('talk').textContent = mine ? 'End voice' : 'Start voice';
+  $('talk').ariaLabel = mine ? 'End voice' : 'Start voice';
+  $('talk').dataset.phase = v.phase;
   $('talk').disabled = !!starting || (!mine && v.phase !== 'idle');
   if (mine) {
     const track=voice.track.getAudioTracks()[0];
@@ -49,6 +50,9 @@ async function refresh() {
   $('approval').hidden = !mine || !s.approval;
   if (s.approval) $('approval').querySelector('pre').textContent=s.approval.text;
   if (s.messages) {
+    $('empty').querySelector('h1').textContent = s.heading || 'Start a conversation';
+    $('empty').querySelector('p').textContent = s.hint || '';
+    $('draft').placeholder = s.placeholder || 'Message Hey Boss…';
     button('earlier', s.start>0); button('latest', before!=null);
     const timeline = $('timeline'), follow = !rendered || timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight < 70;
     $('empty').hidden = s.messages.length > 0;
@@ -67,10 +71,11 @@ async function refresh() {
     };
     inserts(s.start);
     for (const [i,msg] of s.messages.entries()) {
-      const row = document.createElement('article'), name = document.createElement('small'), body = document.createElement('div');
+      const row = document.createElement('article');
       if (msg.speaker === 'You') row.className = 'user';
-      name.textContent = msg.speaker; if(msg.html) body.innerHTML=msg.html; else body.textContent = msg.text;
-      row.append(name,body); nodes.push(row); inserts(s.start+i+1);
+      row.setAttribute('aria-label', msg.speaker);
+      if(msg.html) row.innerHTML=msg.html; else row.textContent = msg.text;
+      nodes.push(row); inserts(s.start+i+1);
     }
     $('messages').replaceChildren(...nodes); rendered = s.revision;
     if (before!=null) timeline.scrollTop=0; else if (follow) timeline.scrollTop = timeline.scrollHeight;
@@ -82,7 +87,7 @@ function cleanup(v) {
   if (v.ctx.state !== 'closed') v.ctx.close().catch(()=>{});
   if (voice === v) voice = null;
   if (starting === v) starting = null;
-  $('talk').disabled = false; $('talk').textContent = 'Start voice';
+  $('talk').disabled = false; $('talk').ariaLabel = 'Start voice'; $('talk').dataset.phase = 'idle';
 }
 async function stop(v, tell = true) {
   if (!v || v.closed) return;
@@ -141,7 +146,20 @@ async function start() {
     await resumed; await ctx.audioWorklet.addModule('/mic.js');
     const source = ctx.createMediaStreamSource(v.track), mic = new AudioWorkletNode(ctx,'conversation-mic');
     source.connect(mic); mic.connect(ctx.destination); v.mic = mic; v.source = source;
-    mic.port.onmessage = e => { if (voice === v && v.track.getAudioTracks()[0].enabled && v.input.length < 7) v.input.push(e.data); };
+    const heights = Array(11).fill(4);
+    const drawMeter = () => $('levels').firstElementChild.setAttribute('d', heights.map((h,i)=>`M${2+i*5} ${12-h/2}v${h}`).join(' '));
+    drawMeter();
+    mic.port.onmessage = e => {
+      if (voice !== v) return;
+      const enabled = v.track.getAudioTracks()[0].enabled;
+      if (enabled && v.input.length < 7) v.input.push(e.data);
+      if (!['listening','recording'].includes($('talk').dataset.phase)) return;
+      const pcm = new Int16Array(e.data);
+      let sum = 0;
+      if (enabled) for (const n of pcm) sum += n*n;
+      heights.shift(); heights.push(4 + 18 * Math.min(1, Math.sqrt(sum/pcm.length)/4096)**0.75);
+      drawMeter();
+    };
     v.track.getAudioTracks()[0].onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
     if (v.closed) return;
     await api('start',{session:v.id});

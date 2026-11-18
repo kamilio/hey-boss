@@ -1,9 +1,34 @@
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Conversations</title><meta name="theme-color" content="#10201e"><meta name="apple-mobile-web-app-capable" content="yes"><link rel="apple-touch-icon" href="/icon.png"><link rel="manifest" href="/manifest.webmanifest"><link rel="stylesheet" href="/app.css"><script defer src="/app.js"></script></head><body>
-<header><strong>Conversations</strong><button id="history">Chats</button><button id="fresh">New</button></header>
-<main id="timeline"><div id="empty"><span>HEY BOSS</span><h1>What’s on your mind?</h1><p>Start voice or write a message below.</p></div><button id="earlier" hidden>Earlier messages</button><div id="messages"></div><button id="latest" hidden>Back to latest</button></main>
-<footer><section hidden id="approval"><pre></pre><button id="decline">Decline</button> <button id="allow">Allow once</button></section><p id="notice" role="alert"></p><div id="caption"></div><div class="bar"><button id="talk">Start voice</button><span role="status" id="status">Connecting…</span></div>
-<div class="controls"><button hidden id="mute">Mute mic</button><button hidden id="pause">Pause reply</button><button hidden id="interrupt">Interrupt</button><button hidden id="finish">Send now</button></div>
-<form id="composer"><input id="draft" autocomplete="off" placeholder="Message Hey Boss" aria-label="Message"><button>Send</button></form></footer>
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Conversations</title><meta name="color-scheme" content="light dark">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#f5f5f7">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#1c1c1e">
+<meta name="apple-mobile-web-app-capable" content="yes"><link rel="apple-touch-icon" href="/icon.png">
+<link rel="manifest" href="/manifest.webmanifest"><link rel="stylesheet" href="/app.css"><script defer src="/app.js"></script>
+</head><body>
+<header>
+  <button id="history" aria-label="Chats"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="M9 4v16"/></svg></button>
+  <strong>Hey Boss</strong>
+  <button id="fresh" aria-label="New conversation"><svg viewBox="0 0 24 24"><path d="M13 5H6a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-7M11 15l1-4 8-8 3 3-8 8z"/></svg></button>
+</header>
+<main id="timeline">
+  <div id="empty" hidden><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 14v4m5-9v14m5-20v26m6-22v18m5-14v10m5-8v6"/></svg><h1></h1><p></p></div>
+  <button id="earlier" hidden>Earlier messages</button><div id="messages"></div><button id="latest" hidden>Back to latest</button>
+</main>
+<footer>
+  <section hidden id="approval"><pre></pre><button id="decline">Decline</button> <button id="allow">Allow once</button></section>
+  <p id="notice" role="alert"></p><div id="caption"></div>
+  <form id="composer"><input id="draft" autocomplete="off" placeholder="Message Hey Boss…" aria-label="Message">
+    <button aria-label="Send message"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="11" fill="currentColor" stroke="none"/><path d="M12 17V7m-4 4 4-4 4 4" stroke="white"/></svg></button>
+  </form>
+  <div class="controls">
+    <button id="talk" aria-label="Start voice"><span><svg viewBox="0 0 16 18"><path d="M3 6v6m5-10v14m5-11v9"/></svg><svg id="speaker" viewBox="0 0 24 24"><path d="M3 9h4l5-4v14l-5-4H3zM16 8q4 4 0 8m3-11q7 7 0 14"/></svg><svg id="levels" viewBox="0 0 54 24"><path/></svg></span></button>
+    <button hidden id="mute">Mute mic</button><button hidden id="pause">Pause reply</button>
+    <span role="status" id="status">Connecting…</span>
+    <button hidden id="interrupt">Interrupt</button><button hidden id="finish">Send now</button>
+  </div>
+</footer>
 <dialog id="chats"><div class="bar"><h2>Chats</h2><button id="close">Done</button></div><div id="list"></div><button id="more" hidden>More chats</button></dialog>
 <dialog id="pair"><h2>Pair with your Mac</h2><p>Enter the pairing code from your laptop.</p><form id="pairForm"><input id="code" type="password" aria-label="Pairing code" autocomplete="current-password" required><button>Pair</button></form><p role="alert" id="pairError"></p></dialog>
 </body></html>

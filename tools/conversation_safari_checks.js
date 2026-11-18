@@ -14,6 +14,7 @@ async (page) => {
     if (p.action === "mute") muted = !muted;
     if (p.action === "state") Object.assign(r, {
       chat, mine:active, voice:{phase:active ? "listening":"idle", message:"Listening"},
+      heading:"Work with Codex", hint:"Folder conversation", placeholder:"Message Codex…",
       paused:false, muted, start:0, end:0, revision:1, messages:[], tools:[], visuals:[]
     });
     if (p.action === "exchange") {
@@ -38,11 +39,14 @@ async (page) => {
   await page.setViewportSize({width:390,height:844});
   await page.goto(origin+'/');
   await page.waitForFunction(()=>document.querySelector('#status').textContent==='Ready' && navigator.mediaDevices.getUserMedia.toString().includes('createOscillator'));
+  await page.getByRole("heading",{name:"Work with Codex"}).waitFor();
+  await page.getByPlaceholder("Message Codex…").waitFor();
   await page.getByRole("button",{name:"Start voice"}).click();
   await page.getByRole("button",{name:"End voice"}).waitFor();
   const deadline=Date.now()+10000;
   while (!(recorded&&heard) && Date.now()<deadline) await new Promise(r=>setTimeout(r,50));
   if (!recorded || !heard) throw Error("Missing microphone frames or playback acknowledgment");
+  await page.locator("#levels:visible").waitFor();
   await page.getByRole("button",{name:"Mute mic"}).click();
   await page.waitForFunction(()=>!window.testMic.enabled);
   await page.getByRole("button",{name:"Unmute mic"}).click();

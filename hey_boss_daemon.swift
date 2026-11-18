@@ -8660,6 +8660,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 result["approval"] = ["id":id, "text":[alert.messageText, alert.informativeText, view?.string ?? ""].joined(separator:"\n")]
             }
             if p.revision != phoneRevision || p.chat != library.selected {
+                result["heading"] = headline.stringValue
+                result["hint"] = hint.stringValue
+                result["placeholder"] = input.placeholderString
                 result["messages"] = messages[start..<end].map { ["speaker":$0.speaker, "text":$0.text] }
                 result["tools"] = activities.filter { $0.afterMessage >= start && $0.afterMessage <= end }.map {
                     ["at":$0.afterMessage,"label":$0.description,"state":$0.state,"detail":tools[$0.id].flatMap { details[$0] } ?? $0.output] as [String:Any]
