@@ -38,6 +38,7 @@ async function refresh() {
   const previous = snapshot;
   chat = s.chat; snapshot = s;
   const v = s.voice, mine = !!voice && s.mine;
+  $('empty').hidden = v.phase!=='idle' || s.end>0;
   text($('status'), v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message);
   $('talk').ariaLabel = mine ? 'End voice' : 'Start voice';
   $('talk').dataset.phase = v.phase;
@@ -67,7 +68,6 @@ async function refresh() {
     button('earlier', s.start>0); button('latest', before!=null);
     const entering = rendered==null || previous?.chat!==s.chat;
     const timeline = $('timeline'), follow = entering || timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight < 70;
-    $('empty').hidden = s.messages.length > 0;
     const list = $('messages'), nodes = [];
     const old = new Map(previous?.chat===s.chat ? Array.from(list.children,el=>[el.key,el]) : []);
     const rowFor = (key,tag) => {

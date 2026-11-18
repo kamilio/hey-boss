@@ -87,6 +87,7 @@ async (page) => {
   });
   await page.getByRole("button",{name:"Start voice"}).click();
   await page.getByRole("button",{name:"End voice"}).waitFor();
+  if(await page.getByRole("heading",{name:"Work with Codex"}).isVisible()) throw Error("An active conversation still offered to start one");
   if(await page.evaluate(()=>window.screenLocks)!==1) throw Error("Foreground voice did not request the screen");
   await page.getByRole("button",{name:"Chats",exact:true}).click();
   await page.getByRole("button",{name:"Current chat"}).click();
@@ -124,6 +125,7 @@ async (page) => {
   await page.waitForFunction(()=>window.testMic.readyState==="ended");
   if(await page.evaluate(()=>window.screenLocks)!==0) throw Error("Ending voice kept the display awake");
   await page.getByRole("button",{name:"Start voice"}).waitFor();
+  await page.getByRole("heading",{name:"Work with Codex"}).waitFor();
   if (!requests.includes("stop")) throw Error("The Mac session was left running");
   // The Mac can switch chats while Safari's microphone permission sheet is open.
   const starts = requests.filter(a=>a==="start").length;
