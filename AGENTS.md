@@ -1,4 +1,4 @@
-- “Conversations” means the Hey Boss desktop conversation chat. Start with `VoiceConversation` in `hey_boss_daemon.swift`; its end-to-end checks are in `tools/conversation_checks.sh`.
+- Conversations on desktop and iPhone Safari/Home Screen share `VoiceConversation` in `hey_boss_daemon.swift`. Keep behavior and controls in parity; `src/conversation_web/` handles phone input and presentation. Check both with `tools/conversation_checks.sh` and `tools/conversation_safari_checks.js`.
 - No PRs, straight to main
 - Commit small changes
 - Run GitHub Actions only when the user explicitly asks. Run tests locally on demand; use your judgment about what each change needs.
@@ -17,5 +17,3 @@
 - A few concrete examples; leave command details to `--help`.
 - Link advanced details in references; read only when needed.
 - Preserve the user's cuts; don't grow the manual back.
-
-- Keep desktop and iPhone Safari/Home Screen Conversations in parity. Use `VoiceConversation` for chat state, turn detection, transcription, playback and controls; `src/conversation_web/` handles phone input and presentation. For a change to either client, exercise the same turn on both.

@@ -32,6 +32,11 @@ async function refresh() {
   $('status').textContent = v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message;
   $('talk').textContent = mine ? 'End voice' : 'Start voice';
   $('talk').disabled = !!starting || (!mine && v.phase !== 'idle');
+  if (mine) {
+    const track=voice.track.getAudioTracks()[0];
+    track.enabled=!s.muted;
+    if (s.muted) voice.input.length=0;
+  }
   button('mute', mine, s.muted ? 'Unmute mic' : 'Mute mic');
   button('pause', mine && v.phase === 'speaking', s.paused ? 'Resume reply' : 'Pause reply');
   button('interrupt', mine && v.interrupt);
@@ -136,7 +141,7 @@ async function start() {
     await resumed; await ctx.audioWorklet.addModule('/mic.js');
     const source = ctx.createMediaStreamSource(v.track), mic = new AudioWorkletNode(ctx,'conversation-mic');
     source.connect(mic); mic.connect(ctx.destination); v.mic = mic; v.source = source;
-    mic.port.onmessage = e => { if (voice === v && v.input.length < 7) v.input.push(e.data); };
+    mic.port.onmessage = e => { if (voice === v && v.track.getAudioTracks()[0].enabled && v.input.length < 7) v.input.push(e.data); };
     v.track.getAudioTracks()[0].onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
     if (v.closed) return;
     await api('start',{session:v.id});
