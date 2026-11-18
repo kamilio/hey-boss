@@ -260,8 +260,8 @@ if(typeof document!=='undefined') (()=>{
       <h2 id="skill-directory-title">${moving?'Move '+esc(skill.name):'Import a skill'}</h2>
       <p class="skill-delete-body">${moving?'Move one complete folder. Other copies stay where they are. Distributing this skill later may recreate its agent copies.':'Copy a folder containing SKILL.md into the saved library. You can then distribute it to your agents.'}</p>
       ${moving?`<label>Folder to move<select name="source">${copies.map(c=>`<option value="${esc(c.path)}">${esc(labels[c.agent]||'Skill folder')} · ${esc(c.path)}</option>`).join('')}</select></label>`:''}
-      <label>${moving?'Destination directory':'Skill directory'}<input name="directory" type="text" required autocomplete="off" spellcheck="false" placeholder="~/skills${moving?'':'/my-skill'}" value="${esc(remembered||'')}"></label>
-      <p class="skill-delete-hint">${moving?'The skill folder keeps its name inside this directory.':'The source folder stays where it is.'} The last successful directory is remembered.</p>
+      <label>${moving?'Destination project folder':'Skill directory'}<input name="directory" type="text" required autocomplete="off" spellcheck="false" placeholder="${moving?'~/Workspace/root':'~/skills/my-skill'}" value="${esc(remembered||'')}"></label>
+      <p class="skill-delete-hint">${moving?'The agent’s skills path (for example, .agents/skills) is kept automatically. Missing folders are created.':'The source folder stays where it is.'} The last successful directory is remembered.</p>
       <p class="skill-delete-error" role="alert" hidden></p>
       <div class="skill-delete-actions"><button type="button" class="button" data-directory-cancel>Cancel</button><button type="submit" class="button primary">${moving?'Move folder':'Import skill'}</button></div>
     </form>`;

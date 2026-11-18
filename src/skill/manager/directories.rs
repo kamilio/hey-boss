@@ -106,7 +106,32 @@ pub(super) fn apply(home: &Path, state: &State, action: &Action) -> Result<(Stri
                 "Choose a destination outside the skill folder",
             ));
         }
-        (source, folder.join(&action.skill), action.skill.clone())
+        let agent = match copy["agent"].as_str() {
+            Some("library") => "agents",
+            Some(agent) => agent,
+            None => {
+                return Err(Error::invalid(
+                    "Skill copy has no agent location. Scan again.",
+                ));
+            }
+        };
+        let root = if agent == "project" {
+            ""
+        } else {
+            super::super::AGENT_ROOTS
+                .iter()
+                .find(|(name, _)| *name == agent)
+                .ok_or_else(|| Error::invalid("Unknown agent skill location"))?
+                .1
+        };
+        let relative = Path::new(root).join("skills");
+        // Accept previously remembered skills directories without nesting the path twice.
+        let parent = if folder.ends_with(&relative) {
+            folder.clone()
+        } else {
+            folder.join(relative)
+        };
+        (source, parent.join(&action.skill), action.skill.clone())
     } else {
         let name = folder
             .file_name()
@@ -146,6 +171,13 @@ pub(super) fn apply(home: &Path, state: &State, action: &Action) -> Result<(Stri
     }
     fs::read_to_string(source.join("SKILL.md"))?;
     if action.action == "move" {
+        let parent = target.parent().unwrap();
+        fs::create_dir_all(parent)?;
+        if fs::canonicalize(parent)?.starts_with(&source) {
+            return Err(Error::invalid(
+                "Choose a destination outside the skill folder",
+            ));
+        }
         rename(&source, &target).map_err(|error| {
             if error.raw_os_error() == Some(libc::EXDEV) {
                 Error::invalid("Move requires a destination on the same filesystem. Import the folder to copy it instead.")
@@ -176,7 +208,7 @@ mod tests {
         fs::set_permissions(source.join("run"), fs::Permissions::from_mode(0o755)).unwrap();
         let state = State {
             machines: vec![
-                json!({"host":"local","copies":[{"name":"calendar","path":source,"scope":"global"}]}),
+                json!({"host":"local","copies":[{"name":"calendar","path":source,"scope":"global","agent":"agents"}]}),
             ],
             ..State::default()
         };
@@ -193,12 +225,13 @@ mod tests {
         let (root, state, source) = fixture();
         let destination = root.path().join("saved");
         fs::create_dir(&destination).unwrap();
-        fs::create_dir(destination.join("calendar")).unwrap();
+        fs::create_dir_all(destination.join(".agents/skills/calendar")).unwrap();
         assert!(apply(root.path(), &state, &action("move", &source, &destination)).is_err());
         assert!(source.join("SKILL.md").exists());
-        fs::remove_dir(destination.join("calendar")).unwrap();
+        fs::remove_dir_all(destination.join(".agents")).unwrap();
         let (_, target) =
             apply(root.path(), &state, &action("move", &source, &destination)).unwrap();
+        assert_eq!(target, destination.join(".agents/skills/calendar"));
         assert!(!source.exists());
         assert_eq!(fs::read_to_string(target.join(".hidden")).unwrap(), "keep");
         assert_eq!(
@@ -213,6 +246,30 @@ mod tests {
                 & 0o111,
             0
         );
+    }
+    #[test]
+    fn keeps_agent_layout_and_accepts_remembered_skills_directories() {
+        for (agent, layout) in [
+            ("codex", ".codex/skills"),
+            ("claude", ".claude/skills"),
+            ("project", "skills"),
+            ("library", ".agents/skills"),
+        ] {
+            let (root, mut state, source) = fixture();
+            state.machines[0]["copies"][0]["agent"] = json!(agent);
+            let destination = root.path().join("project");
+            fs::create_dir(&destination).unwrap();
+            let (_, target) =
+                apply(root.path(), &state, &action("move", &source, &destination)).unwrap();
+            assert_eq!(target, destination.join(layout).join("calendar"));
+            assert!(target.join("SKILL.md").exists());
+        }
+        let (root, state, source) = fixture();
+        let destination = root.path().join("project/.agents/skills");
+        fs::create_dir_all(&destination).unwrap();
+        let (_, target) =
+            apply(root.path(), &state, &action("move", &source, &destination)).unwrap();
+        assert_eq!(target, destination.join("calendar"));
     }
     #[test]
     fn imports_without_removing_source_or_overwriting_library() {

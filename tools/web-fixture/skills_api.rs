@@ -351,6 +351,13 @@ fn skill_folders_move_import_and_remember_directories() {
         json!(destination)
     ))
     .unwrap();
+    assert!(
+        page.eval("document.querySelector('#skill-directory-dialog').textContent")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("Destination project folder")
+    );
     for (width, theme) in [(1440, "light"), (390, "dark")] {
         page.command(
             "Emulation.setDeviceMetricsOverride",
@@ -373,7 +380,11 @@ fn skill_folders_move_import_and_remember_directories() {
         .unwrap();
     page.wait("!document.querySelector('#skill-directory-dialog').open");
     assert!(!imported.exists());
-    assert!(destination.join("calendar/references/notes.md").exists());
+    assert!(
+        destination
+            .join(".agents/skills/calendar/references/notes.md")
+            .exists()
+    );
     assert_eq!(api.report()["last_move_directory"], json!(destination));
     drop(api);
 
@@ -414,5 +425,9 @@ fn skill_folders_move_import_and_remember_directories() {
             .contains("already exists")
     );
     assert!(imported.join("SKILL.md").exists());
-    assert!(destination.join("calendar/SKILL.md").exists());
+    assert!(
+        destination
+            .join(".agents/skills/calendar/SKILL.md")
+            .exists()
+    );
 }
