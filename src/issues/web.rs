@@ -646,13 +646,18 @@ fn respond(mut request: tiny_http::Request, app: &App) {
     let _ = request.respond(response);
 }
 fn route(request: &mut tiny_http::Request, app: &App) -> Result<(u16, &'static str, Vec<u8>)> {
-    if !allowed(request, app, false) {
+    let path = request.url().split('?').next().unwrap_or("/").to_owned();
+    // External links may open the reader shell; its data still requires same-origin requests.
+    let artifact_navigation = request.method() == &Method::Get
+        && path == "/artifacts"
+        && header(request, "sec-fetch-mode") == Some("navigate")
+        && header(request, "sec-fetch-dest") == Some("document");
+    if !allowed(request, app, artifact_navigation) {
         return Err(Error::new(
             "forbidden",
             "This interface only accepts its configured same-origin requests",
         ));
     }
-    let path = request.url().split('?').next().unwrap_or("/").to_owned();
     if request.method() == &Method::Get && path == "/html-preview" {
         return Ok((
             200,

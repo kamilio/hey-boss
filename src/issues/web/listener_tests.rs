@@ -202,6 +202,97 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn external_artifact_links_open_the_reader_but_not_cross_origin_data_or_writes() {
+    let fixture = Fixture::start();
+    let client = reqwest::blocking::Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap();
+    let base = format!("http://{}", fixture.addresses[0]);
+    let navigation = |method, path: &str, host: &str, mode, dest| {
+        client
+            .request(method, format!("{base}{path}"))
+            .header("Host", host)
+            .header("Sec-Fetch-Site", "cross-site")
+            .header("Sec-Fetch-Mode", mode)
+            .header("Sec-Fetch-Dest", dest)
+    };
+    for host in [
+        fixture.addresses[0].to_string(),
+        format!("hey-boss.test:{}", fixture.addresses[0].port()),
+        "mac.example.ts.net".to_owned(),
+    ] {
+        let response = navigation(
+            reqwest::Method::GET,
+            "/artifacts?from=link",
+            &host,
+            "navigate",
+            "document",
+        )
+        .send()
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        assert!(response.text().unwrap().contains("id=\"artifact-main\""));
+        for (method, path, mode, dest) in [
+            (
+                reqwest::Method::GET,
+                "/api/bootstrap",
+                "navigate",
+                "document",
+            ),
+            (
+                reqwest::Method::GET,
+                "/api/artifacts",
+                "navigate",
+                "document",
+            ),
+            (reqwest::Method::POST, "/api/action", "navigate", "document"),
+            (reqwest::Method::POST, "/artifacts", "navigate", "document"),
+            (reqwest::Method::GET, "/artifacts", "cors", "empty"),
+            (reqwest::Method::GET, "/artifacts", "navigate", "iframe"),
+        ] {
+            assert_eq!(
+                navigation(method, path, &host, mode, dest)
+                    .send()
+                    .unwrap()
+                    .status(),
+                403,
+                "{host}{path} {mode} {dest}"
+            );
+        }
+    }
+    for host in ["untrusted.example", "127.0.0.1:1"] {
+        assert_eq!(
+            navigation(
+                reqwest::Method::GET,
+                "/artifacts",
+                host,
+                "navigate",
+                "document"
+            )
+            .send()
+            .unwrap()
+            .status(),
+            403
+        );
+    }
+    assert_eq!(
+        navigation(
+            reqwest::Method::GET,
+            "/artifacts",
+            &fixture.addresses[0].to_string(),
+            "navigate",
+            "document"
+        )
+        .header("X-Forwarded-Host", "localhost")
+        .send()
+        .unwrap()
+        .status(),
+        403
+    );
+}
+
+#[test]
 fn simultaneous_listeners_share_writes_csrf_routes_and_release_both_sockets() {
     let mut fixture = Fixture::start();
     let hosts = [
