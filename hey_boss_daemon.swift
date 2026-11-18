@@ -8253,7 +8253,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     var approvalSheet: NSAlert?
     let cli: String
     let recognizer = SFSpeechRecognizer()
-    private var backgroundEscape: GlobalShortcut?
+    private(set) var backgroundEscape: GlobalShortcut?
     private var pauseID: UUID?
     var phase: Phase = .idle
     var audio: ReviewAudio?
@@ -8932,7 +8932,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
     @objc private func updateBackgroundEscape() {
         // In the transcript, sendEvent lets sheets and input methods handle Escape first.
-        guard phase != .idle, pauseID == nil, !window.isKeyWindow, window.attachedSheet?.isKeyWindow != true else {
+        guard phase != .idle, audio?.phoneSession == nil, pauseID == nil, !window.isKeyWindow, window.attachedSheet?.isKeyWindow != true else {
             backgroundEscape = nil; return
         }
         if backgroundEscape == nil {

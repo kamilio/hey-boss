@@ -4836,6 +4836,7 @@ func auditPhone(_ path: String) throws {
     id = try call("state")["chat"] as! String
     _ = try call("start")
     precondition(chat.phase == .listening && !chat.audio!.engine.isRunning)
+    precondition(chat.backgroundEscape == nil, "Phone voice must leave the Mac's global Escape key alone")
     let stale = try? call("stop", ["session":UUID().uuidString]); precondition(stale == nil)
     _ = try call("mute"); precondition(chat.audio!.inputMuted); _ = try call("mute")
     // Keep the agent side deterministic; the detector, Mac transcription and voice are real.
