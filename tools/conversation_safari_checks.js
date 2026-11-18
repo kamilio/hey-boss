@@ -135,5 +135,11 @@ async (page) => {
   await page.evaluate(()=>window.grantMic());
   await page.waitForFunction(()=>window.testMic.readyState==="ended",null,{timeout:4000});
   if(requests.filter(a=>a==="start").length!==starts) throw Error("Voice started in a different chat");
-
+  await page.evaluate(()=>window.holdMic=false);
+  phase='listening';
+  await page.getByRole("button",{name:"Start voice"}).click();
+  await page.getByRole("button",{name:"End voice"}).waitFor();
+  await page.evaluate(()=>voice.mic.port.onmessage=null);
+  await page.getByText("No microphone audio. Tap Start voice to reconnect.").waitFor({timeout:12000});
+  if(await page.evaluate(()=>!!voice || window.testMic.readyState!=="ended")) throw Error("An unresponsive microphone left voice running");
 }

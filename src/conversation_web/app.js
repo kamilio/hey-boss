@@ -129,6 +129,8 @@ async function pump(v) {
   if (v.closed) return;
   try {
     if (v.ctx.state !== 'running') throw Error('Audio interrupted. Tap Start voice to reconnect.');
+    if (!v.track.getAudioTracks()[0].enabled) v.lastCapture = performance.now();
+    else if (performance.now()-v.lastCapture > 8000) throw Error('No microphone audio. Tap Start voice to reconnect.');
     for (const s of v.segments) {
       const elapsed = Math.floor((v.ctx.currentTime-s.at)*s.rate);
       if (elapsed < 0) break;
@@ -166,6 +168,7 @@ async function start() {
     drawMeter();
     mic.port.onmessage = e => {
       if (voice !== v) return;
+      v.lastCapture = performance.now();
       const enabled = v.track.getAudioTracks()[0].enabled;
       if (enabled && v.input.length <= 60) v.input.push(e.data);
       if (!['listening','recording'].includes($('talk').dataset.phase)) return;
@@ -179,7 +182,7 @@ async function start() {
     if (v.closed) return;
     await api('start',{session:v.id,chat:selected});
     if (v.closed) { await api('stop',{session:v.id}); return; }
-    voice = v; starting = null; pump(v);
+    voice = v; starting = null; v.lastCapture = performance.now(); pump(v);
     navigator.wakeLock?.request('screen').then(lock=>{
       if (v.closed) return lock.release();
       v.wake=lock;
