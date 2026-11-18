@@ -49,6 +49,26 @@ form, .controls, .bar { display: flex; align-items: center; gap: 6px }
 dialog { color: var(--text); width: min(92%, 34rem); padding: 20px; max-height: 78dvh }
 dialog::backdrop { background: #0005 }
 dialog h2 { flex: 1; margin: 0; font-size: 21px }
+body:has(#pair[open]) > :is(main, footer, #offlineNotice), body:has(#pair[open]) .conversation-bar > button { display: none }
+#pair[open] { position: relative; inset: auto; flex: none; width: min(calc(100% - 40px), 400px); max-height: none; margin: auto; padding: 32px; overflow: visible }
+#pair .pair-icon { display: grid; place-items: center; width: 52px; height: 52px; margin-bottom: 24px; border-radius: 15px; background: var(--accent-soft); color: var(--accent) }
+.pair-icon svg { width: 28px; height: 28px; stroke-width: 2.2 }
+#pair h2 { font-size: 26px; font-weight: 650; letter-spacing: -.035em; line-height: 1.2 }
+#pairHint { margin: 12px 0 26px; line-height: 1.55; text-wrap: pretty }
+#pairForm { display: flex; flex-direction: column; align-items: stretch; gap: 10px }
+#pairForm label { font-size: 12px; font-weight: 600 }
+#pairForm input { width: 100%; height: 46px; padding: 10px 12px }
+#pairForm button { margin-top: 4px; font-size: 14px; font-weight: 600 }
+.pair-help { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 18px; font-size: 12px; color: var(--muted) }
+.pair-help summary { cursor: pointer }
+.pair-help code { display: block; overflow-wrap: anywhere; color: var(--text); font-size: 11px }
+.pair-help p:last-child { margin-bottom: 0 }
+#pairError { margin: 12px 0 0; font-size: 13px }
+#offlineNotice:not([hidden]) { display: flex; align-items: center; gap: 12px; width: min(calc(100% - 32px), 46rem); align-self: center; margin: 0 0 12px; color: var(--muted); font-size: 12px }
+#offlineNotice span { flex: 1 }
+#offlineNotice button { min-height: 44px }
+@media (max-width: 440px) { #pair[open] { padding: 26px; margin-block: auto } }
+@media (max-height: 650px) { body:has(#pair[open]) { height: auto } #pair[open] { margin-block: 24px } }
 
 #list button { display: block; min-height: 46px; padding: 8px; width: 100%; color: var(--text); background: transparent; overflow-wrap: anywhere; text-align: left; border-bottom: 1px solid var(--line); border-radius: 0 }
 #list button[aria-current] { background: var(--accent-soft); color: var(--accent); font-weight: 600 }

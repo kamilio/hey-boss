@@ -32,6 +32,8 @@ EXT
   mv "$stage/server.key" "$stage/server.pem" "$web/"
   printf '%s:4785\n' "$host" > "$web/host"
 fi
+# Trust only this server certificate locally. Chrome rejects hostname-constrained CA trust.
+security add-trusted-cert -r trustAsRoot -p ssl -k "$HOME/Library/Keychains/login.keychain-db" "$web/server.pem"
 test -s "$web/pairing-code" || openssl rand -hex 16 >"$web/pairing-code"
 label=local.hey-boss.conversation-web
 plist="$HOME/Library/LaunchAgents/$label.plist"

@@ -33,6 +33,14 @@
     <button class="button" hidden id="interrupt">Interrupt reply</button><button class="button" hidden id="end">End voice</button>
   </div>
 </footer>
+<section id="offlineNotice" role="status" hidden><span></span><button class="button" id="retryOffline">Retry</button></section>
 <dialog class="glass" id="chats" aria-labelledby="chatsTitle"><div class="bar"><h2 id="chatsTitle">Chats</h2><button class="button" id="close">Done</button></div><div id="list"></div><button class="button" id="more" hidden>More chats</button></dialog>
-<dialog class="glass" id="pair" aria-labelledby="pairTitle"><h2 id="pairTitle">Pair with your Mac</h2><p>Enter the pairing code from your laptop.</p><form id="pairForm"><input class="text-input" id="code" type="password" aria-label="Pairing code" autocomplete="current-password" required><button class="button primary">Pair</button></form><p role="alert" id="pairError"></p></dialog>
+<dialog class="glass" id="pair" aria-labelledby="pairTitle" aria-describedby="pairHint">
+  <div class="pair-icon" aria-hidden="true"><svg viewBox="0 0 32 32"><path d="M4 13v6m6-11v16m6-21v26m6-18v14m6-12v6"/></svg></div>
+  <h2 id="pairTitle">Connect to your Mac</h2>
+  <p id="pairHint">Your Hey Boss conversations, with voice and messages on this device.</p>
+  <form id="pairForm"><label for="code">Pairing code</label><input class="text-input" id="code" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" required><button class="button primary">Connect</button></form>
+  <p role="alert" id="pairError"></p>
+  <details class="pair-help"><summary>Where do I find the code?</summary><p>On your Mac, use Finder’s <strong>Go → Go to Folder</strong> to open:</p><code>~/Library/Application Support/hey-boss/conversation-web/</code><p>Open <strong>pairing-code</strong> and paste its contents above. You only need to do this once per browser.</p></details>
+</dialog>
 </body></html>

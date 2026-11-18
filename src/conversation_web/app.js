@@ -72,7 +72,8 @@ async function api(action, fields = {}) {
     body:JSON.stringify({action, chat, session:voice?.id, ...fields}), signal:AbortSignal.timeout(6500)}); }
   catch { connected=false; connection(); throw Error('The Mac is unavailable. Check the connection and try again.'); }
   if (res.status === 403) {
-    if (!$('pair').open) $('pair').showModal();
+    connected=false; connection();
+    if (!$('pair').open) $('pair').show();
     throw Error('Pair this device to continue.');
   }
   if (!res.ok) { connected=false; connection(); throw Error('The Mac is unavailable. Check the connection and try again.'); }
@@ -374,9 +375,12 @@ async function list() {
 act('history',async()=>{after=null;$('list').replaceChildren();await list();$('chats').showModal();});
 act('more',list); act('close',()=>$('chats').close());
 $('pairForm').onsubmit=async e=>{e.preventDefault();try{
-  const r=await fetch('/pair',{method:'POST',body:$('code').value.trim()});if(!r.ok)throw Error('Pairing code did not match.');
-  $('code').value=''; $('pair').close(); $('notice').textContent=''; await refresh();
-}catch(e){$('pairError').textContent=e.message;}};
+  $('pairForm').querySelector('button').disabled=true; $('pairError').textContent='';
+  const r=await fetch('/pair',{method:'POST',body:$('code').value.trim(),signal:AbortSignal.timeout(6500)});
+  if(!r.ok)throw Error(r.status===403 ? 'That code didn’t match. Copy the pairing code from your Mac and try again.' : 'Your Mac could not connect. Try again.');
+  $('code').value=''; $('pair').close(); $('notice').textContent=''; await refresh().catch(e=>notice(e,true));
+}catch(e){$('pairError').textContent=e instanceof TypeError || e.name==='TimeoutError' ? 'Couldn’t reach your Mac. Check that it’s awake and on the same Wi-Fi, then try again.' : e.message;}
+finally{$('pairForm').querySelector('button').disabled=false;}};
 function leave() {
   const v=voice || starting; if(!v)return;
   cleanup(v); navigator.sendBeacon('/api',JSON.stringify({action:'stop',chat,session:v.id}));
@@ -390,7 +394,20 @@ try {
   $('draft').value=localStorage.getItem(draftKey(chat)) || '';
   connection(); outbox();
 } catch { notice(Error('Could not read saved messages on this device.')); }
-if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{if(!navigator.serviceWorker.controller)notice(Error('Offline opening is unavailable. Keep this page open to retain access.'));});
+async function enableOffline() {
+  if(!('serviceWorker' in navigator)) return;
+  $('retryOffline').disabled=true;
+  try { await navigator.serviceWorker.register('/sw.js'); $('offlineNotice').hidden=true; }
+  catch(e) {
+    console.warn('Offline setup failed:',e);
+    $('offlineNotice').hidden=!!navigator.serviceWorker.controller;
+    text($('offlineNotice').querySelector('span'),e.name==='SecurityError'
+      ? 'Trust your Mac’s certificate to enable offline opening, then retry.'
+      : 'Offline opening is unavailable. You can still use Conversations while connected.');
+  } finally { $('retryOffline').disabled=false; }
+}
+$('retryOffline').onclick=enableOffline;
+void enableOffline();
 document.addEventListener('visibilitychange',()=>{if(document.hidden)leave();});
 (async function observe(){if(!document.hidden && !$('pair').open){try{await refresh();}catch(e){notice(e,true);}}
   setTimeout(observe,voice || snapshot?.voice.phase==='thinking' ? 450 : 1400);

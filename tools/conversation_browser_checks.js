@@ -6,6 +6,13 @@ const assets={'/':'src/conversation_web/index.html','/components.css':'src/issue
 const fixture={};
 const server=http.createServer((req,res)=>{
  if(fixture.offline){req.socket.destroy();return;}
+ if(req.url==='/sw.js' && fixture.failWorker){res.writeHead(503);return res.end();}
+ if(req.url==='/pair' && fixture.pairing){
+  let body='';req.on('data',b=>body+=b);req.on('end',()=>{
+   fixture.paired=body==='test-pairing-code';res.writeHead(fixture.paired?200:403);res.end();
+  });return;
+ }
+ if(req.url==='/api' && fixture.pairing && !fixture.paired){res.writeHead(403);return res.end();}
  if(req.url==='/api' && fixture.messages){
   let body='';req.on('data',b=>body+=b);req.on('end',()=>{
    const p=JSON.parse(body),r={status:'ok'},chat=fixture.chat;
@@ -34,11 +41,12 @@ const server=http.createServer((req,res)=>{
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
  try {
   for(const [name,engine] of [['webkit',webkit],['chrome',chromium]]) {
-   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js']) {
+   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js','conversation_pairing_checks.js']) {
     const browser=await engine.launch(name==='chrome'?{channel:'chrome',headless:true}:{headless:true});
     try {
      for(const key of Object.keys(fixture))delete fixture[key];fixture.browser=name;
-     const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:file.includes('offline')?'allow':'block'});
+     if(file.includes('pairing')) Object.assign(fixture,{pairing:true,failWorker:true});
+     const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:/offline|pairing/.test(file)?'allow':'block'});
      const page=await context.newPage();await page.goto(origin);
      console.log(name+': '+await vm.runInThisContext(fs.readFileSync(path.join(root,'tools',file),'utf8'))(page,fixture));
     } finally {await browser.close();}
