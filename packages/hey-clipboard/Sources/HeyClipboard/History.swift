@@ -8,8 +8,10 @@ struct Clip: Codable, Identifiable, Equatable {
     var copiedAt = Date()
     var pinned = false
 
+    var preview: String { String(text.prefix(240)) }
+
     var summary: [String: Any] {
-        ["id": id.uuidString, "preview": String(text.prefix(240)), "characters": text.count,
+        ["id": id.uuidString, "preview": preview, "characters": text.count,
          "app": app, "copied_at": ISO8601DateFormatter().string(from: copiedAt), "pinned": pinned]
     }
 }

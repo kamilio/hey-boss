@@ -7,7 +7,7 @@ final class PickerPanel: NSPanel, NSWindowDelegate {
     override var canBecomeMain: Bool { true }
     init(model: ClipboardApp) {
         self.model = model
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 660, height: 640), styleMask: [.borderless], backing: .buffered, defer: false)
+        super.init(contentRect: NSRect(x: 0, y: 0, width: 480, height: 300), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         title = "Hey Clipboard"
         isOpaque = false; backgroundColor = .clear; hasShadow = true
         level = .normal; isReleasedWhenClosed = false; delegate = self
@@ -73,6 +73,7 @@ private struct QuickPickerView: View {
     @ObservedObject var history: History
 
     var body: some View {
+        let selectedID = model.selection?.id
         VStack(spacing: 0) {
             if history.clips.isEmpty {
                 VStack(spacing: 12) {
@@ -84,10 +85,10 @@ private struct QuickPickerView: View {
                     ScrollView {
                         LazyVStack(spacing: 6) {
                             ForEach(history.clips) { clip in
-                                let selected = model.selection?.id == clip.id
+                                let selected = selectedID == clip.id
                                 HStack(spacing: 12) {
                                     VStack(alignment: .leading, spacing: 5) {
-                                        Text(clip.text).font(.system(size: 13, weight: selected ? .medium : .regular))
+                                        Text(clip.preview).font(.system(size: 13, weight: selected ? .medium : .regular))
                                             .lineLimit(selected ? 2 : 1)
                                             .frame(maxWidth: .infinity, alignment: .leading)
                                         Text(clip.app).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
@@ -122,7 +123,7 @@ private struct QuickPickerView: View {
                 Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 8)
             }
             HStack {
-                Text("\((history.clips.firstIndex { $0.id == model.selection?.id }).map { $0 + 1 } ?? 0)")
+                Text("\((history.clips.firstIndex { $0.id == selectedID }).map { $0 + 1 } ?? 0)")
                     .fontWeight(.medium).foregroundStyle(.primary)
                 Text("/ \(history.clips.count)")
                 Spacer()
@@ -140,6 +141,7 @@ private struct HistoryView: View {
     @FocusState private var searchFocused: Bool
 
     var body: some View {
+        let selection = model.selection
         VStack(spacing: 0) {
             HStack(spacing: 10) {
                 HStack(spacing: 9) {
@@ -182,19 +184,19 @@ private struct HistoryView: View {
                                     Image(systemName: clip.pinned ? "pin.fill" : "doc.on.clipboard")
                                         .font(.system(size: 13)).foregroundStyle(.teal).frame(width: 20).padding(.top, 3)
                                     VStack(alignment: .leading, spacing: 6) {
-                                        Text(clip.text).font(.system(size: 13)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(clip.preview).font(.system(size: 13)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                                         HStack(spacing: 6) {
                                             Text(clip.app)
                                             Text("·")
                                             Text(clip.copiedAt, style: .relative)
                                         }.font(.system(size: 10)).foregroundStyle(.secondary)
                                     }
-                                    if model.selection?.id == clip.id {
+                                    if selection?.id == clip.id {
                                         Image(systemName: "return").font(.system(size: 12)).foregroundStyle(.teal).padding(.top, 3)
                                     }
                                 }
                                 .padding(13).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(.teal.opacity(model.selection?.id == clip.id ? 0.13 : 0), in: RoundedRectangle(cornerRadius: 13))
+                                .background(.teal.opacity(selection?.id == clip.id ? 0.13 : 0), in: RoundedRectangle(cornerRadius: 13))
                                 .contentShape(Rectangle())
                                 .onTapGesture(count: 2) { model.selected = clip.id; model.pasteSelection() }
                                 .onTapGesture { model.selected = clip.id }
@@ -211,7 +213,7 @@ private struct HistoryView: View {
                     .onChange(of: model.selected) { _, id in if let id { proxy.scrollTo(id) } }
                 }
                 Divider().padding(.horizontal, 24).padding(.top, 8)
-                if let clip = model.selection {
+                if let clip = selection {
                     ScrollView {
                         Text(clip.text).font(.system(size: 12)).textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 12)
@@ -223,7 +225,7 @@ private struct HistoryView: View {
                 Label(model.cycling ? "Release ⌘⇧ to paste" : model.paused ? "Capture paused" : "On this Mac", systemImage: model.cycling ? "return" : model.paused ? "pause.circle" : "lock.shield")
                     .foregroundStyle(.secondary)
                 Spacer()
-                if let clip = model.selection {
+                if let clip = selection {
                     Button { history.pin(clip.id, !clip.pinned) } label: { Image(systemName: clip.pinned ? "pin.slash" : "pin") }
                         .buttonStyle(.plain).help(clip.pinned ? "Unpin" : "Pin").accessibilityLabel(clip.pinned ? "Unpin" : "Pin")
                     Button("Copy") { model.copySelection() }.buttonStyle(.plain)

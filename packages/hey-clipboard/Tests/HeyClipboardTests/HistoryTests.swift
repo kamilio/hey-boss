@@ -93,4 +93,13 @@ final class HistoryTests: XCTestCase {
         XCTAssertThrowsError(try History(directory: directory))
         XCTAssertEqual(try Data(contentsOf: file), corrupt)
     }
+    func testBoundedPreviewKeepsFullTextForSearchAndCopy() throws {
+        let text = String(repeating: "🌍", count: 300) + " searchable ending"
+        let clip = try XCTUnwrap(history.add(text, app: "Test"))
+        XCTAssertEqual(clip.preview, String(repeating: "🌍", count: 240))
+        XCTAssertEqual(clip.summary["preview"] as? String, clip.preview)
+        XCTAssertEqual(history.matching("searchable ending").first?.text, text)
+        XCTAssertTrue(ClipboardMonitor(history: history, board: board).copy(clip))
+        XCTAssertEqual(board.string(forType: .string), text)
+    }
 }

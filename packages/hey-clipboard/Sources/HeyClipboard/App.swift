@@ -32,8 +32,14 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         super.init()
         server.handle = { [weak self] request, reply in self?.command(request, reply: reply) }
     }
-    var visible: [Clip] { history.matching(query).filter { !pinsOnly || $0.pinned } }
-    var selection: Clip? { visible.first { $0.id == selected } ?? visible.first }
+    var visible: [Clip] {
+        let rows = history.matching(query)
+        return pinsOnly ? rows.filter(\.pinned) : rows
+    }
+    var selection: Clip? {
+        let rows = visible
+        return rows.first { $0.id == selected } ?? rows.first
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -43,6 +49,9 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
         installMenus()
         registerHotkey()
+        // Build and lay out the small native panel before the first shortcut.
+        picker = PickerPanel(model: self)
+        picker?.contentView?.layoutSubtreeIfNeeded()
         let timer = Timer(timeInterval: 0.35, repeats: true) { [weak self] _ in
             guard let self else { return }
             self.monitor.poll(app: NSWorkspace.shared.frontmostApplication?.localizedName ?? "Unknown")
@@ -101,13 +110,13 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         picker?.setContentSize(NSSize(width: browsing ? 660 : 480, height: browsing ? 560 : 300))
         picker?.centerOnMouseScreen()
         picker?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        if browsing { NSApp.activate(ignoringOtherApps: true) }
     }
     func dismiss() { cycling = false; picker?.orderOut(nil); target?.activate() }
     func move(_ delta: Int) {
         let rows = visible
         guard !rows.isEmpty else { selected = nil; return }
-        let index = rows.firstIndex { $0.id == selection?.id } ?? 0
+        let index = rows.firstIndex { $0.id == selected } ?? 0
         selected = rows[(index + delta + rows.count) % rows.count].id
     }
     func deleteSelection() {
@@ -136,8 +145,18 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         pasting = true
         let count = NSPasteboard.general.changeCount
         picker?.orderOut(nil)
-        target.activate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+        if !target.isActive { target.activate() }
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.5
+        func postWhenActive() {
+            guard target.isActive else {
+                guard !target.isTerminated, ProcessInfo.processInfo.systemUptime < deadline else {
+                    self.pasting = false
+                    reply(["ok": false, "error": "Copied. The destination did not become active; nothing was pasted."])
+                    return
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01, execute: postWhenActive)
+                return
+            }
             DispatchQueue.global(qos: .userInitiated).async {
                 let result: [String: Any]
                 do {
@@ -146,6 +165,7 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
                 DispatchQueue.main.async { self.pasting = false; reply(result) }
             }
         }
+        postWhenActive()
     }
     private func registerHotkey() {
         var event = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
