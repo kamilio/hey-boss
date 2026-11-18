@@ -33,12 +33,12 @@ form, .controls, .bar { display: flex; align-items: center; gap: 6px }
 #talk { padding: 0; color: var(--accent); background: transparent }
 #talk span { display: flex; align-items: center; justify-content: center; gap: 10px; min-width: 56px; height: 36px; padding: 0 12px; border-radius: 18px; border: 1px solid var(--line); box-shadow: 0 1px 3px #0001 }
 #voice-label { font-size: 12px; font-weight: 600 }
-#talk:not([data-phase=idle]) #voice-label { display: none }
+#voice-label:empty { display: none }
 #talk svg { width: 16px; height: 18px; stroke-width: 2 }
 #talk #levels, #talk #speaker { display: none }
 #talk:is([data-phase=listening], [data-phase=recording]) { color: var(--active) }
 #talk:is([data-phase=listening], [data-phase=recording]) #levels { display: block; width: 54px; height: 24px }
-#talk[data-phase=speaking] svg:first-child { display: none }
+#talk:is([data-phase=listening], [data-phase=recording], [data-phase=speaking]) svg:first-child { display: none }
 #talk[data-phase=speaking] #speaker { display: block }
 #talk:is([data-phase=thinking], [data-phase=decoding], [data-phase=starting]) span { border-color: currentColor }
 #notice, #caption { margin: 5px 0; max-height: 17dvh; overflow: auto; font-size: 14px }

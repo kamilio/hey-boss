@@ -27,7 +27,8 @@ async (page) => {
       approval=null;
     }
     if (p.action === "state") Object.assign(r, {
-      chat, mine:active, voice:{phase:active ? phase:"idle", message:phase, interrupt:phase==='speaking', approval:!!approval},
+      chat, mine:active, voice:{phase:active ? phase:"idle", message:phase, interrupt:phase==='speaking', approval:!!approval,
+        listeningPaused:active && ['listening','recording'].includes(phase) ? muted : undefined},
       heading:"Work with Codex", hint:"Folder conversation", placeholder:"Message Codex…",
       paused, muted, approval, passage:phase==='speaking'?'A spoken reply':'', spoken:2,
       start:0, end:0, revision:1, messages:[], tools:[], visuals:[]
@@ -105,16 +106,21 @@ async (page) => {
   while(frames.length<22 && Date.now()<resumeDeadline) await new Promise(r=>setTimeout(r,50));
   if(frames.length<22 || frames.some((n,i)=>n!==i+1)) throw Error("A short connection stall interrupted or lost microphone audio");
   await page.locator("#levels:visible").waitFor();
-  await page.getByRole("button",{name:"Mute mic"}).click();
+  await page.getByRole("button",{name:"Pause listening"}).click();
   await page.waitForFunction(()=>!window.testMic.enabled);
-  await page.getByRole("button",{name:"Unmute mic"}).click();
+  await page.getByRole("button",{name:"Resume listening"}).click();
   await page.waitForFunction(()=>window.testMic.enabled);
   phase='speaking';
+  await page.getByRole("button",{name:"Mute microphone",exact:true}).waitFor();
   await page.getByRole("button",{name:"Pause reply"}).click();
   await page.getByRole("button",{name:"Resume reply"}).click();
   if (paused || await page.locator('#caption b').textContent()!=='A ') throw Error("Playback controls or spoken caption lost their place");
   await page.getByRole("button",{name:"Interrupt"}).click();
-  await page.getByRole("button",{name:"Send now"}).click();
+  await page.getByRole("button",{name:"End voice",exact:true}).waitFor();
+  await page.getByRole("button",{name:"Pause listening"}).click();
+  await page.getByRole("button",{name:"Resume listening"}).click();
+  await page.getByRole("button",{name:"Send voice message"}).click();
+  if (!requests.includes("finish") || requests.includes("stop")) throw Error("The recording bubble discarded the unfinished turn");
   for(const [id,label] of [['one','Decline'],['two','Allow once']]) {
     approval={id,text:'Fixture action '+id};
     await page.getByText(approval.text).waitFor();
@@ -147,7 +153,8 @@ async (page) => {
   // Two seconds of input must reach the Mac at the same duration and pitch at 16 kHz.
   await page.evaluate(async()=>{
     for (const rate of [8000,11025,44100,48000]) {
-      const ctx=new OfflineAudioContext(1,rate*2,rate); await ctx.audioWorklet.addModule('/mic.js');
+      // Leave one render quantum beyond the last 80 ms packet so it isn't on WebKit's shutdown boundary.
+      const ctx=new OfflineAudioContext(1,rate*2+128,rate); await ctx.audioWorklet.addModule('/mic.js');
       const mic=new AudioWorkletNode(ctx,'conversation-mic'), tone=ctx.createOscillator();
       let samples=0, cycles=0, last=0;
       const received=new Promise(resolve=>{mic.port.onmessage=({data})=>{

@@ -40,7 +40,9 @@ async function refresh() {
   const v = s.voice, mine = !!voice && s.mine;
   $('empty').hidden = v.phase!=='idle' || s.end>0;
   text($('status'), v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message);
-  $('talk').ariaLabel = mine ? 'End voice' : 'Start voice';
+  const recording = mine && v.phase === 'recording';
+  $('talk').ariaLabel = recording ? 'Send voice message' : mine ? 'End voice' : 'Start voice';
+  text($('voice-label'), recording ? 'Send now' : v.phase === 'idle' ? 'Start voice' : '');
   $('talk').dataset.phase = v.phase;
   $('talk').disabled = !!starting || (!mine && v.phase !== 'idle');
   if (mine) {
@@ -48,10 +50,11 @@ async function refresh() {
     track.enabled=!s.muted;
     if (s.muted) voice.input.length=0;
   }
-  button('mute', mine, s.muted ? 'Unmute mic' : 'Mute mic');
+  button('mute', mine && v.phase !== 'starting', v.listeningPaused != null
+    ? (v.listeningPaused ? 'Resume listening' : 'Pause listening') : (s.muted ? 'Unmute microphone' : 'Mute microphone'));
   button('pause', mine && v.phase === 'speaking', s.paused ? 'Resume reply' : 'Pause reply');
   button('interrupt', mine && v.interrupt);
-  button('finish', mine && v.phase === 'recording');
+  button('end', recording);
   if (previous?.passage !== s.passage || previous?.spoken !== s.spoken) {
     $('caption').replaceChildren();
     if (s.passage) {
@@ -115,6 +118,7 @@ function cleanup(v) {
   if (voice === v) voice = null;
   if (starting === v) starting = null;
   $('talk').disabled = false; $('talk').ariaLabel = 'Start voice'; $('talk').dataset.phase = 'idle';
+  text($('voice-label'), 'Start voice'); button('end', false);
 }
 async function stop(v, tell = true) {
   if (!v || v.closed) return;
@@ -210,8 +214,13 @@ const act = (id, fn) => { const el=$(id); el.onclick=async()=>{
   try { await fn(); } catch(e) { notice(e); } finally { el.disabled=false; }
 }; };
 // Start the AudioContext synchronously in the Safari user gesture.
-$('talk').onclick = () => (voice ? stop(voice).then(refresh) : start()).catch(notice);
-for (const id of ['mute','pause','interrupt','finish']) act(id,async()=>{await api(id); await refresh();});
+$('talk').onclick = () => {
+  if (!voice) return start().catch(notice);
+  const action = snapshot.voice.phase==='recording' ? api('finish') : stop(voice);
+  action.then(refresh).catch(notice);
+};
+act('end',async()=>{if (voice) await stop(voice); await refresh();});
+for (const id of ['mute','pause','interrupt']) act(id,async()=>{await api(id); await refresh();});
 act('earlier',async()=>{before=snapshot.start;rendered=null;await refresh();});
 act('latest',async()=>{before=null;rendered=null;await refresh();});
 for (const action of ['allow','decline']) act(action,async()=>{await api(action,{text:snapshot.approval.id});await refresh();});
