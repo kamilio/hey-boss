@@ -61,4 +61,13 @@ async page => {
   const baseline=polls, deadline=Date.now()+6000;
   while(polls<baseline+2 && Date.now()<deadline) await new Promise(r=>setTimeout(r,100));
   if(polls<baseline+2 || await page.evaluate(()=>window.statusWrites)!==0) throw Error('Unchanged status was repeatedly announced');
+  await page.setViewportSize({width:320,height:568});
+  messages.get(chat).push({speaker:'Hey Boss',html:'<table><tr>'+'<th>Column</th>'.repeat(20)+'</tr></table>'});
+  revision++;
+  await page.getByRole('table').waitFor();
+  const fits=await page.evaluate(()=>{
+    const timeline=document.querySelector('#timeline'), table=timeline.querySelector('table');
+    return timeline.scrollWidth===timeline.clientWidth && table.scrollWidth>table.clientWidth;
+  });
+  if(!fits) throw Error('Wide Markdown table scrolls the whole conversation sideways');
 }

@@ -21,6 +21,7 @@ motion/transparency preferences. Reuse these classes when adding UI:
 | Filters | `filter-controls`, `select-control` |
 | Standalone input | `text-input` |
 | Content surface | `glass` |
+| Rendered Markdown, including scrollable tables and code | `markdown` |
 | Page footer | `page-footer`, `footer-mark`, `footer-product` |
 
 `HeyBossUI` supplies icons and the accessible `ProjectPicker`. Page clients own

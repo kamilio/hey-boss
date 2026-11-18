@@ -83,7 +83,7 @@ async function refresh() {
     inserts(s.start);
     for (const [i,msg] of s.messages.entries()) {
       const row = document.createElement('article');
-      if (msg.speaker === 'You') row.className = 'user';
+      row.className = msg.speaker === 'You' ? 'user' : 'markdown';
       row.setAttribute('aria-label', msg.speaker);
       if(msg.html) row.innerHTML=msg.html; else row.textContent = msg.text;
       nodes.push(row); inserts(s.start+i+1);
