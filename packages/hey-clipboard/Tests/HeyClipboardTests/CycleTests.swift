@@ -85,4 +85,22 @@ final class CycleTests: XCTestCase {
         try key(36, flags: [.command, .shift])
         XCTAssertEqual(model.message, "Choose a destination app, then open the picker again.")
     }
+    func testQuickPickerAndSearchHistoryHaveSeparateModesAndSizes() throws {
+        // Empty history keeps mode transitions independent of the real clipboard.
+        model.cycle()
+        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
+        XCTAssertFalse(model.browsing)
+        XCTAssertEqual(panel.frame.size, NSSize(width: 480, height: 300))
+        model.openPicker()
+        XCTAssertTrue(model.browsing)
+        XCTAssertFalse(model.cycling)
+        XCTAssertEqual(panel.frame.size, NSSize(width: 660, height: 560))
+        model.query = "search only"
+        model.pinsOnly = true
+        model.cycle()
+        XCTAssertFalse(model.browsing)
+        XCTAssertTrue(model.query.isEmpty)
+        XCTAssertFalse(model.pinsOnly)
+        XCTAssertEqual(panel.frame.size, NSSize(width: 480, height: 300))
+    }
 }

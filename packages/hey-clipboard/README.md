@@ -11,7 +11,9 @@ hey-clipboard --help
 
 Installation gracefully quits Flycut, imports its saved history and favorites on first install, and starts Hey Clipboard at login. Flycut and its saved data remain installed. Builds use the repo's existing persistent signing certificate. Install Hey Talk too: pasting reuses its Accessibility permission. Copying and history work without Hey Talk.
 
-The picker uses native `NSGlassEffectView` on macOS 26+, with a system material fallback on macOS 15. No webview.
+The shortcut opens a small, title-free picker with no search or management controls. The menu-bar icon and `hey-clipboard show` open the larger history view, with search focused immediately, pins, and full-text previews.
+
+Both views use native `NSGlassEffectView` on macOS 26+, with a system material fallback on macOS 15. No webview.
 
 It stays out of the Dock and Command-Tab. Arrow keys, Enter, and Escape also work while Command+Shift are held.
 

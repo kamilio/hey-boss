@@ -14,6 +14,7 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
     @Published var query = ""
     @Published var selected: UUID?
     @Published var pinsOnly = false
+    @Published private(set) var browsing = false
     let server = Server()
     private var timer: Timer?
     private var cycleTimer: Timer?
@@ -73,11 +74,11 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
     }
     @objc func openPicker() {
         cycling = false
-        showPicker()
+        showPicker(browsing: true)
     }
     func cycle() {
         if cycling, picker?.isVisible == true { move(1) }
-        else { cycling = true; showPicker() }
+        else { cycling = true; showPicker(browsing: false) }
         guard cycleTimer == nil else { return }
         // Modifier release may happen before the panel becomes key. Reading the
         // current flags needs no global keyboard-monitoring permission.
@@ -90,12 +91,14 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
     func flagsChanged(_ flags: NSEvent.ModifierFlags) {
         if cycling, !flags.contains([.command, .shift]) { pasteSelection() }
     }
-    private func showPicker() {
-        if picker?.isKeyWindow == true, NSApp.isActive { return }
-        target = NSWorkspace.shared.frontmostApplication
-        if target?.processIdentifier == getpid() { target = nil }
+    private func showPicker(browsing: Bool) {
+        let sameMode = self.browsing == browsing
+        self.browsing = browsing
+        if sameMode, picker?.isKeyWindow == true, NSApp.isActive { return }
+        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() { target = app }
         query = ""; pinsOnly = false; selected = history.clips.first?.id; message = nil
         if picker == nil { picker = PickerPanel(model: self) }
+        picker?.setContentSize(NSSize(width: browsing ? 660 : 480, height: browsing ? 560 : 300))
         picker?.centerOnMouseScreen()
         picker?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

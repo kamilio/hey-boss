@@ -12,7 +12,7 @@ final class PickerPanel: NSPanel, NSWindowDelegate {
         isOpaque = false; backgroundColor = .clear; hasShadow = true
         level = .normal; isReleasedWhenClosed = false; delegate = self
         collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
-        let host = NSHostingView(rootView: PickerView(model: model, history: model.history).clipShape(RoundedRectangle(cornerRadius: 24)))
+        let host = NSHostingView(rootView: PickerView(model: model).clipShape(RoundedRectangle(cornerRadius: 24)))
         host.sizingOptions = []; host.wantsLayer = true; host.layer?.backgroundColor = NSColor.clear.cgColor
         // Clip the entire backing surface, not only the glass decoration. Otherwise
         // the hosting view leaves square corners underneath the rounded material.
@@ -61,29 +61,59 @@ final class PickerPanel: NSPanel, NSWindowDelegate {
 
 private struct PickerView: View {
     @ObservedObject var model: ClipboardApp
+
+    var body: some View {
+        if model.browsing { HistoryView(model: model, history: model.history) }
+        else { QuickPickerView(model: model, history: model.history) }
+    }
+}
+
+private struct QuickPickerView: View {
+    @ObservedObject var model: ClipboardApp
+    @ObservedObject var history: History
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if history.clips.isEmpty {
+                Text("Copy something to get started").foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 3) {
+                            ForEach(history.clips) { clip in
+                                Text(clip.text).font(.system(size: 14)).lineLimit(2)
+                                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                                    .background(.teal.opacity(model.selection?.id == clip.id ? 0.16 : 0), in: RoundedRectangle(cornerRadius: 12))
+                                    .contentShape(Rectangle())
+                                    .onTapGesture(count: 2) { model.selected = clip.id; model.pasteSelection() }
+                                    .onTapGesture { model.selected = clip.id }
+                                    .id(clip.id)
+                            }
+                        }.padding(10)
+                    }
+                    .onChange(of: model.selected) { _, id in if let id { proxy.scrollTo(id) } }
+                }
+            }
+            if let warning = model.message {
+                Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 8)
+            }
+            HStack {
+                Text("\((history.clips.firstIndex { $0.id == model.selection?.id }).map { $0 + 1 } ?? 0) / \(history.clips.count)")
+                Spacer()
+                Text("↑↓   ↵ Paste   esc")
+            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 12)
+        }
+    }
+}
+
+private struct HistoryView: View {
+    @ObservedObject var model: ClipboardApp
     @ObservedObject var history: History
     @FocusState private var searchFocused: Bool
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 13) {
-                Image(systemName: "clipboard")
-                    .font(.system(size: 25, weight: .medium)).foregroundStyle(.teal)
-                    .frame(width: 50, height: 50)
-                    .background(.teal.opacity(0.10), in: RoundedRectangle(cornerRadius: 16))
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Hey Clipboard").font(.system(size: 24, weight: .semibold, design: .rounded))
-                    Text("Everything you copied, within reach.").font(.system(size: 12)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button { model.togglePause() } label: {
-                    Image(systemName: model.paused ? "play.fill" : "pause.fill")
-                }.buttonStyle(.plain).foregroundStyle(.secondary)
-                    .help(model.paused ? "Resume capture" : "Pause capture")
-                    .accessibilityLabel(model.paused ? "Resume capture" : "Pause capture")
-                Button { model.dismiss() } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 10).accessibilityLabel("Close")
-            }.padding(.horizontal, 24).padding(.top, 24).padding(.bottom, 20)
             HStack(spacing: 10) {
                 HStack(spacing: 9) {
                     Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -99,7 +129,13 @@ private struct PickerView: View {
                         .frame(width: 38, height: 38)
                 }.buttonStyle(.plain).background(.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 12))
                     .help("Show pinned entries").accessibilityLabel("Show pinned entries")
-            }.padding(.horizontal, 24).padding(.bottom, 12)
+                Button { model.togglePause() } label: {
+                    Image(systemName: model.paused ? "play.fill" : "pause.fill")
+                }.buttonStyle(.plain).foregroundStyle(.secondary)
+                    .accessibilityLabel(model.paused ? "Resume capture" : "Pause capture")
+                Button { model.dismiss() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).foregroundStyle(.secondary).padding(.leading, 8).accessibilityLabel("Close")
+            }.padding(.horizontal, 24).padding(.top, 20).padding(.bottom, 12)
             if let warning = history.warning ?? model.message {
                 Text(warning).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 24).padding(.bottom, 8)
             }
@@ -169,8 +205,8 @@ private struct PickerView: View {
                 }
             }.font(.system(size: 11, weight: .medium)).padding(.horizontal, 24).padding(.vertical, 14)
         }
-        .onAppear { searchFocused = !model.cycling }
-        .onChange(of: model.cycling) { _, cycling in searchFocused = !cycling }
+        .onAppear { searchFocused = true }
+        .onReceive(model.$browsing) { if $0 { searchFocused = true } }
         .onChange(of: model.query) { _, _ in model.selected = model.visible.first?.id }
         .onChange(of: model.pinsOnly) { _, _ in model.selected = model.visible.first?.id }
     }
