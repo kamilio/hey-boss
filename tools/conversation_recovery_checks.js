@@ -65,6 +65,12 @@ async page => {
   if(await field.inputValue()!=='Another draft.') throw Error('Send acknowledgment erased the other chat’s draft');
   await open('First chat'); await page.waitForFunction(id=>snapshot.chat===id,chatA);
   if(await field.inputValue()!=='') throw Error('Returning to the original chat restored an already sent draft');
+  await field.focus(); await page.keyboard.insertText('First line\nSecond line');
+  await field.press('Shift+Enter'); await page.keyboard.insertText('Third line');
+  const multiline='First line\nSecond line\nThird line';
+  if(await field.inputValue()!==multiline) throw Error('Paste or Shift+Return lost a line break');
+  await field.press('Enter'); await page.waitForFunction(()=>!document.querySelector('#draft').value);
+  if(messages.get(chat).at(-1).text!==multiline || sends!==3) throw Error('Return did not send the multiline message once');
   failed=true; await notice.getByText('The Mac is unavailable.',{exact:false}).waitFor();
   await field.fill('Offline draft.');
   failed=false;

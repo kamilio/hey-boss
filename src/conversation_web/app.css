@@ -22,7 +22,7 @@ main img { max-width: 100%; height: auto } main details { margin: 8px 0 }
 dialog.glass { background: var(--solid) }
 footer { width: min(calc(100% - 32px), 46rem); margin: 8px 0 14px; padding: 3px 8px 5px 15px; max-height: 65dvh; overflow: auto }
 form, .controls, .bar { display: flex; align-items: center; gap: 6px }
-#draft { flex: 1; min-width: 0; background: transparent; border: 0; padding: 10px 0 }
+#draft { flex: 1; min-width: 0; background: transparent; border: 0; padding: 10px 0; field-sizing: content; max-height: 24dvh; resize: none }
 #draft, #code { font-size: 16px }
 #code { min-width: 0 }
 #composer button { color: var(--accent); width: 44px; padding: 0; display: grid; place-items: center }
