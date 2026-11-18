@@ -2,7 +2,11 @@
 const $ = id => document.getElementById(id);
 let chat, voice, starting, snapshot, after, refreshCount = 0, rendered, before;
 const drafts = new Map();
-const notice = e => { $('notice').textContent = e.message || String(e); };
+function text(el, value) { if (el.textContent !== value) el.textContent = value; }
+function notice(e, polling = false) {
+  text($('notice'), e.message || String(e));
+  $('notice').toggleAttribute('data-connection', polling);
+}
 async function api(action, fields = {}) {
   const res = await fetch('/api', {method:'POST', headers:{'Content-Type':'application/json'},
     body:JSON.stringify({action, chat, session:voice?.id, ...fields}), signal:AbortSignal.timeout(6500)});
@@ -16,20 +20,24 @@ async function api(action, fields = {}) {
   return data;
 }
 function button(id, available, label) {
-  const el = $(id); el.hidden = !available; if (label) el.textContent = label;
+  const el = $(id); el.hidden = !available; if (label) text(el, label);
 }
 async function refresh() {
   const sequence = ++refreshCount;
   const s = await api('state',{revision:rendered,before});
   if (sequence !== refreshCount) return;
+  if ($('notice').hasAttribute('data-connection')) {
+    $('notice').removeAttribute('data-connection'); text($('notice'), '');
+  }
   if (chat && chat !== s.chat) {
     if ($('draft').value) drafts.set(chat,$('draft').value); else drafts.delete(chat);
     $('draft').value=drafts.get(s.chat) || ''; drafts.delete(s.chat);
     if (before!=null) { before=null; rendered=null; chat=s.chat; return refresh(); }
   }
+  const previous = snapshot;
   chat = s.chat; snapshot = s;
   const v = s.voice, mine = !!voice && s.mine;
-  $('status').textContent = v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message;
+  text($('status'), v.approval ? (mine ? 'Approval needed' : 'Approve on your Mac') : v.phase === 'idle' ? (v.detail || 'Ready') : v.message);
   $('talk').ariaLabel = mine ? 'End voice' : 'Start voice';
   $('talk').dataset.phase = v.phase;
   $('talk').disabled = !!starting || (!mine && v.phase !== 'idle');
@@ -42,13 +50,15 @@ async function refresh() {
   button('pause', mine && v.phase === 'speaking', s.paused ? 'Resume reply' : 'Pause reply');
   button('interrupt', mine && v.interrupt);
   button('finish', mine && v.phase === 'recording');
-  $('caption').replaceChildren();
-  if (s.passage) {
-    const heard = document.createElement('b'); heard.textContent = s.passage.slice(0,s.spoken);
-    $('caption').append(heard,s.passage.slice(s.spoken));
+  if (previous?.passage !== s.passage || previous?.spoken !== s.spoken) {
+    $('caption').replaceChildren();
+    if (s.passage) {
+      const heard = document.createElement('b'); heard.textContent = s.passage.slice(0,s.spoken);
+      $('caption').append(heard,s.passage.slice(s.spoken));
+    }
   }
   $('approval').hidden = !mine || !s.approval;
-  if (s.approval) $('approval').querySelector('pre').textContent=s.approval.text;
+  if (s.approval) text($('approval').querySelector('pre'),s.approval.text);
   if (s.messages) {
     $('empty').querySelector('h1').textContent = s.heading || 'Start a conversation';
     $('empty').querySelector('p').textContent = s.hint || '';
@@ -177,6 +187,7 @@ for (const action of ['allow','decline']) act(action,async()=>{await api(action,
 act('fresh',async()=>{ if (voice) await stop(voice); await api('new'); before=null; rendered=null; await refresh(); });
 $('composer').onsubmit = async e => { e.preventDefault(); const text = $('draft').value.trim(); if (!text) return;
   const submit=e.submitter || $('composer').querySelector('button'); if (submit.disabled) return; submit.disabled=true;
+  $('notice').textContent='';
   try { await api('send',{text}); if ($('draft').value.trim()===text) $('draft').value=''; await refresh(); }
   catch(e){notice(e);} finally{submit.disabled=false;}
 };
@@ -202,6 +213,6 @@ function leave() {
 }
 addEventListener('pagehide',leave);
 document.addEventListener('visibilitychange',()=>{if(document.hidden)leave();});
-(async function observe(){if(!document.hidden && !$('pair').open){try{await refresh();}catch(e){notice(e);}}
+(async function observe(){if(!document.hidden && !$('pair').open){try{await refresh();}catch(e){notice(e,true);}}
   setTimeout(observe,voice || snapshot?.voice.phase==='thinking' ? 450 : 1400);
 })();
