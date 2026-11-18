@@ -114,6 +114,8 @@ async function refresh() {
 function cleanup(v) {
   if (!v || v.closed) return;
   v.closed = true; clearTimeout(v.timer); v.track?.getTracks().forEach(t => t.stop());
+  // An open worklet port keeps the finished call reachable in Safari.
+  if (v.mic) { v.mic.port.onmessage = null; v.mic.port.close(); }
   v.wake?.release().catch(()=>{});
   const closeAudio = () => v.ctx.close().catch(()=>{});
   // Safari can deliver a pending unlock after close() has finished.
