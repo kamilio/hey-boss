@@ -9908,8 +9908,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         for index in activities.indices where activities[index].state == "Running" {
             activities[index].state = "Interrupted"; renderTool(activities[index])
         }
-        let unfinishedWorkspace = directory != nil && answering && !turnDone && (turnAccepted || lastMessage?.isEmpty == false)
-        let notice = failure ?? (!published.isEmpty || unfinishedWorkspace ? "Reply stopped before it finished." : nil)
+        let unfinished = answering && !turnDone && (lastMessage?.isEmpty == false || (directory != nil && turnAccepted))
+        let notice = failure ?? (!published.isEmpty || unfinished ? "Reply stopped before it finished." : nil)
         if let notice { append(notice, from: "Conversation") }
         save()
         textFlush?.invalidate(); textFlush = nil

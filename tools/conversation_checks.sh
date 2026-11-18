@@ -5,6 +5,7 @@ root=$(mktemp -d "$PWD/.conversation-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
 HEY_BOSS_AUDIT_CHAT_SIDEBAR="$root/sidebar" "$2"
 HEY_BOSS_AUDIT_CHAT_MANAGEMENT="$root/management" "$2"
+HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_SOL="$root" "$2"
 resources=$(dirname "$2")
 if [ "$(basename "$resources")" = MacOS ]; then resources="$resources/../Resources"; fi
 cargo run --quiet --manifest-path assets/conversation-native/Cargo.toml --example gallery -- "$resources" "$root"

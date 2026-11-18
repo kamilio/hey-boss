@@ -5518,11 +5518,13 @@ func auditConversation(_ root: String) {
     precondition(audio.stopped && ui.audio == nil && ui.reply == nil)
     let resumed = VoiceConversation(cli: cli, saveURL: saved)
     resumed.show()
+    wait("reopened transcript") { resumed.window.isVisible }
     precondition(resumed.rows.count == ui.rows.count)
     let sentCard = resumed.rows[2].superview!
     let attachment = sentCard.subviews.compactMap { $0 as? NSButton }.first!
     precondition(attachment.title.contains("Test Editor") && attachment.bounds.width > 0)
     let preview = sentCard.subviews.compactMap { $0 as? NSTextField }.first { $0.stringValue == captured }!
+    preview.scrollToVisible(preview.bounds)
     precondition(preview.visibleRect.height > 0)
     attachment.performClick(nil)
     let sheet = resumed.window.attachedSheet!
@@ -5541,6 +5543,7 @@ func auditConversation(_ root: String) {
     precondition(oldAudio.stopped && resumed.phase == .starting && resumed.contextChip.title == "Another Window")
     precondition(!resumed.window.isVisible && resumed.rows.isEmpty && resumed.historyList.numberOfRows == 1)
     resumed.show()
+    wait("show before pressing Escape") { resumed.window.isVisible }
     let escape = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: resumed.window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53)!
     resumed.window.sendEvent(escape)
     precondition(resumed.phase == .idle && resumed.audio == nil && resumed.window.isVisible)
@@ -6043,6 +6046,12 @@ func auditSolChat(_ root: String) {
     chat.event(["TurnCompleted": ["status": "Completed", "output": "First sentence. Another sentence.\n\nLast paragraph without a trailing newline."]])
     precondition(chat.rows.last!.stringValue.contains("Last paragraph"))
     chat.window.close()
+    precondition(chat.rows.last!.stringValue.contains("Last paragraph"), "Closing after a completed reply must not mark it interrupted")
+    chat.input.stringValue = "Fixture"; chat.sendTyped()
+    chat.event(["Message": ["text": "A partial reply"]])
+    chat.stop("Reply stopped")
+    let stopped = VoiceConversation(cli: chat.cli, saveURL: saved)
+    precondition(stopped.rows.suffix(2).map(\.stringValue) == ["A partial reply", "Reply stopped before it finished."], "Keep an interruption between Message and TurnCompleted after reopening an ordinary chat")
     print("PASS streaming: opening sentence spoken, split newlines, final paragraph")
     let legacy = URL(fileURLWithPath: root).appendingPathComponent("legacy.json")
     let fixture: [String: Any] = ["messages": [
