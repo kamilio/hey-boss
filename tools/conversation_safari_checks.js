@@ -41,6 +41,20 @@ async (page) => {
   await page.waitForFunction(()=>document.querySelector('#status').textContent==='Ready' && navigator.mediaDevices.getUserMedia.toString().includes('createOscillator'));
   await page.getByRole("heading",{name:"Work with Codex"}).waitFor();
   await page.getByPlaceholder("Message Codex…").waitFor();
+  for (const colorScheme of ["light", "dark"]) {
+    await page.emulateMedia({colorScheme});
+    for (const [width,height] of [[320,568],[390,844],[844,390],[768,1024],[1440,900]]) {
+      await page.setViewportSize({width,height});
+      const fits = await page.evaluate(() => {
+        const root = document.documentElement, dock = document.querySelector("footer").getBoundingClientRect();
+        const brand = document.querySelector(".brand span").getBoundingClientRect();
+        return root.scrollWidth <= innerWidth && dock.bottom <= innerHeight && brand.width > 0
+          && [...document.styleSheets].some(s=>s.href?.endsWith("/components.css") && s.cssRules.length);
+      });
+      if (!fits) throw Error("Missing Hey Boss theme or clipped controls at "+width+"px in "+colorScheme);
+    }
+  }
+  await page.setViewportSize({width:390,height:844});
   await page.getByRole("button",{name:"Start voice"}).click();
   await page.getByRole("button",{name:"End voice"}).waitFor();
   const deadline=Date.now()+10000;

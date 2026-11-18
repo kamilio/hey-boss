@@ -25,6 +25,16 @@ const ASSETS: &[(&str, &str, &[u8])] = &[
         include_bytes!("conversation_web/mic.js"),
     ),
     (
+        "/components.css",
+        "text/css",
+        include_bytes!("issues/web/components.css"),
+    ),
+    (
+        "/brand.png",
+        "image/png",
+        include_bytes!("issues/web/icon.png"),
+    ),
+    (
         "/app.css",
         "text/css",
         include_bytes!("conversation_web/app.css"),

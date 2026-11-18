@@ -1,4 +1,4 @@
-- Conversations on desktop and iPhone Safari/Home Screen share `VoiceConversation` in `hey_boss_daemon.swift`. Match the native layout, colors, controls, and behavior; `src/conversation_web/` handles phone input and presentation. Check both with `tools/conversation_checks.sh` and `tools/conversation_safari_checks.js`.
+- Conversations on desktop and iPhone Safari/Home Screen share `VoiceConversation` in `hey_boss_daemon.swift`. Match the native layout, colors, controls, and behavior; `src/conversation_web/` handles phone input and presentation using the shared Hey Boss web components in `src/issues/web/components.css`. Check both with `tools/conversation_checks.sh` and `tools/conversation_safari_checks.js`.
 - No PRs, straight to main
 - Commit small changes
 - Run GitHub Actions only when the user explicitly asks. Run tests locally on demand; use your judgment about what each change needs.
