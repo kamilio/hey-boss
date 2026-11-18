@@ -43,17 +43,16 @@ final class PickerPanel: NSPanel, NSWindowDelegate {
     override func sendEvent(_ event: NSEvent) {
         if event.type == .flagsChanged { model.flagsChanged(event.modifierFlags) }
         if event.type == .keyDown {
-            // Escape must also cancel while Command and Shift are still held.
-            if event.keyCode == 53 { model.dismiss(); return }
-            let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
-            if modifiers.isEmpty {
-                switch event.keyCode {
-                case 125: model.move(1); return
-                case 126: model.move(-1); return
-                case 36, 76: model.pasteSelection(); return
-                default: break
-                }
+            // Navigation, confirmation, and cancellation also work while the
+            // shortcut's Command and Shift modifiers remain held.
+            switch event.keyCode {
+            case 53: model.dismiss(); return
+            case 125: model.move(1); return
+            case 126: model.move(-1); return
+            case 36, 76: model.pasteSelection(); return
+            default: break
             }
+            let modifiers = event.modifierFlags.intersection([.command, .control, .option, .shift])
             if modifiers == .command, event.keyCode == 51 { model.deleteSelection(); return }
         }
         super.sendEvent(event)

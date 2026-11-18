@@ -13,6 +13,8 @@ Installation gracefully quits Flycut, imports its saved history and favorites on
 
 The picker uses native `NSGlassEffectView` on macOS 26+, with a system material fallback on macOS 15. No webview.
 
+It stays out of the Dock and Command-Tab. Arrow keys, Enter, and Escape also work while Command+Shift are held.
+
 ## CLI
 
 Commands return JSON with `ok`; errors exit 1. `list` and `search` return stable IDs, previews, source apps, dates, and pinned state. `get` returns the full text; `get ID --raw` emits only the text.

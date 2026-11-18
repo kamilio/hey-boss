@@ -51,10 +51,8 @@ final class CycleTests: XCTestCase {
         }
     }
     func testEscapeCancelsWhileModifiersRemainHeld() throws {
-        history.add("must not paste", app: "Test")
-        let count = NSPasteboard.general.changeCount
         model.cycle()
-        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel })
+        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
         let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
             modifierFlags: [.command, .shift], timestamp: 0, windowNumber: panel.windowNumber,
             context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}",
@@ -63,6 +61,28 @@ final class CycleTests: XCTestCase {
         XCTAssertFalse(model.cycling)
         XCTAssertFalse(panel.isVisible)
         model.flagsChanged([])
-        XCTAssertEqual(NSPasteboard.general.changeCount, count)
+        XCTAssertNil(model.message)
+    }
+    func testArrowKeysAndEnterWorkWithShortcutModifiersHeld() throws {
+        history.add("older", app: "Test")
+        history.add("newer", app: "Test")
+        model.openPicker()
+        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertFalse(model.cycling)
+        func key(_ code: UInt16, flags: NSEvent.ModifierFlags = []) throws {
+            panel.sendEvent(try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: flags, timestamp: 0, windowNumber: panel.windowNumber,
+                context: nil, characters: "", charactersIgnoringModifiers: "",
+                isARepeat: false, keyCode: code)))
+        }
+        try key(125)
+        XCTAssertEqual(model.selection?.text, "older")
+        try key(126, flags: [.command, .shift])
+        XCTAssertEqual(model.selection?.text, "newer")
+        // Enter reaches the paste handler, without writing any test clip globally.
+        history.clear()
+        try key(36, flags: [.command, .shift])
+        XCTAssertEqual(model.message, "Choose a destination app, then open the picker again.")
     }
 }
