@@ -2,7 +2,7 @@
 async page => {
   const origin = new URL(page.url()).origin;
   const chatA = '10000000-0000-4000-8000-000000000000', chatB = '20000000-0000-4000-8000-000000000000';
-  let chat = chatA, failed = false, denySend = true, sends = 0, revision = 1, polls = 0;
+  let chat = chatA, failed = false, denySend = true, sends = 0, revision = 1, polls = 0, lists = 0;
   const messages = new Map([[chatA, []], [chatB, []]]);
   await page.route(origin+'/api', async route => {
     const p = route.request().postDataJSON(), r = {status:'ok'};
@@ -16,12 +16,20 @@ async page => {
       if (denySend) return route.fulfill({json:{status:'error',error:'Wait for the current turn to finish.'}});
       messages.get(chat).push({speaker:'You',text:p.text}); revision++; sends++;
     } else if (p.action === 'open') { chat=p.chat; revision++; }
-    else if (p.action === 'list') Object.assign(r,{chats:[{id:chatA,title:'First chat'},{id:chatB,title:'Second chat'}]});
+    else if (p.action === 'list') {
+      lists++;
+      await new Promise(r=>setTimeout(r,250));
+      Object.assign(r,{chats:[{id:chatA,title:'First chat'},{id:chatB,title:'Second chat'}]});
+    }
     return route.fulfill({json:r});
   });
   await page.goto(origin);
   const field=page.getByRole('textbox',{name:'Message'}), notice=page.locator('#notice');
   await page.getByRole('heading',{name:'Start a conversation'}).waitFor();
+  await page.getByRole('button',{name:'Chats',exact:true}).dblclick();
+  await page.getByRole('dialog',{name:'Chats'}).waitFor();
+  if(lists!==1) throw Error('Double-tapping Chats requested the same page twice');
+  await page.getByRole('button',{name:'Done'}).click();
   await field.fill('Keep this draft.');
   const open = async title => {
     await page.getByRole('button',{name:'Chats',exact:true}).click();

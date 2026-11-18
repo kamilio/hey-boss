@@ -49,3 +49,4 @@ dialog::backdrop { background: #0005 }
 dialog h2 { flex: 1; margin: 0; font-size: 21px }
 
 #list button { display: block; min-height: 46px; padding: 8px; width: 100%; color: var(--text); background: transparent; overflow-wrap: anywhere; text-align: left; border-bottom: 1px solid var(--line); border-radius: 0 }
+#list button[aria-current] { background: var(--accent-soft); color: var(--accent); font-weight: 600 }

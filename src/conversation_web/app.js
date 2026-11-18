@@ -30,6 +30,7 @@ async function refresh() {
     $('notice').removeAttribute('data-connection'); text($('notice'), '');
   }
   if (chat && chat !== s.chat) {
+    if (starting) cleanup(starting);
     if ($('draft').value) drafts.set(chat,$('draft').value); else drafts.delete(chat);
     $('draft').value=drafts.get(s.chat) || ''; drafts.delete(s.chat);
     if (before!=null) { before=null; rendered=null; chat=s.chat; return refresh(); }
@@ -133,17 +134,20 @@ async function pump(v) {
       v.played = Math.max(v.played,s.offset+Math.min(elapsed,s.length));
     }
     v.segments = v.segments.filter(s => s.offset+s.length > v.played);
-    const chunks = v.input.splice(0);
-    if (chunks.length > 6) throw Error('Microphone connection fell behind. Start voice again.');
+    // Each chunk is 80 ms. Keep short stalls in order until the Mac's five-second
+    // disconnect deadline, but send at most 15 KiB per exchange.
+    if (v.input.length > 60) throw Error('Microphone connection fell behind. Start voice again.');
+    const chunks = v.input.splice(0,6);
     const bytes = new Uint8Array(chunks.length*2560);
     chunks.forEach((c,i)=>bytes.set(new Uint8Array(c),i*2560));
     const r = await api('exchange',{session:v.id,generation:v.gen,played:v.played,received:v.received,
       pcm:bytes.length ? btoa(String.fromCharCode(...bytes)) : undefined});
-    if (!v.closed) { play(v,r); v.timer = setTimeout(()=>pump(v),65); }
+    if (!v.closed) { play(v,r); v.timer = setTimeout(()=>pump(v),v.input.length >= 6 ? 0 : 65); }
   } catch(e) { if (!v.closed) { stop(v).catch(()=>{}); notice(e); } }
 }
 async function start() {
-  if (starting || voice) return;
+  if (starting || voice || !chat) return;
+  const selected = chat;
   $('notice').textContent = '';
   if (!navigator.mediaDevices?.getUserMedia) throw Error('Open the trusted HTTPS address in Safari to use the microphone.');
   const ctx = new AudioContext(), v = {ctx,id:crypto.randomUUID(),nodes:new Set(),segments:[],input:[],gen:-1,played:0,received:0,end:0};
@@ -162,7 +166,7 @@ async function start() {
     mic.port.onmessage = e => {
       if (voice !== v) return;
       const enabled = v.track.getAudioTracks()[0].enabled;
-      if (enabled && v.input.length < 7) v.input.push(e.data);
+      if (enabled && v.input.length <= 60) v.input.push(e.data);
       if (!['listening','recording'].includes($('talk').dataset.phase)) return;
       const pcm = new Int16Array(e.data);
       let sum = 0;
@@ -172,12 +176,15 @@ async function start() {
     };
     v.track.getAudioTracks()[0].onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
     if (v.closed) return;
-    await api('start',{session:v.id});
+    await api('start',{session:v.id,chat:selected});
     if (v.closed) { await api('stop',{session:v.id}); return; }
     voice = v; starting = null; pump(v); await refresh();
   } catch(e) { cleanup(v); throw e; }
 }
-const act = (id, fn) => { $(id).onclick = () => { $('notice').textContent=''; Promise.resolve().then(fn).catch(notice); }; };
+const act = (id, fn) => { const el=$(id); el.onclick=async()=>{
+  el.disabled=true; $('notice').textContent='';
+  try { await fn(); } catch(e) { notice(e); } finally { el.disabled=false; }
+}; };
 // Start the AudioContext synchronously in the Safari user gesture.
 $('talk').onclick = () => (voice ? stop(voice).then(refresh) : start()).catch(notice);
 for (const id of ['mute','pause','interrupt','finish']) act(id,async()=>{await api(id); await refresh();});
@@ -195,7 +202,12 @@ async function list() {
   const data=await api('list',{after}); after=data.next;
   for (const c of data.chats) {
     const b=document.createElement('button'); b.textContent=c.title;
-    b.onclick=async()=>{try{if(voice)await stop(voice);await api('open',{chat:c.id});$('chats').close();before=null;rendered=null;await refresh();}catch(e){$('chats').close();notice(e);}};
+    if (c.id===chat) b.setAttribute('aria-current','true');
+    b.onclick=async()=>{
+      $('chats').close();
+      if (c.id===chat) return;
+      try{if(voice)await stop(voice);await api('open',{chat:c.id});before=null;rendered=null;await refresh();}catch(e){notice(e);}
+    };
     $('list').append(b);
   }
   if (!$('list').children.length) $('list').textContent='No saved chats yet.';
