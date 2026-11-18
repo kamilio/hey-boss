@@ -115,7 +115,10 @@ function cleanup(v) {
   if (!v || v.closed) return;
   v.closed = true; clearTimeout(v.timer); v.track?.getTracks().forEach(t => t.stop());
   v.wake?.release().catch(()=>{});
-  if (v.ctx.state !== 'closed') v.ctx.close().catch(()=>{});
+  const closeAudio = () => v.ctx.close().catch(()=>{});
+  // Safari can deliver a pending unlock after close() has finished.
+  v.ctx.onstatechange = () => { if (v.ctx.state === 'running') closeAudio(); };
+  if (v.ctx.state !== 'closed') closeAudio();
   if (voice === v) voice = null;
   if (starting === v) starting = null;
   $('talk').disabled = false; $('talk').ariaLabel = 'Start voice'; $('talk').dataset.phase = 'idle';

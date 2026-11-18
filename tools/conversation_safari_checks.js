@@ -98,6 +98,11 @@ async (page) => {
   await page.waitForTimeout(100);
   if (requests.includes('start') || await page.evaluate(()=>window.unhandledAudioErrors.length))
     throw Error('Denied microphone left a session or an unhandled audio error');
+  // Also exercise the real unlock: Safari can report "running" after an initial close.
+  await page.getByRole('button',{name:'Start voice'}).click();
+  await page.waitForTimeout(200);
+  if (await page.evaluate(()=>window.deniedContext.state!=='closed'))
+    throw Error('Denied microphone left playback running');
   await page.evaluate(()=>window.denyMic=false);
   await page.evaluate(()=>{
     window.screenLocks=0;
