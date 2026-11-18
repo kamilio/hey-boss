@@ -157,7 +157,7 @@ fn handle(mut req: Request, host: &str, key: &str, socket: &Path) -> io::Result<
     }
     reply(req, 200, "application/json", data, None)
 }
-pub(super) fn run(install: bool) -> io::Result<()> {
+pub(super) fn run(install: bool, pairing_code: bool) -> io::Result<()> {
     let exe = std::env::current_exe()?.canonicalize()?;
     if !cfg!(target_os = "macos") || exe.with_file_name("hey-boss.companion").exists() {
         return Err(io::Error::other(
@@ -182,14 +182,22 @@ pub(super) fn run(install: bool) -> io::Result<()> {
     let state = fs::read_to_string(exe.with_file_name("hey-boss.state"))?;
     let state = Path::new(state.trim());
     let web = state.join("conversation-web");
-    let host = fs::read_to_string(web.join("host")).map_err(|_| {
-        io::Error::other("Run hey-boss agent chats web --install on the Mac first.")
+    let key = fs::read_to_string(web.join("pairing-code")).map_err(|e| {
+        if e.kind() == io::ErrorKind::NotFound {
+            io::Error::other("Run hey-boss agent chats web --install on the Mac first.")
+        } else {
+            e
+        }
     })?;
-    let key = fs::read_to_string(web.join("pairing-code"))?;
     let key = key.trim();
     if key.len() != 32 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(io::Error::other("Invalid pairing code"));
     }
+    if pairing_code {
+        println!("{key}");
+        return Ok(());
+    }
+    let host = fs::read_to_string(web.join("host"))?;
     let server = Server::https(
         ("0.0.0.0", 4785),
         SslConfig {

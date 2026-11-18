@@ -52,4 +52,4 @@ launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$plist"
 echo "Safari: https://$host:4785/"
 echo "AirDrop certificate: $web/Hey Boss Wi-Fi.cer"
-echo "Pairing code file: $web/pairing-code"
+echo "Pairing code: hey-boss agent chats web --pairing-code"

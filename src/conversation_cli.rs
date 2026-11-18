@@ -107,6 +107,9 @@ pub enum Chats {
         /// Set up Wi-Fi HTTPS and start the service at login.
         #[arg(long)]
         install: bool,
+        /// Print the existing pairing code without restarting the service.
+        #[arg(long, conflicts_with = "install")]
+        pairing_code: bool,
     },
     /// Show one page, newest first.
     List {
@@ -141,7 +144,10 @@ pub enum Chats {
 impl Chats {
     pub fn run(&self) -> io::Result<()> {
         let body = match self {
-            Self::Web { install } => return web::run(*install),
+            Self::Web {
+                install,
+                pairing_code,
+            } => return web::run(*install, *pairing_code),
             Self::List {
                 archived, after, ..
             } => {
