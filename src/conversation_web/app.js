@@ -65,31 +65,46 @@ async function refresh() {
     $('empty').querySelector('p').textContent = s.hint || '';
     $('draft').placeholder = s.placeholder || 'Message Hey Boss…';
     button('earlier', s.start>0); button('latest', before!=null);
-    const timeline = $('timeline'), follow = !rendered || timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight < 70;
+    const entering = rendered==null || previous?.chat!==s.chat;
+    const timeline = $('timeline'), follow = entering || timeline.scrollHeight-timeline.scrollTop-timeline.clientHeight < 70;
     $('empty').hidden = s.messages.length > 0;
-    const nodes = [];
+    const list = $('messages'), nodes = [];
+    const old = new Map(previous?.chat===s.chat ? Array.from(list.children,el=>[el.key,el]) : []);
+    const rowFor = (key,tag) => {
+      const el=old.get(key) || document.createElement(tag); el.key=key; nodes.push(el); return el;
+    };
     const inserts = at => {
-      for (const tool of s.tools.filter(t=>t.at===at)) {
-        const row=document.createElement('details'), label=document.createElement('summary'), detail=document.createElement('pre');
-        label.textContent=tool.label+' · '+tool.state; detail.textContent=tool.detail; row.append(label,detail); nodes.push(row);
+      for (const [i,tool] of s.tools.filter(t=>t.at===at).entries()) {
+        const row=rowFor('tool:'+at+':'+i,'details');
+        if (!row.firstChild) row.append(document.createElement('summary'),document.createElement('pre'));
+        text(row.firstChild,tool.label+' · '+tool.state); text(row.lastChild,tool.detail);
       }
       for (const visual of s.visuals.filter(v=>v.at===at)) {
-        const b=document.createElement('button'); b.textContent=visual.title || 'Show image';
-        b.onclick=async()=>{try{const r=await api('image',{media:visual.id});const img=document.createElement('img');
-          img.alt=b.textContent;img.src='data:image/png;base64,'+r.png;b.replaceWith(img);}catch(e){notice(e);}};
-        nodes.push(b);
+        const b=rowFor('image:'+visual.id,'button');
+        if (b.tagName==='IMG') continue;
+        text(b,visual.title || 'Show image');
+        b.onclick=async()=>{b.disabled=true;try{const r=await api('image',{media:visual.id});
+          if (!b.isConnected) return;
+          const img=document.createElement('img'); img.key=b.key; img.alt=b.textContent;
+          img.src='data:image/png;base64,'+r.png;b.replaceWith(img);}catch(e){b.disabled=false;notice(e);}};
       }
     };
     inserts(s.start);
     for (const [i,msg] of s.messages.entries()) {
-      const row = document.createElement('article');
-      row.className = msg.speaker === 'You' ? 'user' : 'markdown';
-      row.setAttribute('aria-label', msg.speaker);
-      if(msg.html) row.innerHTML=msg.html; else row.textContent = msg.text;
-      nodes.push(row); inserts(s.start+i+1);
+      const row = rowFor(s.start+i,'article');
+      if (row.speaker!==msg.speaker || row.content!==(msg.html ?? msg.text)) {
+        row.speaker=msg.speaker; row.content=msg.html ?? msg.text;
+        row.className = msg.speaker === 'You' ? 'user' : 'markdown';
+        row.setAttribute('aria-label', msg.speaker);
+        if(msg.html!=null) row.innerHTML=msg.html; else row.textContent=msg.text;
+      }
+      inserts(s.start+i+1);
     }
-    $('messages').replaceChildren(...nodes); rendered = s.revision;
-    if (before!=null) timeline.scrollTop=0; else if (follow) timeline.scrollTop = timeline.scrollHeight;
+    for (const [i,node] of nodes.entries()) if (list.children[i]!==node) list.insertBefore(node,list.children[i] || null);
+    while (list.children.length>nodes.length) list.lastElementChild.remove();
+    rendered = s.revision;
+    if (before!=null) { if (entering) timeline.scrollTop=0; }
+    else if (follow) timeline.scrollTop = timeline.scrollHeight;
   }
 }
 function cleanup(v) {

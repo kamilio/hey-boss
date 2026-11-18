@@ -4,14 +4,19 @@ async page => {
   const chatA = '10000000-0000-4000-8000-000000000000', chatB = '20000000-0000-4000-8000-000000000000';
   let chat = chatA, failed = false, denySend = true, sends = 0, revision = 1, polls = 0, lists = 0;
   const messages = new Map([[chatA, []], [chatB, []]]);
+  const tools=[], visuals=[];
   await page.route(origin+'/api', async route => {
     const p = route.request().postDataJSON(), r = {status:'ok'};
     if (p.action === 'state') {
       polls++;
       if (failed) return route.fulfill({status:503,body:''});
-      Object.assign(r,{chat,voice:{phase:'idle',detail:'Voice off'},start:0,end:messages.get(chat).length,revision});
+      const end=Math.min(p.before ?? Infinity,messages.get(chat).length), start=Math.max(0,end-50);
+      Object.assign(r,{chat,voice:{phase:'idle',detail:'Voice off'},start,end,revision});
       if (p.revision!==revision || p.chat!==chat)
-        Object.assign(r,{heading:'Start a conversation',messages:messages.get(chat),tools:[],visuals:[]});
+        Object.assign(r,{heading:'Start a conversation',messages:messages.get(chat).slice(start,end),tools,visuals});
+    } else if (p.action === 'image') {
+      const image=await page.request.get(origin+'/brand.png');
+      r.png=(await image.body()).toString('base64');
     } else if (p.action === 'send') {
       if (denySend) return route.fulfill({json:{status:'error',error:'Wait for the current turn to finish.'}});
       messages.get(chat).push({speaker:'You',text:p.text}); revision++; sends++;
@@ -70,4 +75,23 @@ async page => {
     return timeline.scrollWidth===timeline.clientWidth && table.scrollWidth>table.clientWidth;
   });
   if(!fits) throw Error('Wide Markdown table scrolls the whole conversation sideways');
+  const at=messages.get(chat).length;
+  tools.push({at,label:'Tool output',state:'Running',detail:'Progress'});
+  visuals.push({at,id:'preview',title:'Show preview'}); revision++;
+  await page.getByText('Tool output · Running').click();
+  await page.getByRole('button',{name:'Show preview'}).click();
+  await page.getByRole('img',{name:'Show preview'}).waitFor();
+  await page.locator('#messages summary').focus();
+  tools[0].state='Done'; messages.get(chat).push({speaker:'Hey Boss',html:'<p>Next paragraph</p>'}); revision++;
+  await page.getByText('Next paragraph').waitFor();
+  if(!await page.evaluate(()=>document.querySelector('#messages details').open && !!document.querySelector('#messages img') &&
+      document.activeElement===document.querySelector('#messages summary'))) throw Error('Transcript updates closed open content or displaced keyboard focus');
+  messages.get(chat).push(...Array.from({length:80},(_,i)=>({speaker:'You',text:'Message '+i}))); revision++;
+  await page.getByRole('button',{name:'Earlier messages'}).click();
+  await page.getByRole('button',{name:'Back to latest'}).waitFor();
+  const position=await page.locator('#timeline').evaluate(el=>{el.scrollTop=160;return el.scrollTop;});
+  if(position===0) throw Error('History fixture did not scroll');
+  messages.get(chat).push({speaker:'You',text:'New message while reading history'}); revision++;
+  await page.waitForFunction(r=>rendered===r,revision);
+  if(await page.locator('#timeline').evaluate(el=>el.scrollTop)!==position) throw Error('A new message moved the reader within earlier history');
 }
