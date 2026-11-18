@@ -19,8 +19,12 @@ use std::{net::SocketAddr, path::PathBuf};
 #[derive(Parser)]
 #[command(version, long_version = concat!(env!("CARGO_PKG_VERSION"), " (build ", env!("HEY_PROXY_RUNTIME_ID"), ")"), about)]
 struct Args {
-    /// Config file (default: ~/.hey-boss/proxy/config.yaml)
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = format!(
+        "Config file (default: {})",
+        PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| "~".into()))
+            .join(".hey-boss/proxy/config.yaml")
+            .display()
+    ))]
     config: Option<PathBuf>,
     /// Override the configured listening address
     #[arg(long)]
