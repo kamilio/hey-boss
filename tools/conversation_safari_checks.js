@@ -144,4 +144,19 @@ async (page) => {
   await page.evaluate(()=>voice.mic.port.onmessage=null);
   await page.getByText("No microphone audio. Tap Start voice to reconnect.").waitFor({timeout:12000});
   if(await page.evaluate(()=>!!voice || window.testMic.readyState!=="ended")) throw Error("An unresponsive microphone left voice running");
+  // Two seconds of input must reach the Mac at the same duration and pitch at 16 kHz.
+  await page.evaluate(async()=>{
+    for (const rate of [8000,11025,44100,48000]) {
+      const ctx=new OfflineAudioContext(1,rate*2,rate); await ctx.audioWorklet.addModule('/mic.js');
+      const mic=new AudioWorkletNode(ctx,'conversation-mic'), tone=ctx.createOscillator();
+      let samples=0, cycles=0, last=0;
+      const received=new Promise(resolve=>{mic.port.onmessage=({data})=>{
+        for(const value of new Int16Array(data)){if(last<=0 && value>0) cycles++;last=value;}
+        samples+=data.byteLength/2;if(samples>=32000) resolve();
+      };});
+      tone.frequency.value=300; tone.connect(mic).connect(ctx.destination); tone.start();
+      await ctx.startRendering(); await Promise.race([received,new Promise(r=>setTimeout(r,1500))]);
+      if(samples!==32000 || Math.abs(cycles-600)>1) throw Error('Incorrect microphone conversion at '+rate+' Hz: '+samples+' samples, '+cycles+' cycles');
+    }
+  });
 }

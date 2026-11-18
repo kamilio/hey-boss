@@ -5,13 +5,16 @@ class ConversationMic extends AudioWorkletProcessor {
     for (const sample of inputs[0][0] || []) {
       this.sum += sample; this.n++; this.phase += 16000;
       if (this.phase < sampleRate) continue;
-      this.phase -= sampleRate;
-      this.chunk[this.used++] = Math.round(32767 * Math.max(-1, Math.min(1, this.sum / this.n)));
+      const value = Math.round(32767 * Math.max(-1, Math.min(1, this.sum / this.n)));
       this.sum = this.n = 0;
-      if (this.used === this.chunk.length) {
-        this.port.postMessage(this.chunk.buffer, [this.chunk.buffer]);
-        this.chunk = new Int16Array(1280); this.used = 0;
-      }
+      do {
+        this.phase -= sampleRate;
+        this.chunk[this.used++] = value;
+        if (this.used === this.chunk.length) {
+          this.port.postMessage(this.chunk.buffer, [this.chunk.buffer]);
+          this.chunk = new Int16Array(1280); this.used = 0;
+        }
+      } while (this.phase >= sampleRate);
     }
     return true;
   }
