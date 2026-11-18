@@ -1,5 +1,6 @@
 //! Fleet-wide inventory and explicitly chosen skill versions. Network work never blocks page reads.
 use super::{atomic_write, is_valid_skill_name};
+mod directories;
 mod native;
 use crate::issues::{Error, Result};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -33,6 +34,10 @@ struct State {
     pending_renames: BTreeMap<String, BTreeMap<String, Vec<String>>>,
     #[serde(default)]
     disabled: BTreeSet<String>,
+    #[serde(default)]
+    last_move_directory: String,
+    #[serde(default)]
+    last_import_directory: String,
     #[serde(skip)]
     busy: bool,
     #[serde(default)]
@@ -454,7 +459,7 @@ fn public_report(state: &State, mut selected: BTreeSet<String>) -> Value {
             Value::Object(result)
         })
         .collect();
-    json!({"ok":true,"revision":state.revision,"busy":state.busy,"message":state.message,"machines":machines,"selected":selected,"choices":state.choices,"max_words":state.max_words,"disabled":state.disabled})
+    json!({"ok":true,"revision":state.revision,"busy":state.busy,"message":state.message,"machines":machines,"selected":selected,"choices":state.choices,"max_words":state.max_words,"disabled":state.disabled,"last_move_directory":state.last_move_directory,"last_import_directory":state.last_import_directory})
 }
 pub fn report() -> Result<Value> {
     let home = home()?;
@@ -494,6 +499,7 @@ pub fn scan_blocking() -> Result<Value> {
         max_words: DEFAULT_WORDS,
         skill: String::new(),
         file_path: String::new(),
+        directory: String::new(),
         content: String::new(),
         base_digest: String::new(),
         distribute: false,
@@ -511,6 +517,7 @@ pub fn delete_blocking(skill: &str) -> Result<Value> {
         max_words: DEFAULT_WORDS,
         skill: skill.to_owned(),
         file_path: String::new(),
+        directory: String::new(),
         content: String::new(),
         base_digest: String::new(),
         distribute: false,
@@ -609,6 +616,7 @@ pub fn distribute_blocking(skills: &[String], from: Option<&str>) -> Result<Valu
         max_words: rep["max_words"].as_u64().unwrap_or(DEFAULT_WORDS as u64) as usize,
         skill: single_skill,
         file_path: String::new(),
+        directory: String::new(),
         content: String::new(),
         base_digest: String::new(),
         distribute: true,
@@ -634,6 +642,8 @@ pub struct Action {
     skill: String,
     #[serde(default)]
     file_path: String,
+    #[serde(default)]
+    directory: String,
     #[serde(default)]
     content: String,
     #[serde(default)]
@@ -870,6 +880,8 @@ pub fn act(action: Action) -> Result<Value> {
         "save_file",
         "open_dir",
         "open_editor",
+        "move",
+        "import",
     ]
     .contains(&action.action.as_str())
     {
@@ -886,6 +898,52 @@ pub fn act(action: Action) -> Result<Value> {
         && !matches!(action.action.as_str(), "enable" | "disable" | "scan")
     {
         return Err(Error::conflict("This skill is disabled. Enable it first."));
+    }
+
+    if matches!(action.action.as_str(), "move" | "import") {
+        if action.revision != state.revision {
+            return Err(Error::conflict(
+                "Inventory changed. Refresh before moving or importing.",
+            ));
+        }
+        let (name, target) = directories::apply(&home, &state, &action)?;
+        if action.action == "move" {
+            state.last_move_directory = action.directory.trim().into();
+        } else {
+            state.last_import_directory = action.directory.trim().into();
+        }
+        state.message = format!(
+            "{} {name} to {}.",
+            if action.action == "move" {
+                "Moved"
+            } else {
+                "Imported"
+            },
+            target.display()
+        );
+        match transport(&home, "local", &json!({"action":"scan"})) {
+            Ok(scan) => update_local_machine(&mut state, scan),
+            Err(error) => state
+                .message
+                .push_str(&format!(" Refresh the inventory: {error}")),
+        }
+        // Project inventory is preserved by the global scan; remove a moved project copy explicitly.
+        if action.action == "move" {
+            for machine in state.machines.iter_mut().filter(|m| m["host"] == "local") {
+                if let Some(copies) = machine["copies"].as_array_mut() {
+                    copies.retain(|c| c["path"] != action.file_path);
+                }
+            }
+        }
+        state.revision += 1;
+        persist(&home, &state)?;
+        let mut report = public_report(&state, super::selected_skills(&home));
+        report["imported_skill"] = if action.action == "import" {
+            json!(name)
+        } else {
+            Value::Null
+        };
+        return Ok(report);
     }
 
     if matches!(action.action.as_str(), "disable" | "enable") {

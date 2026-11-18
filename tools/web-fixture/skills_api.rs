@@ -301,3 +301,118 @@ mod disable;
 
 #[path = "skills_rename.rs"]
 mod rename;
+
+#[test]
+#[ignore = "requires Chrome and a built hey-boss CLI"]
+fn skill_folders_move_import_and_remember_directories() {
+    let f = fixture();
+    f.init("Skills QA").unwrap();
+    let root = f.root.path();
+    let source = root.join("home/incoming/calendar");
+    let destination = root.join("home/moved");
+    put(
+        source.join("SKILL.md"),
+        "---\nname: calendar\ndescription: Calendar fixture\n---\nCalendar\n",
+    );
+    put(source.join("references/notes.md"), "Notes\n");
+    fs::create_dir(&destination).unwrap();
+    put(root.join("config.yaml"), "ssh_hosts: []\n");
+    let api = Api::start(&f);
+    api.post(&json!({"action":"scan"}), 200);
+    api.idle();
+    let url = api.url.replace("/api/skills", "/skills");
+    let mut page = Page::open("about:blank");
+    page.command("Page.navigate", json!({"url":url})).unwrap();
+    page.wait("document.querySelector('#skills-import')?.disabled === false");
+    page.eval("document.querySelector('#skills-import').click()")
+        .unwrap();
+    page.eval(&format!(
+        "document.querySelector('[name=directory]').value={}",
+        json!(source)
+    ))
+    .unwrap();
+    page.eval("document.querySelector('#skill-directory-dialog form').requestSubmit()")
+        .unwrap();
+    page.wait("!document.querySelector('#skill-directory-dialog').open && !!document.querySelector('[data-move-skill]')");
+    assert_eq!(api.report()["last_import_directory"], json!(source));
+    assert!(source.join("SKILL.md").exists());
+    let imported = root.join("home/.hey-boss/skills/calendar");
+    assert!(imported.join("references/notes.md").exists());
+
+    page.eval("document.querySelector('[data-move-skill]').click()")
+        .unwrap();
+    assert_eq!(
+        page.eval("document.querySelector('[name=source]').value")
+            .unwrap(),
+        json!(imported)
+    );
+    page.eval(&format!(
+        "document.querySelector('[name=directory]').value={}",
+        json!(destination)
+    ))
+    .unwrap();
+    for (width, theme) in [(1440, "light"), (390, "dark")] {
+        page.command(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width":width,"height":900,"deviceScaleFactor":1,"mobile":width<500}),
+        )
+        .unwrap();
+        page.command(
+            "Emulation.setEmulatedMedia",
+            json!({"features":[{"name":"prefers-color-scheme","value":theme}]}),
+        )
+        .unwrap();
+        assert_eq!(
+            page.eval("document.documentElement.scrollWidth <= innerWidth")
+                .unwrap(),
+            true
+        );
+        screenshot(&mut page, "out/skill-directories", &format!("move-{width}"));
+    }
+    page.eval("document.querySelector('#skill-directory-dialog form').requestSubmit()")
+        .unwrap();
+    page.wait("!document.querySelector('#skill-directory-dialog').open");
+    assert!(!imported.exists());
+    assert!(destination.join("calendar/references/notes.md").exists());
+    assert_eq!(api.report()["last_move_directory"], json!(destination));
+    drop(api);
+
+    let api = Api::start(&f);
+    assert_eq!(api.report()["last_move_directory"], json!(destination));
+    assert_eq!(api.report()["last_import_directory"], json!(source));
+    page.command(
+        "Page.navigate",
+        json!({"url":api.url.replace("/api/skills", "/skills")}),
+    )
+    .unwrap();
+    page.wait("document.querySelector('#skills-import')?.disabled === false");
+    page.eval("document.querySelector('#skills-import').click()")
+        .unwrap();
+    assert_eq!(
+        page.eval("document.querySelector('[name=directory]').value")
+            .unwrap(),
+        json!(source)
+    );
+    page.eval("document.querySelector('#skill-directory-dialog form').requestSubmit()")
+        .unwrap();
+    page.wait("!document.querySelector('#skill-directory-dialog').open && !!document.querySelector('[data-move-skill]')");
+    page.eval("document.querySelector('[data-move-skill]').click()")
+        .unwrap();
+    assert_eq!(
+        page.eval("document.querySelector('[name=directory]').value")
+            .unwrap(),
+        json!(destination)
+    );
+    page.eval("document.querySelector('#skill-directory-dialog form').requestSubmit()")
+        .unwrap();
+    page.wait("document.querySelector('#skill-directory-dialog [role=alert]')?.hidden === false");
+    assert!(
+        page.eval("document.querySelector('#skill-directory-dialog [role=alert]').textContent")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
+    assert!(imported.join("SKILL.md").exists());
+    assert!(destination.join("calendar/SKILL.md").exists());
+}

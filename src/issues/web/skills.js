@@ -250,6 +250,38 @@ if(typeof document!=='undefined') (()=>{
     }
     cancelBtn?.focus({preventScroll:true});
   }
+  function openDirectoryDialog(kind, skill, trigger){
+    if(pending||data.busy)return;
+    const moving=kind==='move', dialog=$('#skill-directory-dialog');
+    const copies=(skill?.copies||[]).filter(c=>c.host==='local'&&c.path&&!c.path.endsWith('.md'));
+    const remembered=moving?data.last_move_directory:data.last_import_directory;
+    dialog.innerHTML=`<form>
+      <span class="skills-eyebrow">THIS MACHINE</span>
+      <h2 id="skill-directory-title">${moving?'Move '+esc(skill.name):'Import a skill'}</h2>
+      <p class="skill-delete-body">${moving?'Move one complete folder. Other copies stay where they are. Distributing this skill later may recreate its agent copies.':'Copy a folder containing SKILL.md into the saved library. You can then distribute it to your agents.'}</p>
+      ${moving?`<label>Folder to move<select name="source">${copies.map(c=>`<option value="${esc(c.path)}">${esc(labels[c.agent]||'Skill folder')} · ${esc(c.path)}</option>`).join('')}</select></label>`:''}
+      <label>${moving?'Destination directory':'Skill directory'}<input name="directory" type="text" required autocomplete="off" spellcheck="false" placeholder="~/skills${moving?'':'/my-skill'}" value="${esc(remembered||'')}"></label>
+      <p class="skill-delete-hint">${moving?'The skill folder keeps its name inside this directory.':'The source folder stays where it is.'} The last successful directory is remembered.</p>
+      <p class="skill-delete-error" role="alert" hidden></p>
+      <div class="skill-delete-actions"><button type="button" class="button" data-directory-cancel>Cancel</button><button type="submit" class="button primary">${moving?'Move folder':'Import skill'}</button></div>
+    </form>`;
+    const form=dialog.querySelector('form');
+    dialog.querySelector('[data-directory-cancel]').onclick=()=>dialog.close();
+    dialog.onclose=()=>{if(trigger?.isConnected)trigger.focus({preventScroll:true});};
+    dialog.oncancel=e=>{if(pending)e.preventDefault();};
+    form.onsubmit=async e=>{
+      e.preventDefault();
+      const directory=form.elements.directory.value.trim();
+      if(!directory)return;
+      const extra={directory,...(moving?{skill:skill.name,file_path:form.elements.source.value}:{})};
+      const error=dialog.querySelector('[role="alert"]');error.hidden=true;
+      form.querySelectorAll('input,select,button').forEach(el=>el.disabled=true);
+      const ok=await action(kind,extra);
+      if(ok)dialog.close();
+      else{error.textContent=actionError||'Could not complete the operation. Try again.';error.hidden=false;form.querySelectorAll('input,select,button').forEach(el=>el.disabled=false);}
+    };
+    dialog.showModal();form.elements.directory.focus();
+  }
   function renderFeedback(){document.querySelectorAll('[data-rollout-feedback]').forEach(el=>{el.innerHTML=rolloutFeedback({...data,busy:pending||data.busy,message:pending?'Sending request…':data.message,error:actionError});});}
   function fail(e){actionError=e.message;$('#skills-error').textContent=e.message;$('#skills-error').hidden=false;renderFeedback();}
   function loadEditorBundle(){
@@ -321,6 +353,7 @@ if(typeof document!=='undefined') (()=>{
     $('#skills-status').textContent=conflicts.length?`Pick a version to keep for ${conflicts.join(', ')} before distributing all.`:data.message||'Scan your machines to build the library.';
     $('#skills-distribute').disabled=!!busy||!skills.length||!!conflicts.length;
     $('#skills-scan').disabled=!!busy;
+    $('#skills-import').disabled=!!busy;
     $('#skills-reset').hidden=!dirty;$('#skills-reset').disabled=!!busy;
     if(restore&&!editingMarkdown)document.querySelector(`[data-${restore}="${CSS.escape(focusValue)}"]`)?.focus({preventScroll:true});
   }
@@ -397,6 +430,7 @@ if(typeof document!=='undefined') (()=>{
         <button type="button" class="button small primary" data-open-native-editor="${esc(currentFileObj.path)}" title="Open in Hey Boss native Markdown editor" ${pending||data.busy?'disabled':''}>Edit</button>
         <button type="button" class="button small" data-toggle-editor="${esc(currentFileObj.path)}" ${pending||data.busy?'disabled':''}>Edit in browser</button>
         <button type="button" class="button small" data-open-dir="${esc(skill.name)}" title="Open directory in Finder" ${pending||data.busy?'disabled':''}>${icon('folder')||''}Open folder</button>
+        ${!['hey-boss','AGENTS.md'].includes(skill.name)&&skill.copies.some(c=>c.host==='local'&&c.path&&!c.path.endsWith('.md'))?`<button type="button" class="button small" data-move-skill ${pending||data.busy?'disabled':''}>Move folder</button>`:''}
         ${canDelete&&skill.name!=='AGENTS.md'?`<button type="button" class="button small" data-disable-skill="${esc(skill.name)}" ${pending||data.busy?'disabled':''} title="Archive the complete folders and remove them from all agent skill locations">Disable skill</button>`:''}
         ${canDelete?`<button type="button" class="button small danger" data-delete-prompt="${esc(skill.name)}" ${pending||data.busy?'disabled':''}>Delete skill</button>`:''}
       </div>
@@ -521,6 +555,7 @@ if(typeof document!=='undefined') (()=>{
   };
   $('#skills-list').onchange=e=>{const name=e.target.dataset.select;if(name){e.target.checked?selected.add(name):selected.delete(name);changes();}};
   $('#skills-detail').onclick=async e=>{
+    if(e.target.closest('[data-move-skill]')){openDirectoryDialog('move',skills.find(s=>s.key===active),e.target.closest('button'));return;}
     if(e.target.closest('[data-refresh-inventory]')){await action('scan');return;}
     const skill=skills.find(s=>s.key===active);
     if(!skill)return;
@@ -630,6 +665,13 @@ if(typeof document!=='undefined') (()=>{
     try{
       const payload={action:kind,revision:data.revision,selected:[...selected],choices,max_words:maxWords,...extra};
       const value=await request(payload);
+      if(kind==='import'||kind==='move'){
+        keepDraft();editingMarkdown=false;previewDigest='';compareDigest='';
+        if(value.imported_skill){
+          active='global:'+value.imported_skill;filter='all';$('#skills-search').value='';
+          const params=new URLSearchParams(location.hash.slice(1));params.set('skill',active);history.replaceState(null,'','#'+params);
+        }
+      }
       if(savingContext){
         const savedName=value.saved_skill||extra.skill, savedKey='global:'+savedName;
         const sameEditor=editingMarkdown&&editorContext===savingContext;
@@ -667,10 +709,12 @@ if(typeof document!=='undefined') (()=>{
       const resetSelection=selectionRevision===submittedSelectionRevision&&['distribute','save_file','delete','enable','disable'].includes(kind);
       if(resetSelection)dirty=false;
       use(value,resetSelection);
+      return true;
     }
     catch(e){fail(e);if(savingContext&&editingMarkdown)showEditorStatus('Could not save · draft preserved. '+e.message);if(!data.busy)timer=setTimeout(poll,1200);}
     finally{pending=false;render();}
   }
+  $('#skills-import').onclick=e=>openDirectoryDialog('import',null,e.currentTarget);
   $('#skills-scan').onclick=()=>action('scan');$('#skills-distribute').onclick=()=>action('distribute');
   document.addEventListener('keydown',e=>{if(e.key==='/'&&!e.defaultPrevented&&!e.isComposing&&!e.metaKey&&!e.ctrlKey&&!e.altKey&&!e.composedPath().some(el=>el instanceof Element&&(el.matches('input,textarea,select')||el.isContentEditable))){e.preventDefault();$('#skills-search').focus();}});
   window.addEventListener('pagehide',keepDraft);

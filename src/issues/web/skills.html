@@ -6,7 +6,7 @@
 </head><body><a class="skip-link" href="#skills-main">Skip to skills</a>
 <!--app-shell-->
 <main id="skills-main" tabindex="-1">
-  <header class="skills-heading"><div><p class="skills-eyebrow"><span data-icon="spark"></span>YOUR AGENT TOOLKIT</p><h1>Skills, in sync<span class="heading-dot">.</span></h1><p>Find the good ones. Make them work everywhere.</p></div><button id="skills-scan" class="button" disabled><span data-icon="refresh"></span>Scan all machines</button></header>
+  <header class="skills-heading"><div><p class="skills-eyebrow"><span data-icon="spark"></span>YOUR AGENT TOOLKIT</p><h1>Skills, in sync<span class="heading-dot">.</span></h1><p>Find the good ones. Make them work everywhere.</p></div><div class="skills-heading-actions"><button id="skills-import" class="button" disabled><span data-icon="folder"></span>Import from folder</button><button id="skills-scan" class="button" disabled><span data-icon="refresh"></span>Scan all machines</button></div></header>
   <section id="skills-summary" class="skills-summary" aria-label="Library summary"><div><strong>—</strong><span>skills discovered</span></div><div><strong>—</strong><span>selected to sync</span></div><div><strong>—</strong><span>need attention</span></div><div><strong>—</strong><span>machines scanned</span></div></section>
   <details class="skills-machines"><summary><span><span data-icon="monitor"></span> Your machines <span id="machine-summary">Connecting…</span></span><span>View status</span></summary><div id="skills-machines"></div></details>
   <p id="skills-error" class="skills-error" role="alert" hidden></p>
@@ -23,4 +23,5 @@
   <p class="skills-footnote">Your selected versions go to Codex, Claude Code, and shared agent skill folders. Unselected skills stay where they are.</p>
 </main>
 <dialog id="skill-delete-dialog" class="skill-delete-dialog" aria-labelledby="skill-delete-title" aria-describedby="skill-delete-description"></dialog>
+<dialog id="skill-directory-dialog" class="skill-delete-dialog skill-directory-dialog" aria-labelledby="skill-directory-title"></dialog>
 </body></html>
