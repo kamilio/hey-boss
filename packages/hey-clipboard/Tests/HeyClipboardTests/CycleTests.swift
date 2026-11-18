@@ -37,6 +37,28 @@ final class CycleTests: XCTestCase {
         XCTAssertEqual(model.selection?.text, "newest")
         XCTAssertEqual(history.clips, original)
     }
+    func testReusingOlderClipMakesItFirstOnNextOpenAndAfterRestart() throws {
+        for text in ["oldest", "middle", "newest"] { history.add(text, app: "Source") }
+        model.cycle()
+        model.move(1)
+        let chosen = try XCTUnwrap(model.selection)
+        XCTAssertEqual(chosen.text, "middle")
+        history.pin(chosen.id, true)
+        // Both UI and CLI pastes use this copy path. Keep test text off the user's clipboard.
+        let board = NSPasteboard.withUniqueName()
+        defer { board.releaseGlobally() }
+        let monitor = ClipboardMonitor(history: history, board: board)
+        XCTAssertTrue(monitor.copy(chosen))
+        monitor.poll(app: "Destination")
+        model.dismiss()
+        model.cycle()
+        XCTAssertEqual(model.selection?.id, chosen.id)
+        XCTAssertEqual(history.clips.map(\.text), ["middle", "newest", "oldest"])
+        XCTAssertEqual(history.clips.first?.app, "Source")
+        XCTAssertEqual(history.clips.first?.pinned, true)
+        history.finishWrites()
+        XCTAssertEqual(try History(directory: directory).clips, history.clips)
+    }
     func testReleasingEitherModifierEndsCycleOnlyOnce() {
         // Empty history exercises release without touching the real clipboard.
         for remaining: NSEvent.ModifierFlags in [.command, .shift, []] {
