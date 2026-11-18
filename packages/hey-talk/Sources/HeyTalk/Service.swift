@@ -715,6 +715,15 @@ final class TalkService: NSObject, NSApplicationDelegate {
     func command(_ request: [String: Any], reply: @escaping ([String: Any]) -> Void) {
         let command = request["command"] as? String ?? ""
         switch command {
+        case "paste_clipboard":
+            guard AXIsProcessTrusted() else { reply(failure(ConversationFocus.permission)); return }
+            guard let pid = request["pid"] as? Int32, let count = request["change_count"] as? Int,
+                  let target = FocusedInput.keyboardApp, target.processIdentifier == pid, pid != getpid(),
+                  NSPasteboard.general.changeCount == count else {
+                reply(failure("Focus or clipboard changed before pasting. Nothing was pasted.")); return
+            }
+            guard Paste.post(9, flags: .maskCommand, to: pid) else { reply(failure("Couldn’t send Command-V.")); return }
+            reply(["ok": true, "delivery": "paste_posted"])
         case "deck": deck(request["action"] as? String, reply: reply)
         case "remember_focus":
             if conversation == nil || conversationFocus == nil { conversationFocus = ConversationFocus() }

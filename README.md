@@ -2,6 +2,10 @@
 
 Licensed under [MIT](LICENSE).
 
+[Hey Clipboard](packages/hey-clipboard/README.md) keeps clipboard history locally.
+Hold Command+Shift, tap V to cycle, and release to paste. It includes a JSON CLI
+and excludes temporary Hey Talk dictations from history.
+
 Read and follow distributed operational events with `hey-boss events`. See the
 [event log contract, producers, and CLI](docs/events.md).
 

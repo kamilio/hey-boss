@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "hey-talk",
     platforms: [.macOS(.v15)],
-    products: [.executable(name: "hey-talk", targets: ["HeyTalk"])],
+    products: [.library(name: "TalkCore", targets: ["TalkCore"]), .executable(name: "hey-talk", targets: ["HeyTalk"])],
     targets: [
         .target(name: "TalkCore"),
         .target(name: "CSherpa", publicHeadersPath: "include"),
