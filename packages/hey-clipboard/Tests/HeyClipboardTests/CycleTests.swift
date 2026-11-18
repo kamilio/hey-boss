@@ -91,10 +91,14 @@ final class CycleTests: XCTestCase {
         let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
         XCTAssertFalse(model.browsing)
         XCTAssertTrue(panel.styleMask.contains(.nonactivatingPanel))
+        XCTAssertEqual(panel.level, .popUpMenu)
+        XCTAssertFalse(panel.hidesOnDeactivate)
         XCTAssertEqual(panel.frame.size, NSSize(width: 480, height: 300))
         model.openPicker()
         XCTAssertTrue(model.browsing)
         XCTAssertFalse(model.cycling)
+        XCTAssertEqual(panel.level, .normal)
+        XCTAssertTrue(panel.hidesOnDeactivate)
         XCTAssertEqual(panel.frame.size, NSSize(width: 660, height: 560))
         model.query = "search only"
         model.pinsOnly = true
@@ -102,6 +106,8 @@ final class CycleTests: XCTestCase {
         XCTAssertFalse(model.browsing)
         XCTAssertTrue(model.query.isEmpty)
         XCTAssertFalse(model.pinsOnly)
+        XCTAssertEqual(panel.level, .popUpMenu)
+        XCTAssertFalse(panel.hidesOnDeactivate)
         XCTAssertEqual(panel.frame.size, NSSize(width: 480, height: 300))
     }
 }

@@ -107,6 +107,9 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != getpid() { target = app }
         query = ""; pinsOnly = false; selected = history.clips.first?.id; message = nil
         if picker == nil { picker = PickerPanel(model: self) }
+        // The nonactivating quick picker must stay above the destination's windows.
+        picker?.level = browsing ? .normal : .popUpMenu
+        picker?.hidesOnDeactivate = browsing
         picker?.setContentSize(NSSize(width: browsing ? 660 : 480, height: browsing ? 560 : 300))
         picker?.centerOnMouseScreen()
         picker?.makeKeyAndOrderFront(nil)
