@@ -1,7 +1,14 @@
 // Safari may run the graph at the hardware rate. Emit 80 ms of 16 kHz mono PCM.
 class ConversationMic extends AudioWorkletProcessor {
-  constructor() { super(); this.chunk = new Int16Array(1280); this.used = this.phase = this.sum = this.n = 0; }
+  constructor() {
+    super(); this.chunk = new Int16Array(1280); this.used = this.phase = this.sum = this.n = 0;
+    this.port.onmessage = ({data: muted}) => {
+      this.muted = muted;
+      if (muted) this.used = this.phase = this.sum = this.n = 0;
+    };
+  }
   process(inputs) {
+    if (this.muted) return true;
     for (const sample of inputs[0][0] || []) {
       this.sum += sample; this.n++; this.phase += 16000;
       if (this.phase < sampleRate) continue;

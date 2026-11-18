@@ -103,8 +103,8 @@ async (page) => {
   if (!recorded || !heard) throw Error("Missing microphone frames or playback acknowledgment");
   await page.evaluate(()=>{
     const port=voice.mic.port, receive=port.onmessage;
-    let seq=0;
-    port.onmessage=e=>{const pcm=new Int16Array(e.data);pcm[0]=-31337;pcm[1]=++seq;receive(e);};
+    window.micPackets=0;
+    port.onmessage=e=>{const pcm=new Int16Array(e.data);pcm[0]=-31337;pcm[1]=++window.micPackets;receive(e);};
   });
   stall=true;
   const resumeDeadline=Date.now()+7000;
@@ -114,11 +114,16 @@ async (page) => {
   await page.getByRole("button",{name:"Pause listening"}).click();
   await page.waitForFunction(()=>!window.testMic.enabled);
   const exchanges=()=>requests.filter(action=>action==='exchange').length, beforePause=exchanges();
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(200);
+  const pausedPackets=await page.evaluate(()=>window.micPackets);
+  await page.waitForTimeout(1300);
+  const extra=await page.evaluate(()=>window.micPackets)-pausedPackets;
+  if(extra) throw Error('Paused microphone still posted '+extra+' buffers in 1.3s');
   const heartbeats=exchanges()-beforePause;
   if(heartbeats<1 || heartbeats>5) throw Error('Unexpected paused microphone exchange count: '+heartbeats);
   await page.getByRole("button",{name:"Resume listening"}).click();
   await page.waitForFunction(()=>window.testMic.enabled);
+  await page.waitForFunction(base=>window.micPackets>base, pausedPackets);
   phase='speaking';
   await page.getByRole("button",{name:"Mute microphone",exact:true}).waitFor();
   await page.getByRole("button",{name:"Pause reply"}).click();

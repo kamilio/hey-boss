@@ -46,9 +46,7 @@ async function refresh() {
   $('talk').dataset.phase = v.phase;
   $('talk').disabled = !!starting || (!mine && v.phase !== 'idle');
   if (mine) {
-    const track=voice.track.getAudioTracks()[0];
-    track.enabled=!s.muted;
-    if (s.muted) voice.input.length=0;
+    voice.setMuted(s.muted);
     if (previous?.voice.listeningPaused && !v.listeningPaused && voice.timer) {
       clearTimeout(voice.timer); pump(voice);
     }
@@ -193,19 +191,25 @@ async function start() {
     const heights = Array(11).fill(4);
     const drawMeter = () => $('levels').firstElementChild.setAttribute('d', heights.map((h,i)=>`M${2+i*5} ${12-h/2}v${h}`).join(' '));
     drawMeter();
+    const track = v.track.getAudioTracks()[0];
+    v.setMuted = muted => {
+      if (track.enabled === !muted) return;
+      track.enabled = !muted; mic.port.postMessage(muted);
+      if (muted) { v.input.length=0; heights.fill(4); drawMeter(); }
+      else v.lastCapture=performance.now();
+    };
     mic.port.onmessage = e => {
-      if (voice !== v) return;
+      if (voice !== v || !track.enabled) return;
       v.lastCapture = performance.now();
-      const enabled = v.track.getAudioTracks()[0].enabled;
-      if (enabled && v.input.length <= 60) v.input.push(e.data);
+      if (v.input.length <= 60) v.input.push(e.data);
       if (!['listening','recording'].includes($('talk').dataset.phase)) return;
       const pcm = new Int16Array(e.data);
       let sum = 0;
-      if (enabled) for (const n of pcm) sum += n*n;
+      for (const n of pcm) sum += n*n;
       heights.shift(); heights.push(4 + 18 * Math.min(1, Math.sqrt(sum/pcm.length)/4096)**0.75);
       drawMeter();
     };
-    v.track.getAudioTracks()[0].onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
+    track.onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
     if (v.closed) return;
     await api('start',{session:v.id,chat:selected});
     if (v.closed) { await api('stop',{session:v.id}); return; }
