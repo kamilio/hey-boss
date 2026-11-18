@@ -88,10 +88,15 @@ async (page) => {
     }
   }
   await page.setViewportSize({width:320,height:568});
-  const largeText = await page.addStyleTag({content:'.conversation-bar .brand { font-size:34px } .conversation-bar strong { font-size:26px }'});
+  await page.evaluate(()=>{
+    document.querySelector('.conversation-bar .brand').style.fontSize='34px';
+    document.querySelector('.conversation-bar strong').style.fontSize='26px';
+  });
   if (!await page.evaluate(()=>document.documentElement.scrollWidth <= innerWidth &&
       [...document.querySelectorAll('header button')].every(b=>b.getBoundingClientRect().width >= 44))) throw Error('Header actions clipped with large text');
-  await largeText.evaluate(el=>el.remove());
+  await page.evaluate(()=>{
+    for(const el of document.querySelectorAll('.conversation-bar .brand, .conversation-bar strong')) el.style.removeProperty('font-size');
+  });
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>{
     window.denyMic=true; window.unhandledAudioErrors=[];
