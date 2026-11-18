@@ -1,7 +1,8 @@
 // Run with Playwright WebKit on the Conversations page. All chat API calls
 // below stay in the fixture; capture and playback use real Web Audio.
 async (page) => {
-  const origin = new URL(page.url()).origin;
+  const origin = await page.evaluate(()=>location.origin);
+  const silence = await page.evaluate(()=>btoa('\0'.repeat(3200)));
   let chat = "10000000-0000-4000-8000-000000000000";
   let active = false, muted = false, recorded = false, heard = false, stall = false;
   let phase = 'listening', paused = false, approval = null, failStartPoll = true, interruptLabel = 'Interrupt reply';
@@ -35,15 +36,19 @@ async (page) => {
     });
     if (p.action === "exchange") {
       if (p.pcm) {
-        const bytes=Buffer.from(p.pcm,"base64");
-        if(bytes.length>16384) throw Error("Microphone packet exceeds native limit");
-        for(let i=0;i<bytes.length;i+=2560) if(bytes.readInt16LE(i)===-31337) frames.push(bytes.readInt16LE(i+2));
+        const audio=await page.evaluate(encoded=>{
+          const bytes=Uint8Array.from(atob(encoded),c=>c.charCodeAt(0));
+          if(bytes.length>16384) throw Error("Microphone packet exceeds native limit");
+          const pcm=new Int16Array(bytes.buffer), numbered=[];
+          for(let i=0;i<pcm.length;i+=1280) if(pcm[i]===-31337) numbered.push(pcm[i+1]);
+          return {numbered,nonzero:pcm.some(x=>x!==0)};
+        },p.pcm);
+        frames.push(...audio.numbered); recorded ||= audio.nonzero;
       }
-      if (stall) { stall=false; await new Promise(r=>setTimeout(r,1200)); }
-      recorded ||= !!p.pcm && Buffer.from(p.pcm,"base64").some(x=>x!==0);
+      if (stall) { stall=false; await page.waitForTimeout(1200); }
       heard ||= p.played === 1600;
       Object.assign(r,{generation:1,paused:false});
-      if (!p.received) Object.assign(r,{rate:16000,offset:0,pcm:Buffer.alloc(3200).toString("base64")});
+      if (!p.received) Object.assign(r,{rate:16000,offset:0,pcm:silence});
     }
     await route.fulfill({json:r});
   });
@@ -94,7 +99,7 @@ async (page) => {
   await page.getByRole("button",{name:"Current chat"}).click();
   if (requests.includes("open") || requests.includes("stop")) throw Error("Selecting the current chat interrupted voice");
   const deadline=Date.now()+10000;
-  while (!(recorded&&heard) && Date.now()<deadline) await new Promise(r=>setTimeout(r,50));
+  while (!(recorded&&heard) && Date.now()<deadline) await page.waitForTimeout(50);
   if (!recorded || !heard) throw Error("Missing microphone frames or playback acknowledgment");
   await page.evaluate(()=>{
     const port=voice.mic.port, receive=port.onmessage;
@@ -103,13 +108,13 @@ async (page) => {
   });
   stall=true;
   const resumeDeadline=Date.now()+7000;
-  while(frames.length<22 && Date.now()<resumeDeadline) await new Promise(r=>setTimeout(r,50));
+  while(frames.length<22 && Date.now()<resumeDeadline) await page.waitForTimeout(50);
   if(frames.length<22 || frames.some((n,i)=>n!==i+1)) throw Error("A short connection stall interrupted or lost microphone audio");
   await page.locator("#levels:visible").waitFor();
   await page.getByRole("button",{name:"Pause listening"}).click();
   await page.waitForFunction(()=>!window.testMic.enabled);
   const exchanges=()=>requests.filter(action=>action==='exchange').length, beforePause=exchanges();
-  await new Promise(r=>setTimeout(r,1500));
+  await page.waitForTimeout(1500);
   const heartbeats=exchanges()-beforePause;
   if(heartbeats<1 || heartbeats>5) throw Error('Unexpected paused microphone exchange count: '+heartbeats);
   await page.getByRole("button",{name:"Resume listening"}).click();
@@ -172,4 +177,5 @@ async (page) => {
       if(samples!==32000 || Math.abs(cycles-600)>1) throw Error('Incorrect microphone conversion at '+rate+' Hz: '+samples+' samples, '+cycles+' cycles');
     }
   });
+  return 'Conversations Safari checks passed';
 }

@@ -1,6 +1,6 @@
 // Run with WebKit. All state and mutations stay inside this fixture.
 async page => {
-  const origin = new URL(page.url()).origin;
+  const origin = await page.evaluate(()=>location.origin);
   const chatA = '10000000-0000-4000-8000-000000000000', chatB = '20000000-0000-4000-8000-000000000000';
   let chat = chatA, failed = false, denySend = true, sends = 0, revision = 1, polls = 0, lists = 0;
   const messages = new Map([[chatA, []], [chatB, []]]);
@@ -25,7 +25,7 @@ async page => {
     } else if (p.action === 'open') { chat=p.chat; revision++; }
     else if (p.action === 'list') {
       lists++;
-      await new Promise(r=>setTimeout(r,250));
+      await page.waitForTimeout(250);
       Object.assign(r,{chats:[{id:chatA,title:'First chat'},{id:chatB,title:'Second chat'}]});
     }
     return route.fulfill({json:r});
@@ -82,7 +82,7 @@ async page => {
     new MutationObserver(()=>window.statusWrites++).observe(document.querySelector('#status'),{childList:true,characterData:true,subtree:true});
   });
   const baseline=polls, deadline=Date.now()+6000;
-  while(polls<baseline+2 && Date.now()<deadline) await new Promise(r=>setTimeout(r,100));
+  while(polls<baseline+2 && Date.now()<deadline) await page.waitForTimeout(100);
   if(polls<baseline+2 || await page.evaluate(()=>window.statusWrites)!==0) throw Error('Unchanged status was repeatedly announced');
   await page.setViewportSize({width:320,height:568});
   messages.get(chat).push({speaker:'Hey Boss',html:'<table><tr>'+'<th>Column</th>'.repeat(20)+'</tr></table>'});
@@ -112,4 +112,5 @@ async page => {
   messages.get(chat).push({speaker:'You',text:'New message while reading history'}); revision++;
   await page.waitForFunction(r=>rendered===r,revision);
   if(await page.locator('#timeline').evaluate(el=>el.scrollTop)!==position) throw Error('A new message moved the reader within earlier history');
+  return 'Conversations recovery checks passed';
 }
