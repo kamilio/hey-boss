@@ -56,6 +56,7 @@ async (page) => {
     const response=await route.fetch();
     // Install the synthetic source in the same WebKit world as the app.
     const mock = () => Object.defineProperty(MediaDevices.prototype,"getUserMedia",{value:async()=>{
+      if (window.denyMic) { window.deniedContext=starting.ctx; throw new DOMException('Microphone permission denied','NotAllowedError'); }
       const context=starting.ctx, oscillator=context.createOscillator(), dest=context.createMediaStreamDestination();
       oscillator.connect(dest); oscillator.start();
       window.testMic=dest.stream.getAudioTracks()[0];
@@ -83,6 +84,21 @@ async (page) => {
     }
   }
   await page.setViewportSize({width:390,height:844});
+  await page.evaluate(()=>{
+    window.denyMic=true; window.unhandledAudioErrors=[];
+    addEventListener('unhandledrejection',e=>window.unhandledAudioErrors.push(String(e.reason)));
+    // WebKit may finish unlocking playback after the permission sheet has closed.
+    const resume=AudioContext.prototype.resume;
+    AudioContext.prototype.resume=function(){AudioContext.prototype.resume=resume;
+      return new Promise((_,reject)=>setTimeout(()=>reject(Error('Audio context closed while unlocking')),40));};
+  });
+  await page.getByRole('button',{name:'Start voice'}).click();
+  await page.getByText('Microphone permission denied').waitFor();
+  await page.waitForFunction(()=>window.deniedContext.state==='closed' && !starting && !voice);
+  await page.waitForTimeout(100);
+  if (requests.includes('start') || await page.evaluate(()=>window.unhandledAudioErrors.length))
+    throw Error('Denied microphone left a session or an unhandled audio error');
+  await page.evaluate(()=>window.denyMic=false);
   await page.evaluate(()=>{
     window.screenLocks=0;
     Object.defineProperty(navigator,'wakeLock',{value:{request:async type=>{

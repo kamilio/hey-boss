@@ -182,10 +182,12 @@ async function start() {
   starting = v; $('talk').disabled = true;
   try {
     // Unlock output inside the tap, before waiting for microphone permission.
-    const resumed = ctx.resume();
-    v.track = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}});
-    if (v.closed) { v.track.getTracks().forEach(t=>t.stop()); return; }
-    await resumed; await ctx.audioWorklet.addModule('/mic.js');
+    await Promise.all([ctx.resume(),
+      navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true}}).then(track=>{
+        if (v.closed) track.getTracks().forEach(t=>t.stop()); else v.track=track;
+      })]);
+    if (v.closed) return;
+    await ctx.audioWorklet.addModule('/mic.js');
     const source = ctx.createMediaStreamSource(v.track), mic = new AudioWorkletNode(ctx,'conversation-mic');
     source.connect(mic); mic.connect(ctx.destination); v.mic = mic; v.source = source;
     const heights = Array(11).fill(4);
@@ -219,7 +221,7 @@ async function start() {
       v.wake=lock;
     }).catch(()=>{});
     await refresh().catch(e=>notice(e,true));
-  } catch(e) { cleanup(v); throw e; }
+  } catch(e) { if (!v.closed) { cleanup(v); throw e; } }
 }
 const act = (id, fn) => { const el=$(id); el.onclick=async()=>{
   el.disabled=true; $('notice').textContent='';
