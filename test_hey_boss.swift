@@ -52,6 +52,9 @@ func audit() {
         print("PASS sidebar filtering and individual attachment removal, renumbering and draft persistence")
         return
     }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PHONE_QUEUE"] {
+        app.finishLaunching(); try! auditPhoneQueue(root); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PHONE"] {
         app.finishLaunching(); try! auditPhone(root); return
     }
@@ -6085,3 +6088,38 @@ func auditSolChat(_ root: String) {
     }
 }
 #endif
+
+@available(macOS 26, *)
+func auditPhoneQueue(_ path: String) throws {
+    let root = URL(fileURLWithPath: path), index = root.appendingPathComponent("current.json")
+    var chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+    func call(_ action: String, _ fields: [String:Any] = [:]) throws -> [String:Any] {
+        let data = try JSONSerialization.data(withJSONObject: fields.merging(["action":action]) { _,n in n })
+        return try chat.phone(JSONDecoder().decode(PhoneRequest.self, from: data))
+    }
+    let target = try call("state")["chat"] as! String, message = UUID().uuidString
+    let payload = ["chat":target, "text":"Queued message", "message":message]
+    let wire = Pipe(); chat.process = Process(); chat.writer = wire.fileHandleForWriting
+    precondition(try! call("state")["canSend"] as? Bool == true)
+    let accepted = try call("send", payload)
+    precondition(accepted["accepted"] as? String == message && chat.phase == .thinking)
+    precondition(try! call("state")["canSend"] as? Bool == false)
+    for _ in 0..<5 { precondition(try! call("send", payload)["accepted"] as? String == message) }
+    precondition(chat.conversationHistory.count == 1)
+    var changed = payload; changed["text"] = "Different text"
+    precondition((try? call("send", changed)) == nil)
+    // Read the checkpoint before stop() can flush any unsaved state.
+    let checkpoint = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+    precondition(checkpoint.conversationHistory.count == 1 && checkpoint.historyList.numberOfRows == 1)
+    // Restore the durable receipt with a new native window, then retry from another chat.
+    chat.stop("Done")
+    chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
+    precondition(try! call("send", payload)["accepted"] as? String == message)
+    precondition(chat.conversationHistory.count == 1)
+    _ = try call("new", ["chat":target])
+    precondition(try! call("state")["chat"] as? String != target)
+    precondition(try! call("send", payload)["accepted"] as? String == message)
+    precondition(chat.conversationHistory.isEmpty)
+    precondition((try? call("send", ["chat":target,"text":"Wrong chat","message":UUID().uuidString])) == nil)
+    print("PASS queued sends: durable receipt, busy retries, relaunch, chat changes and mismatched IDs")
+}

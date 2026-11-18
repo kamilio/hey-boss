@@ -39,7 +39,7 @@ struct IssueReference: Codable, Equatable {
 
 struct PhoneRequest: Codable {
     let action: String
-    let session, chat: UUID?
+    let session, chat, message: UUID?
     let pcm, text: String?
     let generation, played, received, revision, before: Int?
     let media: UUID?
@@ -8097,6 +8097,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let speaker: String
         var capture: Capture?
         var interruptedAfter: PlaybackInterruption?
+        var phoneID: UUID?
         var content: String {
             var playback = ""
             if let cutoff = interruptedAfter {
@@ -8659,7 +8660,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             let end = min(messages.count, max(0, p.before ?? messages.count)), start = max(0, end - Self.pageSize)
             var result: [String:Any] = ["chat":library.selected.uuidString, "voice":voiceStatus, "mine":owns,
                 "passage":owns && reading ? playingPassage : "", "spoken":playingThrough,
-                "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end]
+                "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end,
+                "queuedSend":true, "canSend":restoreError == nil && pauseID == nil && terminal == nil && approvalSheet == nil &&
+                    (owns || phase == .idle) && acceptsTypedMessage && input.stringValue.isEmpty && pendingCapture == nil && selections.isEmpty]
             if owns && canListenNext { result["interruptLabel"] = listenNext.title }
             if let alert = approvalSheet, let id = approvals.first?.0 {
                 let view = (alert.accessoryView as? NSScrollView)?.documentView as? NSTextView
@@ -8691,6 +8694,16 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             window.endSheet(alert.window, returnCode:p.action == "allow" ? .alertSecondButtonReturn : .alertFirstButtonReturn)
             return [:]
         }
+        // A retry may arrive after the answer started, another chat opened, or a relaunch.
+        // The receipt lives in the saved user message, so a lost HTTP reply cannot duplicate it.
+        if p.action == "send", let id = p.message, let target = p.chat {
+            let saved = target == library.selected ? messages : (try? readChat(target).saved.messages) ?? []
+            if let accepted = saved.first(where: { $0.phoneID == id }) {
+                guard accepted.text == p.text else { throw StorageError(description: "Message ID reused with different text.") }
+                if target == library.selected, !save() { throw StorageError(description: status.stringValue) }
+                return ["accepted":id.uuidString]
+            }
+        }
         guard restoreError == nil, pauseID == nil, terminal == nil, approvalSheet == nil,
               owns || phase == .idle else { throw StorageError(description: "Finish the active conversation on the Mac first.") }
         guard p.chat == library.selected || p.action == "open" else { throw StorageError(description: "The selected conversation changed. Refresh and try again.") }
@@ -8717,7 +8730,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 guard acceptsTypedMessage, let text = p.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else {
                     throw StorageError(description: "Wait for the current turn to finish.")
                 }
-                interruptPlayback(); respond(text)
+                interruptPlayback()
+                guard respond(text, phoneID: p.message) else { throw StorageError(description: status.stringValue) }
+                if let id = p.message { return ["accepted":id.uuidString] }
             } else if p.action == "new" {
                 guard selectDirectory(nil) else { throw StorageError(description: status.stringValue) }
             } else {
@@ -9290,8 +9305,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.contentView?.layoutSubtreeIfNeeded()
         turns.scrollToVisible(NSRect(x: 0, y: max(0, turns.bounds.maxY - 1), width: 1, height: 1))
     }
-    func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = []) {
-        guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return }
+    @discardableResult func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = [], phoneID: UUID? = nil) -> Bool {
+        guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return false }
         playedPassages.removeAll(); playingPassage = ""; playingThrough = 0
         turnDone = false; lastMessage = nil; turnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
@@ -9299,10 +9314,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         selections = []
         append(text, from: "You", capture: capture)
         messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
-        rememberTurn(); state(.thinking, "Thinking…")
+        messages[messages.count - 1].phoneID = phoneID
+        rememberTurn()
+        guard save() else { state(.idle, status.stringValue); return false }
+        state(.thinking, "Thinking…")
         let question = messages.last!.content
         if let directory {
-            save()
             let payload = process == nil && thread == nil ? instructions + "\n\n" + question : question
             if process == nil, let thread, let closing = closingWorkspaces[thread] {
                 reply = Task { @MainActor [weak self] in
@@ -9312,9 +9329,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     self.sendWorkspace(payload, in: directory)
                 }
             } else { sendWorkspace(payload, in: directory) }
-            return
+            return true
         }
-        save()
         let closing = closingWorkspaces[agentStateURL.path]
         reply = Task { @MainActor [weak self] in
             await closing?.value
@@ -9329,6 +9345,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 try write(request)
             } catch { generationFailed(error) }
         }
+        return true
     }
     static func referencedTranscript(_ text: String, ends: [(time: TimeInterval, offset: Int)], selections: [Selection]) -> String {
         guard !selections.isEmpty else { return text }

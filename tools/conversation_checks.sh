@@ -3,6 +3,7 @@
 set -eu
 root=$(mktemp -d "$PWD/.conversation-test.XXXXXX")
 trap 'rm -rf "$root"' EXIT
+HEY_BOSS_AUDIT_PHONE_QUEUE="$root/queue" "$2"
 HEY_BOSS_AUDIT_CHAT_SIDEBAR="$root/sidebar" "$2"
 HEY_BOSS_AUDIT_CHAT_MANAGEMENT="$root/management" "$2"
 HEY_BOSS_CLI_PATH="$1" HEY_BOSS_AUDIT_SOL="$root" "$2"
