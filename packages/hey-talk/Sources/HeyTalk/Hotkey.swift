@@ -102,7 +102,7 @@ enum PasteBlockReason: String {
         case .focusChanged: return "Return to \(app). Press ⌘V."
         case .unidentifiedField: return "Text copied. Choose the field and press ⌘V."
         case .ownWindow: return "Choose an app, then press ⌘V."
-        case .eventUnavailable: return "Couldn’t paste. Press ⌘V."
+        case .eventUnavailable: return "Couldn’t insert text. Press ⌘V."
         case .clipboardUnavailable: return "Clipboard unavailable. Open History."
         }
     }
@@ -246,15 +246,16 @@ enum Paste {
                 }
                 return
             }
-            let board = NSPasteboard.general
-            board.clearContents()
-            guard board.setString(action.text, forType: .string) else { completion("history", .clipboardUnavailable); return }
             func keypress(_ key: CGKeyCode, _ flags: CGEventFlags) -> Bool {
                 guard let target else { return false }
                 return post(key, flags: flags, to: target.processIdentifier)
             }
             if case .paste = action {
-                send(shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, post: keypress,
+                send(action.text, to: .general, shouldPressEnter: shouldPressEnter, check: check, isCurrent: isCurrent, insert: { text in
+                    guard let target, let field = FocusedInput.read(app: target, forAuto: false),
+                          originalField == nil || field == originalField else { return false }
+                    return insert(text, into: field.element)
+                }, post: keypress,
                      afterPaste: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: $0) }) { delivery, reason in
                     if delivery == "clipboard", reason == .focusChanged, let onWait { retry(onWait) }
                     else { completion(delivery, reason) }
@@ -291,11 +292,16 @@ enum Paste {
         } else { paste() }
     }
 
-    static func send(shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
-                     post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
+    static func send(_ text: String, to board: NSPasteboard, shouldPressEnter: @escaping () -> Bool, check: @escaping () -> PasteBlockReason?, isCurrent: @escaping () -> Bool,
+                     insert: (String) -> Bool, post: @escaping (CGKeyCode, CGEventFlags) -> Bool, afterPaste: (@escaping () -> Void) -> Void,
                      completion: @escaping (String, PasteBlockReason?) -> Void) {
-        if let reason = check() { completion("clipboard", reason); return }
-        guard post(9, .maskCommand) else { completion("clipboard", .eventUnavailable); return }
+        func failed(_ reason: PasteBlockReason) {
+            board.clearContents()
+            if board.setString(text, forType: .string) { completion("clipboard", reason) }
+            else { completion("history", .clipboardUnavailable) }
+        }
+        if let reason = check() { failed(reason); return }
+        guard insert(text) else { failed(.eventUnavailable); return }
         guard shouldPressEnter() else { completion("pasted", nil); return }
         afterPaste {
             guard isCurrent() else { completion("pasted", nil); return }
@@ -304,6 +310,14 @@ enum Paste {
             guard post(36, []) else { completion("pasted", .eventUnavailable); return }
             completion("submitted", nil)
         }
+    }
+
+    static func insert(_ text: String, into field: AXUIElement) -> Bool {
+        var writable: DarwinBoolean = false
+        guard AXUIElementIsAttributeSettable(field, kAXSelectedTextAttribute as CFString, &writable) == .success,
+              writable.boolValue else { return false }
+        // Replace only the selection (or insert at the caret), never rewrite the whole field.
+        return AXUIElementSetAttributeValue(field, kAXSelectedTextAttribute as CFString, text as CFString) == .success
     }
 
     static func post(_ key: CGKeyCode, flags: CGEventFlags, to pid: pid_t) -> Bool {

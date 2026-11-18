@@ -366,6 +366,7 @@ the installed app in Finder if it needs adding, and detects when permission is o
 In the macOS list, enable **Hey Talk**. If it is missing, click **+**, press
 **⇧⌘G**, enter `~/Applications`, and choose **Hey Talk.app**. Without
 that permission, dictation copies to the clipboard. While waiting for focus, the clipboard stays untouched.
+Dictation inserts text at the caret through Accessibility without touching the clipboard. If the target cannot accept direct insertion, the transcript is copied for manual recovery with ⌘V.
 The stop response reports `delivery: "waiting"`; status reports `waiting_to_paste`. `--no-paste` and file
 transcription leave the clipboard untouched. Switching from the old ad-hoc
 signature to the persistent certificate requires one final permission approval.
