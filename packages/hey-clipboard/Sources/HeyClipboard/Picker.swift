@@ -75,23 +75,46 @@ private struct QuickPickerView: View {
     var body: some View {
         VStack(spacing: 0) {
             if history.clips.isEmpty {
-                Text("Copy something to get started").foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                VStack(spacing: 12) {
+                    Image(systemName: "clipboard").font(.system(size: 26, weight: .light)).foregroundStyle(.teal)
+                    Text("Copy something to get started").font(.system(size: 13)).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
-                        LazyVStack(spacing: 3) {
+                        LazyVStack(spacing: 6) {
                             ForEach(history.clips) { clip in
-                                Text(clip.text).font(.system(size: 14)).lineLimit(2)
-                                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                                    .background(.teal.opacity(model.selection?.id == clip.id ? 0.16 : 0), in: RoundedRectangle(cornerRadius: 12))
-                                    .contentShape(Rectangle())
+                                let selected = model.selection?.id == clip.id
+                                HStack(spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        Text(clip.text).font(.system(size: 13, weight: selected ? .medium : .regular))
+                                            .lineLimit(selected ? 2 : 1)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                        Text(clip.app).font(.system(size: 10, weight: .medium)).foregroundStyle(.secondary)
+                                    }
+                                    if selected {
+                                        Image(systemName: "return").font(.system(size: 12, weight: .semibold)).foregroundStyle(.teal)
+                                    }
+                                }
+                                    .padding(.horizontal, 14).padding(.vertical, 11)
+                                    .background {
+                                        if selected {
+                                            if #available(macOS 26, *) {
+                                                RoundedRectangle(cornerRadius: 16).fill(.clear)
+                                                    .glassEffect(.regular.tint(.teal.opacity(0.07)), in: .rect(cornerRadius: 16))
+                                            } else {
+                                                RoundedRectangle(cornerRadius: 16).fill(.teal.opacity(0.12))
+                                            }
+                                        }
+                                    }
+                                    .contentShape(RoundedRectangle(cornerRadius: 16))
                                     .onTapGesture(count: 2) { model.selected = clip.id; model.pasteSelection() }
                                     .onTapGesture { model.selected = clip.id }
                                     .id(clip.id)
                             }
-                        }.padding(10)
+                        }.padding(12)
                     }
+                    .scrollIndicators(.never)
                     .onChange(of: model.selected) { _, id in if let id { proxy.scrollTo(id) } }
                 }
             }
@@ -99,10 +122,14 @@ private struct QuickPickerView: View {
                 Text(warning).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 8)
             }
             HStack {
-                Text("\((history.clips.firstIndex { $0.id == model.selection?.id }).map { $0 + 1 } ?? 0) / \(history.clips.count)")
+                Text("\((history.clips.firstIndex { $0.id == model.selection?.id }).map { $0 + 1 } ?? 0)")
+                    .fontWeight(.medium).foregroundStyle(.primary)
+                Text("/ \(history.clips.count)")
                 Spacer()
-                Text("↑↓   ↵ Paste   esc")
-            }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.bottom, 12)
+                Text("↑ ↓").tracking(3).padding(.trailing, 10)
+                Label("Paste", systemImage: "return")
+            }.font(.system(size: 11)).foregroundStyle(.secondary)
+                .padding(.horizontal, 24).padding(.top, 5).padding(.bottom, 16)
         }
     }
 }
