@@ -7134,6 +7134,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     // Safari acknowledges frames actually heard. Keep using the desktop passage
     // queue and word timings, but never open the Mac's input or output device.
     var phoneSession: UUID?
+    private var phoneActivity: NSObjectProtocol?
     private var phoneGeneration = 0
     private var phonePlayed = 0
     private var phoneSent = 0
@@ -7374,6 +7375,9 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
             }
         }
         try worker.run()
+        if phoneSession != nil && phoneActivity == nil {
+            phoneActivity = ProcessInfo.processInfo.beginActivity(options: .idleSystemSleepDisabled, reason: "Hey Boss phone conversation")
+        }
         let writer = input.fileHandleForWriting, reader = output.fileHandleForReading
         _ = fcntl(writer.fileDescriptor, F_SETNOSIGPIPE, 1)
         // Never wait on a child process in the audio callback.
@@ -7577,6 +7581,7 @@ final class ReviewAudio: NSObject, AVSpeechSynthesizerDelegate, @unchecked Senda
     }
     func stop() {
         guard !stopped else { return }; stopped = true
+        if let phoneActivity { ProcessInfo.processInfo.endActivity(phoneActivity); self.phoneActivity = nil }
         if let outputChanged {
             AudioObjectRemovePropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultOutput, .main, outputChanged)
             self.outputChanged = nil
