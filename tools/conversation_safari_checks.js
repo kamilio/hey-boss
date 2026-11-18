@@ -58,6 +58,10 @@ async (page) => {
     const mock = () => Object.defineProperty(MediaDevices.prototype,"getUserMedia",{value:async()=>{
       if (window.denyMic) { window.deniedContext=starting.ctx; throw new DOMException('Microphone permission denied','NotAllowedError'); }
       const context=starting.ctx, oscillator=context.createOscillator(), dest=context.createMediaStreamDestination();
+      if (window.leaveDuringLoad) {
+        const worklet=context.audioWorklet, load=worklet.addModule.bind(worklet);
+        worklet.addModule=async url=>{await load(url); window.cancelledCall=starting; dispatchEvent(new PageTransitionEvent('pagehide'));};
+      }
       oscillator.connect(dest); oscillator.start();
       window.testMic=dest.stream.getAudioTracks()[0];
       if(window.holdMic) await new Promise(resolve=>window.grantMic=resolve);
@@ -195,6 +199,13 @@ async (page) => {
   if(await page.evaluate(()=>!!voice || window.testMic.readyState!=="ended")) throw Error("An unresponsive microphone left voice running");
   await page.requestGC();
   if (await page.evaluate(()=>!!window.finishedCall.deref())) throw Error("Safari retained a finished voice call");
+  const beforeLoad=requests.filter(a=>a==='start').length;
+  await page.evaluate(()=>window.leaveDuringLoad=true);
+  await page.getByRole('button',{name:'Start voice'}).click();
+  await page.waitForFunction(()=>window.cancelledCall?.ctx.state==='closed');
+  if(requests.filter(a=>a==='start').length!==beforeLoad || await page.evaluate(()=>!!cancelledCall.mic || testMic.readyState!=='ended'))
+    throw Error('Leaving while the worklet loaded created a microphone after hangup');
+  await page.evaluate(()=>{window.leaveDuringLoad=false; delete window.cancelledCall;});
   // Two seconds of input must reach the Mac at the same duration and pitch at 16 kHz.
   await page.evaluate(async()=>{
     for (const rate of [8000,11025,44100,48000]) {

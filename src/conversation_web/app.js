@@ -193,6 +193,7 @@ async function start() {
       })]);
     if (v.closed) return;
     await ctx.audioWorklet.addModule('/mic.js');
+    if (v.closed) return;
     const source = ctx.createMediaStreamSource(v.track), mic = new AudioWorkletNode(ctx,'conversation-mic');
     source.connect(mic); mic.connect(ctx.destination); v.mic = mic; v.source = source;
     const heights = Array(11).fill(4);
@@ -217,7 +218,6 @@ async function start() {
       drawMeter();
     };
     track.onended = () => { if (!v.closed) { stop(v).catch(()=>{}); notice(Error('Microphone disconnected.')); } };
-    if (v.closed) return;
     await api('start',{session:v.id,chat:selected});
     if (v.closed) { await api('stop',{session:v.id}); return; }
     voice = v; starting = null; v.lastCapture = performance.now(); pump(v);
