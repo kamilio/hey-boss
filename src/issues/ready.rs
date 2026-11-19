@@ -80,6 +80,48 @@ fn check_snapshot(
     Ok(())
 }
 
+pub(super) fn finish_plan(
+    db: &Connection,
+    project: &Project,
+    issue: &mut Issue,
+    actor: &Actor,
+    guard: &ReadyGuard,
+    now: i64,
+) -> Result<Value> {
+    check_snapshot(db, &project.id, issue, guard, "Finish plan")?;
+    if issue.state != "open"
+        || issue.draft
+        || issue.deleted_at.is_some()
+        || issue.assignee.as_deref() != Some(&actor.id)
+        || crate::issues::worker::artifact_task(&json!({"labels":issue.labels})).is_none()
+    {
+        return Err(Error::conflict(
+            "Finishing a plan requires your claimed, open Plan task",
+        ));
+    }
+    let protected: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM fleet_allocations WHERE project_id=?1 AND issue_number=?2 AND node<>?4) OR EXISTS(SELECT 1 FROM worker_runs WHERE project_id=?1 AND issue_number=?2 AND finished_at IS NULL AND (actor_id<>?3 OR claimed_at IS NULL))",
+        params![project.id,issue.number,actor.id,actor.machine], |r| r.get(0),
+    )?;
+    if protected {
+        return Err(Error::conflict(
+            "Finishing a plan is blocked by another reservation or an unfinished/unclaimed worker attempt",
+        ));
+    }
+    let previous_labels = issue.labels.clone();
+    issue
+        .labels
+        .retain(|label| !matches!(label.as_str(), "task:plan" | "task:research"));
+    let mut acknowledgement = requirements::capture(db, &project.id, issue, actor)?;
+    acknowledgement["plan_completed"] = json!(true);
+    register_boss(db, actor, now)?;
+    assignments::clear(db, &project.id, issue.number)?;
+    issue.assignee = Some("human:boss".into());
+    Ok(json!({"previous_assignee":actor.id,"assignee":"human:boss",
+        "before":{"labels":previous_labels},"after":{"labels":issue.labels},
+        "requirements_handoff":acknowledgement}))
+}
+
 pub(super) fn guard_close(
     db: &Connection,
     project: &Project,

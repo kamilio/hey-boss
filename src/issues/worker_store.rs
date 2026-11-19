@@ -108,6 +108,13 @@ fn retry_count(db: &Connection, job: &Job) -> Result<i64> {
 // Only the owning agent's deliberate handoff may finish after changing owners.
 // A human takeover must still stop the session and invalidate its completion.
 fn own_pr_handoff(db: &Connection, job: &Job, issue: &Issue) -> Result<bool> {
+    if crate::issues::worker::artifact_task(&job.issue).is_some()
+        && let Some(ack) =
+            ready::requirements::current(db, &job.project.id, issue, &job.actor.id, &job.id)?
+        && ack.snapshot["plan_completed"] == true
+    {
+        return Ok(ack.valid);
+    }
     if assignments::own_handoff(db, job, issue)? {
         return Ok(true);
     }
@@ -2681,6 +2688,302 @@ mod tests {
             assert_eq!(f.issue().state, "closed");
             assert_eq!(f.state(), "completed");
             assert!(f.issue().assignee.is_none());
+        }
+    }
+
+    fn planning_fixture(label: &str, prs: bool) -> HandoffFixture {
+        let mut f = HandoffFixture::new(prs);
+        f.store
+            .db
+            .execute("DELETE FROM issue_pull_requests", [])
+            .unwrap();
+        f.job.issue["labels"] = json!([label, "security"]);
+        f.store
+            .db
+            .execute(
+                "UPDATE issues SET labels=?1",
+                [f.job.issue["labels"].to_string()],
+            )
+            .unwrap();
+        edit_handoff_notes(&mut f);
+        ready::register_boss(&f.store.db, &f.job.actor, now()).unwrap();
+        f
+    }
+
+    fn finish_plan_request(f: &HandoffFixture) -> Request {
+        Request {
+            version: 1,
+            project: f.job.project.clone(),
+            project_override: None,
+            actor: Some(f.job.actor.clone()),
+            request_id: Some("finish-plan-once".into()),
+            operation: serde_json::from_value(json!({
+                "action":"finish_plan", "number":1,
+                "guard":ready::snapshot(&f.store.db, &f.job.project.id, &f.issue()).unwrap()
+            }))
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn completed_plan_becomes_open_implementation_for_boss() {
+        for label in ["task:plan", "task:research"] {
+            for prs in [false, true] {
+                let mut f = planning_fixture(label, prs);
+                f.apply(
+                    serde_json::from_value(
+                        json!({"action":"create","title":"Dependent","body":"","labels":[]}),
+                    )
+                    .unwrap(),
+                );
+                f.apply(
+                    serde_json::from_value(
+                        json!({"action":"set_blockers","number":2,"blockers":[1]}),
+                    )
+                    .unwrap(),
+                );
+                let request = finish_plan_request(&f);
+                f.store.execute(&request).unwrap();
+                assert!(!f.store.worker_cancelled(&f.job).unwrap());
+                f.apply(Operation::Comment {
+                    number: 1,
+                    body: "Plan saved for review".into(),
+                    allow_long_comment: false,
+                });
+                f.store.execute(&request).unwrap();
+                f.store
+                    .worker_finish(&f.job, "completed", "Planning complete")
+                    .unwrap();
+                assert_eq!(f.state(), "completed");
+                let issue = f.issue();
+                assert_eq!(issue.state, "open");
+                assert_eq!(issue.assignee.as_deref(), Some("human:boss"));
+                assert_eq!(issue.labels, ["security"]);
+                assert!(issue.body.contains("Published handoff notes"));
+                assert_eq!(
+                    get_issue(&f.store.db, &f.job.project.id, 2, false)
+                        .unwrap()
+                        .state,
+                    "blocked"
+                );
+                assert!(
+                    crate::issues::worker::artifact_task(&serde_json::to_value(&issue).unwrap())
+                        .is_none()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn finish_plan_handoff_reaches_companion_worker() {
+        let mut f = planning_fixture("task:plan", true);
+        f.job.actor.machine = "peer".into();
+        f.job.machine = "peer".into();
+        let mut peer = Store::open(&f.root.join("peer.db")).unwrap();
+        let replica = crate::fleet::test_replica;
+        replica(
+            &f.store.db,
+            &json!({"replica":"capture","role":"controller","node":"main"}),
+        );
+        replica(
+            &peer.db,
+            &json!({"replica":"capture","role":"agent","node":"peer"}),
+        );
+        f.store
+            .db
+            .execute(
+                "INSERT INTO fleet_allocations VALUES(?1,1,'peer')",
+                [&f.job.project.id],
+            )
+            .unwrap();
+        let pull = |main: &Store, peer: &Store| {
+            let payload = replica(&main.db, &json!({"replica":"snapshot","node":"peer"}));
+            replica(
+                &peer.db,
+                &json!({"replica":"pull","node":"peer","payload":payload,"receipts":[]}),
+            );
+        };
+        pull(&f.store, &peer);
+        peer.db.execute("INSERT INTO worker_runs(id,project_id,issue_number,job,actor_id,state,owner_pid,owner_start,machine,started_at,updated_at,claimed_at) VALUES(?1,?2,1,?3,?4,'running',1,'start','peer',0,0,0)", params![f.job.id,f.job.project.id,serde_json::to_string(&f.job).unwrap(),f.job.actor.id]).unwrap();
+        // The supervisor learns remote attempts from the existing fleet report.
+        f.store.db.execute("DELETE FROM worker_runs", []).unwrap();
+        f.store
+            .db
+            .execute(
+                "CREATE TABLE IF NOT EXISTS fleet_state(key TEXT PRIMARY KEY,value TEXT)",
+                [],
+            )
+            .unwrap();
+        f.store.db.execute("INSERT OR REPLACE INTO fleet_state VALUES('machines',?1)", [json!({"peer":{"workers":[{"runs":[{"id":f.job.id,"project_id":f.job.project.id,"number":1,"actor_id":f.job.actor.id,"finished_at":null}]}]}}).to_string()]).unwrap();
+        f.store
+            .execute_supervisor(&finish_plan_request(&f))
+            .unwrap();
+        pull(&f.store, &peer);
+        assert!(!peer.worker_cancelled(&f.job).unwrap());
+        peer.worker_finish(&f.job, "completed", "Planning complete")
+            .unwrap();
+        let state: String = peer
+            .db
+            .query_row(
+                "SELECT state FROM worker_runs WHERE id=?1",
+                [&f.job.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, "completed");
+        let issue = get_issue(&peer.db, &f.job.project.id, 1, false).unwrap();
+        assert_eq!(issue.state, "open");
+        assert_eq!(issue.assignee.as_deref(), Some("human:boss"));
+        assert_eq!(issue.labels, ["security"]);
+    }
+
+    #[test]
+    fn finish_plan_rejects_stale_or_foreign_handoffs_without_conversion() {
+        for change in [
+            "version",
+            "owner",
+            "reservation",
+            "unclaimed",
+            "no_run",
+            "not_plan",
+            "draft",
+            "ready",
+            "missing_guard",
+        ] {
+            let mut f = planning_fixture("task:plan", true);
+            let mut request = finish_plan_request(&f);
+            match change {
+                "version" => {
+                    edit_handoff_notes(&mut f);
+                    f.apply(Operation::Comment {
+                        number: 1,
+                        body: "Changed after snapshot".into(),
+                        allow_long_comment: false,
+                    });
+                }
+                "owner" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET assignee='human:boss'", [])
+                        .unwrap();
+                }
+                "reservation" => {
+                    f.store.db.execute("INSERT INTO fleet_allocations(project_id,issue_number,node) VALUES(?1,1,'other')", [&f.job.project.id]).unwrap();
+                }
+                "unclaimed" => {
+                    f.store
+                        .db
+                        .execute("UPDATE worker_runs SET claimed_at=NULL", [])
+                        .unwrap();
+                }
+                "no_run" => {
+                    f.store
+                        .db
+                        .execute("UPDATE worker_runs SET finished_at=1", [])
+                        .unwrap();
+                }
+                "not_plan" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET labels='[]'", [])
+                        .unwrap();
+                }
+                "draft" => {
+                    f.store.db.execute("UPDATE issues SET draft=1", []).unwrap();
+                }
+                "ready" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET state='ready'", [])
+                        .unwrap();
+                }
+                "missing_guard" => {
+                    request.operation = Operation::FinishPlan {
+                        number: 1,
+                        guard: None,
+                    };
+                }
+                _ => unreachable!(),
+            }
+            // A fresh guard must not authorize a foreign owner, reservation or attempt.
+            if !matches!(change, "version" | "missing_guard") {
+                request = finish_plan_request(&f);
+            }
+            let before = serde_json::to_value(f.issue()).unwrap();
+            assert!(f.store.execute(&request).is_err(), "{change}");
+            assert_eq!(serde_json::to_value(f.issue()).unwrap(), before, "{change}");
+        }
+    }
+
+    #[test]
+    fn finish_plan_completion_rejects_later_changes_and_wrong_run_intent() {
+        for change in [
+            "body",
+            "external_comment",
+            "labels",
+            "version",
+            "actor",
+            "run",
+            "owner",
+            "implementation_run",
+        ] {
+            let mut f = planning_fixture("task:plan", true);
+            f.store.execute(&finish_plan_request(&f)).unwrap();
+            match change {
+                "body" => f.apply(serde_json::from_value(json!({
+                    "action":"edit", "number":1, "body":"Later requirements", "add_labels":[], "remove_labels":[]
+                })).unwrap()),
+                "external_comment" => {
+                    let mut request = finish_plan_request(&f);
+                    request.request_id = None;
+                    request.actor.as_mut().unwrap().id = "human:boss".into();
+                    request.operation = Operation::Comment {
+                        number: 1,
+                        body: "New requirements".into(),
+                        allow_long_comment: false,
+                    };
+                    f.store.execute(&request).unwrap();
+                }
+                "labels" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET labels='[\"task:plan\"]'", [])
+                        .unwrap();
+                }
+                "version" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET version=version+1", [])
+                        .unwrap();
+                }
+                "actor" => {
+                    f.store
+                        .db
+                        .execute(
+                            "UPDATE events SET actor='human:boss' WHERE action='claimed'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                "run" => {
+                    f.store.db.execute("UPDATE events SET data=json_set(data,'$.requirements_handoff.run','other-run') WHERE action='claimed'", []).unwrap();
+                }
+                "owner" => {
+                    f.store
+                        .db
+                        .execute("UPDATE issues SET assignee=?1", [&f.job.actor.id])
+                        .unwrap();
+                }
+                "implementation_run" => {
+                    f.job.issue["labels"] = json!([]);
+                }
+                _ => unreachable!(),
+            }
+            f.store
+                .worker_finish(&f.job, "completed", "Stale planning completion")
+                .unwrap();
+            assert_eq!(f.state(), "blocked", "{change}");
+            assert_eq!(f.issue().state, "open", "{change}");
         }
     }
 

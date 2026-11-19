@@ -24,7 +24,7 @@ fn needs_snapshot(value: &Value, supervisor: bool) -> bool {
         "undraft" => value["if_version"].is_null(),
         "move" => value["if_order_version"].is_null(),
         "reopen" | "set_blockers" => supervisor && value["if_version"].is_null(),
-        "ready" => value["guard"].is_null(),
+        "ready" | "finish_plan" => value["guard"].is_null(),
         "close" => supervisor && value["guard"].is_null(),
         "batch" => {
             if !value["matching"].is_null() {
@@ -159,7 +159,9 @@ fn prepare(
     let mut operation = serde_json::to_value(&request.operation)?;
     // Keep the absent wire field for compatibility, but normalize the CLI
     // template so receipt comparison ignores only automatically captured guards.
-    if operation["action"] == "ready" || supervisor && operation["action"] == "close" {
+    if matches!(operation["action"].as_str(), Some("ready" | "finish_plan"))
+        || supervisor && operation["action"] == "close"
+    {
         if operation["action"] == "close" && operation["force"] == true {
             return Err(Error::invalid(
                 "--supervisor close does not support --force",
@@ -183,7 +185,7 @@ fn prepare(
     let authority = supervisor
         || matches!(
             operation["action"].as_str(),
-            Some("assign" | "ready" | "move" | "undraft")
+            Some("assign" | "ready" | "finish_plan" | "move" | "undraft")
         )
         || (operation["action"] == "batch" && !operation["matching"].is_null())
         || (operation["action"] == "edit" && operation["draft"] == true);
@@ -220,7 +222,10 @@ fn prepare(
                 number: operation["number"].as_i64().unwrap(),
             };
             let current = call(&read, authority)?;
-            if matches!(operation["action"].as_str(), Some("ready" | "close")) {
+            if matches!(
+                operation["action"].as_str(),
+                Some("ready" | "finish_plan" | "close")
+            ) {
                 operation["guard"] = current["ready_guard"].clone();
             } else if operation["action"] == "move" {
                 operation["if_order_version"] = current["order_version"].clone();
@@ -236,6 +241,7 @@ fn prepare(
             || matches!(
                 request.operation,
                 Operation::Ready { guard: Some(_), .. }
+                    | Operation::FinishPlan { .. }
                     | Operation::Batch { .. }
                     | Operation::Move { .. }
                     | Operation::Undraft { .. }
@@ -280,6 +286,33 @@ mod tests {
 
     fn request(operation: Value) -> Request {
         serde_json::from_value(json!({"version":1,"project":{"id":"named:Test","name":"Test"},"actor":{"id":"codex:owner","kind":"codex","session_id":"owner","machine":"local","host":"local","pid":null,"process_start":null,"cwd":"/tmp","source":"test"},"operation":operation})).unwrap()
+    }
+
+    #[test]
+    fn finish_plan_captures_authoritative_guards_and_receipt() {
+        let request = request(json!({"action":"finish_plan","number":1}));
+        let guard = json!({"if_version":7,"expected_assignee":"codex:owner","expected_reservation":"snapshot"});
+        let mut calls = 0;
+        prepare(&request, false, |r, authority| {
+            calls += 1;
+            match &r.operation {
+                Operation::View { number: 1 } => {
+                    assert!(authority);
+                    Ok(json!({"ready_guard":guard}))
+                }
+                Operation::FinishPlan {
+                    guard: Some(captured),
+                    ..
+                } => {
+                    assert_eq!(serde_json::to_value(captured).unwrap(), guard);
+                    assert!(r.request_id.is_some());
+                    Ok(json!({"ok":true}))
+                }
+                other => panic!("Unexpected request {other:?}"),
+            }
+        })
+        .unwrap();
+        assert_eq!(calls, 2);
     }
 
     #[test]
@@ -402,8 +435,10 @@ mod tests {
 
     #[test]
     fn lifecycle_retry_recovers_a_receipt_committed_before_its_snapshot() {
-        for action in ["ready", "close"] {
-            let mut request = request(if action == "ready" {
+        for action in ["ready", "close", "finish_plan"] {
+            let mut request = request(if action == "finish_plan" {
+                json!({"action":action,"number":1})
+            } else if action == "ready" {
                 json!({"action":action,"number":1,"force":false})
             } else {
                 json!({"action":action,"number":1,"force":false,"comment":"Verified"})

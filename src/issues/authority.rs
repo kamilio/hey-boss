@@ -41,7 +41,7 @@ pub(crate) fn validate(request: &Request) -> Result<()> {
         } if *version > 0 => {}
         Operation::RefreshGithub { .. } => {}
         Operation::Status { .. } => {}
-        Operation::Ready { guard: Some(_), .. } => {}
+        Operation::Ready { guard: Some(_), .. } | Operation::FinishPlan { guard: Some(_), .. } => {}
         Operation::Close {
             guard: Some(_),
             force: false,

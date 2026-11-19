@@ -688,6 +688,11 @@ pub enum Operation {
         number: i64,
         force: bool,
     },
+    FinishPlan {
+        number: i64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        guard: Option<ReadyGuard>,
+    },
     Unassign {
         number: i64,
         force: bool,
@@ -911,6 +916,7 @@ impl Operation {
             | Self::Claim { number, .. }
             | Self::Ready { number, .. }
             | Self::AssignBoss { number, .. }
+            | Self::FinishPlan { number, .. }
             | Self::Unassign { number, .. }
             | Self::Comment { number, .. }
             | Self::Status { number, .. }

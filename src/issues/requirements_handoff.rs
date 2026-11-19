@@ -79,14 +79,28 @@ pub(in crate::issues::store) fn current(
     if ack.is_null() {
         return Ok(None);
     }
-    let owner_matches = issue.assignee.as_deref() == Some(actor)
-        || (action == "ready" && issue.assignee.as_deref() == Some("human:boss"));
-    let valid = issue.state == "ready"
+    let plan_completed = ack["plan_completed"] == true;
+    let plan_handoff = plan_completed
+        && action == "claimed"
+        && data["assignee"] == "human:boss"
+        && data["previous_assignee"] == actor;
+    let owner_matches = if plan_completed {
+        issue.assignee.as_deref() == Some("human:boss")
+    } else {
+        issue.assignee.as_deref() == Some(actor)
+            || (action == "ready" && issue.assignee.as_deref() == Some("human:boss"))
+    };
+    let state_matches = if plan_completed {
+        issue.state == "open" && plan_handoff
+    } else {
+        issue.state == "ready"
+    };
+    let valid = state_matches
         && issue.deleted_at.is_none()
         && !issue.draft
         && author == actor
         && owner_matches
-        && ((action == "ready" && data["previous_assignee"] == actor)
+        && (plan_handoff || (action == "ready" && data["previous_assignee"] == actor)
             || (action == "assigned"
                 && data["target"] == "github"
                 && data["github_handoff"]["run"] == run
@@ -189,7 +203,7 @@ impl Store {
         now: i64,
     ) -> Result<bool> {
         let latest: Option<(String, String)> = db.query_row(
-            "SELECT e.actor,json_extract(e.data,'$.requirements_handoff.run') FROM issues i JOIN events e ON e.project_id=i.project_id AND e.issue_number=i.number WHERE i.project_id=?1 AND i.number=?2 AND i.state='ready' AND e.action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY e.id DESC LIMIT 1",
+            "SELECT e.actor,json_extract(e.data,'$.requirements_handoff.run') FROM issues i JOIN events e ON e.project_id=i.project_id AND e.issue_number=i.number WHERE i.project_id=?1 AND i.number=?2 AND i.state IN ('open','ready') AND e.action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY e.id DESC LIMIT 1",
             params![project, number], |r| Ok((r.get(0)?, r.get::<_,Option<String>>(1)?.unwrap_or_default())),
         ).optional()?;
         let Some((actor, run)) = latest else {
@@ -231,7 +245,7 @@ impl Store {
         action: &str,
     ) -> Result<bool> {
         Ok(db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM issues i JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=i.project_id AND issue_number=i.number AND action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1) WHERE i.project_id=?1 AND i.number=?2 AND i.state='ready' AND i.version=json_extract(e.data,'$.requirements_handoff.version') AND (e.actor<>?3 OR ?4 NOT IN ('commented','requirements_preserved')))",
+            "SELECT EXISTS(SELECT 1 FROM issues i JOIN events e ON e.id=(SELECT id FROM events WHERE project_id=i.project_id AND issue_number=i.number AND action IN ('assigned','claimed','ready','unassigned','closed','reopened','blocked','deleted','restored') ORDER BY id DESC LIMIT 1) WHERE i.project_id=?1 AND i.number=?2 AND i.state IN ('open','ready') AND i.version=json_extract(e.data,'$.requirements_handoff.version') AND (e.actor<>?3 OR ?4 NOT IN ('commented','requirements_preserved')))",
             params![project, number, actor, action], |r| r.get(0),
         )?)
     }
@@ -242,14 +256,15 @@ pub(in crate::issues::store) fn matches(
     job: &crate::issues::worker::Job,
     issue: &Issue,
 ) -> Result<bool> {
-    // Acknowledgement never converts an implementation task into artifact work.
-    if crate::issues::worker::artifact_task(&json!({"labels":issue.labels}))
-        != crate::issues::worker::artifact_task(&job.issue)
-    {
-        return Ok(false);
-    }
+    let was_plan = crate::issues::worker::artifact_task(&job.issue).is_some();
+    let is_plan = crate::issues::worker::artifact_task(&json!({"labels":issue.labels})).is_some();
     if let Some(ack) = current(db, &job.project.id, issue, &job.actor.id, &job.id)? {
-        return Ok(ack.valid);
+        return Ok(ack.valid
+            && if ack.snapshot["plan_completed"] == true {
+                was_plan && !is_plan
+            } else {
+                was_plan == is_plan
+            });
     }
-    Ok(issue.title == job.issue["title"] && issue.body == job.issue["body"])
+    Ok(was_plan == is_plan && issue.title == job.issue["title"] && issue.body == job.issue["body"])
 }

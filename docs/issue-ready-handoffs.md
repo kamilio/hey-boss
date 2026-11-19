@@ -1,5 +1,18 @@
 # Guarded Ready handoffs
 
+To finish a planning run, save the plan in the issue description, then run
+`hey-boss issue finish-plan NUMBER`. This atomically removes `task:plan` (and the
+legacy `task:research` label) and assigns the same Open issue to Boss. It records
+the planning run's completed handoff without marking the implementation Ready,
+closing the issue, or unblocking dependents. Boss can release it for implementation
+after review. Ordinary label edits do not complete a planning run.
+
+This requires the active owning worker and a current version, owner and reservation
+snapshot, captured by the CLI. The handoff acknowledges the saved plan for that
+run only. Later requirement edits, external comments or ownership changes
+invalidate it. Retry an uncertain result with the same `--request-id`. Companions
+use the supervisor tunnel and require `issue_finish_plan` support on both ends.
+
 Ready is a task status independent of pull requests. It assigns the issue to
 Boss and unblocks eligible dependents. Unassigning preserves Ready; workers
 can pick up unassigned Open and Ready tasks with their status intact. It does not assert

@@ -549,6 +549,11 @@ enum Action {
         #[arg(long)]
         force: bool,
     },
+    /// Finish your planning run, convert the issue to Implement and assign it to Boss.
+    #[command(
+        after_help = "Save the plan in the issue description first. The issue stays Open and its dependents stay blocked.\nRequires the owning worker run and a Plan task; captures version, owner and reservation guards automatically.\nRetry uncertain results with the same --request-id."
+    )]
+    FinishPlan { number: i64 },
     /// Remove your or Boss's assignment, leaving the issue open.
     Unassign {
         number: i64,
@@ -1447,6 +1452,10 @@ impl Options {
                 number: *number,
                 force: *force,
             },
+            Action::FinishPlan { number } => Operation::FinishPlan {
+                number: *number,
+                guard: None,
+            },
             Action::Unassign { number, force } => Operation::Unassign {
                 number: *number,
                 force: *force,
@@ -1627,6 +1636,7 @@ pub fn run(options: &Options) -> Result<()> {
                 | Action::Assign { .. }
                 | Action::Unassign { force: false, .. }
                 | Action::Ready { .. }
+                | Action::FinishPlan { .. }
                 | Action::Close { .. }
                 | Action::Reopen { .. }
                 | Action::BlockedBy { .. }

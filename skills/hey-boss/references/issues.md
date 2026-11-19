@@ -7,6 +7,11 @@
 makes it runnable. Assign human work with `issue assign-to-boss NUMBER`; find it
 with `issue list --assignee boss`.
 
+After saving a plan in the issue description, the owning planning worker can run
+`issue finish-plan NUMBER`. This converts it to Implement and assigns it to Boss
+atomically, leaving it Open and its dependents blocked. It completes the planning
+handoff, not the implementation. Do not substitute separate label/assignment edits.
+
 For PR work, use `issue pr add NUMBER URL` to attach the PR and `issue pr list NUMBER`
 to inspect its links. Linking a PR does not close the issue; close it when the
 requested work is complete.

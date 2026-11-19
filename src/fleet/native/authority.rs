@@ -149,7 +149,7 @@ pub(super) fn failure(error: Error) -> Value {
 }
 
 pub(super) fn capabilities() -> Value {
-    json!({"utils_v1":true,"scheduled_jobs":true,"exec_v1":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_undraft":true,"issue_move":true,"issue_matching":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
+    json!({"utils_v1":true,"scheduled_jobs":true,"exec_v1":true,"github_reads_v1":true,"authority_rpc":true,"issue_numbers":true,"issue_metadata":true,"issue_status":true,"issue_detail_compact":true,"issue_request_status":true,"issue_pr_attachments":true,"issue_draft":true,"issue_undraft":true,"issue_move":true,"issue_matching":true,"issue_reopen":true,"issue_close":true,"issue_dependencies":true,"issue_ready":true,"issue_finish_plan":true,"issue_ready_keep_draft":true,"issue_requirements_handoff":true,"issue_assignment":true,"issue_reviewed_github_handoff":true,"issue_github_refresh":true,"issue_archives":true})
 }
 
 pub(super) fn capability_report(route: &str, capabilities: Value, build: Value) -> Value {
@@ -255,6 +255,7 @@ impl Relay {
                             "issue_close": message["capabilities"]["issue_close"] == true,
                             "issue_dependencies": message["capabilities"]["issue_dependencies"] == true,
                             "issue_ready": message["capabilities"]["issue_ready"] == true,
+                            "issue_finish_plan": message["capabilities"]["issue_finish_plan"] == true,
                             "issue_ready_keep_draft": message["capabilities"]["issue_ready_keep_draft"] == true,
                             "issue_requirements_handoff": message["capabilities"]["issue_requirements_handoff"] == true,
                             "issue_assignment": message["capabilities"]["issue_assignment"] == true,
@@ -311,6 +312,7 @@ impl Relay {
                                 matches!(metadata.operation, crate::issues::Operation::Ready { keep_draft: true, .. })
                                     .then_some("issue_ready_keep_draft"),
                             )
+                            .chain(matches!(metadata.operation, crate::issues::Operation::FinishPlan { .. }).then_some("issue_finish_plan"))
                             .chain(matches!(metadata.operation, crate::issues::Operation::Ready { acknowledge_requirements: true, .. }).then_some("issue_requirements_handoff"))
                             .chain(matches!(metadata.operation,crate::issues::Operation::Assign{..}).then_some("issue_assignment"))
                             .chain(matches!(metadata.operation,crate::issues::Operation::Assign{reviewed_evidence:Some(_),..}).then_some("issue_reviewed_github_handoff"))
@@ -698,6 +700,14 @@ mod tests {
         assert_eq!(
             error.details.as_ref().unwrap()["required_capability"],
             "issue_requirements_handoff"
+        );
+        assert_eq!(error.details.unwrap()["sent"], false);
+        let finish_plan = json!({"kind":"issue_metadata","request":{"version":1,"project":{"id":"named:Test","name":"Test"},"request_id":"plan-old","operation":{"action":"finish_plan","number":1,"guard":{"if_version":1,"expected_assignee":null,"expected_reservation":"snapshot"}}}});
+        let error = call(&ctx.state, &ctx.path, finish_plan).unwrap_err();
+        assert_eq!(error.code, "fleet_capability_unsupported");
+        assert_eq!(
+            error.details.as_ref().unwrap()["required_capability"],
+            "issue_finish_plan"
         );
         assert_eq!(error.details.unwrap()["sent"], false);
         relay.configure(&json!({"build":"old-metadata-build","capabilities":{"authority_rpc":true,"issue_metadata":true}}));

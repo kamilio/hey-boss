@@ -698,6 +698,16 @@ fn validate(r: &Request) -> Result<()> {
     if let Operation::RequestStatus { id } = &r.operation {
         identifier(id, "request ID", 256)?;
     }
+    if let Operation::FinishPlan { guard, .. } = &r.operation {
+        let guard = guard.as_ref().ok_or_else(|| {
+            Error::invalid("Finishing a plan requires version, assignee and reservation guards")
+        })?;
+        if guard.if_version < 1 || r.request_id.is_none() {
+            return Err(Error::invalid(
+                "Finishing a plan requires a positive version and --request-id",
+            ));
+        }
+    }
     if let Operation::Ready {
         guard,
         clear_manual_hold,
@@ -1657,6 +1667,7 @@ impl Store {
             }
         }
         if let Operation::Ready { guard, .. }
+        | Operation::FinishPlan { guard, .. }
         | Operation::Close {
             guard: guard @ Some(_),
             ..
@@ -3239,6 +3250,7 @@ fn mutate(
         operation,
         Operation::Claim { .. }
             | Operation::Ready { .. }
+            | Operation::FinishPlan { .. }
             | Operation::Close { .. }
             | Operation::Reopen { .. }
             | Operation::Delete { .. }
@@ -3374,6 +3386,11 @@ fn mutate(
                 action = "ready";
                 data = handoff;
             }
+        }
+        Operation::FinishPlan { guard, .. } => {
+            data =
+                ready::finish_plan(db, project, &mut issue, actor, guard.as_ref().unwrap(), now)?;
+            action = "claimed";
         }
         Operation::Claim { force, .. } | Operation::AssignBoss { force, .. } => {
             if issue.draft {
