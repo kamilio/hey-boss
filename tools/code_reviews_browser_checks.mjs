@@ -362,16 +362,25 @@ try {
   const chip = page.getByRole("link",{name:/Open commit ccccccc/});
   await chip.click();
   await full.getByRole("heading",{name:message}).waitFor();
-  assert.ok(await full.locator(".task-strip").evaluate(el => el.getBoundingClientRect().bottom <= document.querySelector("#review > header").getBoundingClientRect().top), "Task controls precede the commit message");
+  const controls = modal.locator(".dialog-heading .task-strip");
+  await controls.waitFor();
+  assert.equal(await full.locator(".task-strip").count(), 0, "Task controls leave the scrolling review");
+  for (const [width,colorScheme] of [[320,"dark"],[1280,"light"]]) {
+    await page.setViewportSize({width,height:768});
+    await page.emulateMedia({colorScheme});
+    assert.ok(await controls.evaluate(el => el.getBoundingClientRect().left >= 0 && el.getBoundingClientRect().right <= innerWidth), "Task controls fit the preview header");
+    if (width === 1280) assert.ok(await controls.evaluate(el => Math.abs(el.getBoundingClientRect().top + el.clientHeight / 2 - (document.querySelector("#preview-title").getBoundingClientRect().top + document.querySelector("#preview-title").clientHeight / 2)) < 2), "Task controls sit beside Commit review");
+    if (snap) await modal.screenshot({path:join(snap,"preview-header-"+colorScheme+".png")});
+  }
   await full.locator("#message-body details summary").click();
   await full.locator("#message-body details strong").filter({hasText:"Why:"}).waitFor();
   await full.locator('.diff-row.addition code').filter({hasText:"+preserve(labels);"}).first().waitFor();
   assert.equal(await full.getByRole("button",{name:"Approve commit"}).count(),0);
-  await full.locator("#assign-me").click();
-  await full.locator("#unassign").click();
-  await full.locator("#task-owner").filter({hasText:"Unassigned"}).waitFor();
-  await full.locator("#make-ready").click();
-  await full.locator("#task-state").filter({hasText:"Ready"}).waitFor();
+  await controls.locator("#assign-me").click();
+  await controls.locator("#unassign").click();
+  await controls.locator("#task-owner").filter({hasText:"Unassigned"}).waitFor();
+  await controls.locator("#make-ready").click();
+  await controls.locator("#task-state").filter({hasText:"Ready"}).waitFor();
   if (snap) await modal.screenshot({path:join(snap,"preview-commit.png")});
   const commentCount = () => run([...issue, "view", String(issueNumber)]).comments.length;
   const beforeReopen = commentCount(), reopenOps = [];
@@ -381,13 +390,13 @@ try {
       if (op?.number === issueNumber && ["comment", "rework"].includes(op.action)) reopenOps.push(op.action);
     }
   });
-  await full.locator("#rework").click();
+  await controls.locator("#rework").click();
   await full.getByLabel("Comment optional").fill("Keep the existing reminder labels.");
   await page.keyboard.press("Escape");
   assert.ok(await modal.isVisible(), "Escape closes only the comment dialog");
   assert.equal(await full.locator("#reopen-dialog").isVisible(), false);
-  assert.equal(await full.locator("#task-state").innerText(), "Ready");
-  await full.locator("#rework").click();
+  assert.equal(await controls.locator("#task-state").innerText(), "Ready");
+  await controls.locator("#rework").click();
   for (const [width,colorScheme] of [[320,"dark"],[1280,"light"]]) {
     await page.setViewportSize({width,height:768});
     await page.emulateMedia({colorScheme});
@@ -412,24 +421,25 @@ try {
   await full.getByText("Reopen could not be saved", {exact:true}).waitFor();
   assert.equal(commentCount(), beforeReopen + 1);
   assert.equal(await full.getByLabel("Comment optional").inputValue(), "", "Saved comments are not posted again on retry");
-  assert.equal(await full.locator("#task-state").innerText(), "Ready");
+  assert.equal(await controls.locator("#task-state").innerText(), "Ready");
   await page.unroute("**/api/action");
   await full.getByLabel("Comment optional").press("Meta+Enter");
-  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
+  await controls.locator("#task-state").filter({hasText:"Open"}).waitFor();
   assert.deepEqual(reopenOps, ["comment", "comment", "rework", "rework"]);
   assert.equal(commentCount(), beforeReopen + 1);
   assert.equal(run([...issue, "view", String(issueNumber)]).comments.at(-1).body, "Keep the existing reminder labels.");
-  await full.locator("#make-ready").click();
-  await full.locator("#task-state").filter({hasText:"Ready"}).waitFor();
-  await full.locator("#rework").click();
+  await controls.locator("#make-ready").click();
+  await controls.locator("#task-state").filter({hasText:"Ready"}).waitFor();
+  await controls.locator("#rework").click();
   await full.getByLabel("Comment optional").fill("   ");
   await full.locator('#reopen-form button[type="submit"]').click();
-  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
+  await controls.locator("#task-state").filter({hasText:"Open"}).waitFor();
   assert.equal(commentCount(), beforeReopen + 1, "An empty comment reopens without posting");
   await page.keyboard.press("Escape");
   await modal.waitFor({state:"hidden"});
   const [commitPage] = await Promise.all([page.context().waitForEvent("page"),chip.click({modifiers:["Shift"]})]);
   await commitPage.getByRole("heading",{name:message}).waitFor();
+  assert.ok(await commitPage.locator(".app-header .task-strip").isVisible(), "Standalone task controls appear in the header");
   await commitPage.close();
   // A long archive must not displace pending work or invalidate an old issue link.
   const seed = spawnSync("sqlite3", [env.HEY_BOSS_ISSUE_DB], {encoding:"utf8", input:

@@ -2923,8 +2923,16 @@ button.avatar.self:hover {
   display: flex; flex-direction: column; overflow: hidden;
   width: 96vw; max-width: none; height: 94dvh; max-height: none;
 }
-#review-preview .dialog-heading { flex: none; padding: 8px clamp(12px, 2vw, 28px); gap: 12px; }
-#preview-title { margin: 0 auto 0 0; font-size: 16px; }
+#review-preview .dialog-heading { flex: none; flex-wrap: wrap; padding: 8px clamp(12px, 2vw, 28px); gap: 12px; }
+#preview-title { margin: 0; font-size: 16px; }
+#preview-full { margin-left: auto; }
+.task-strip, .task-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.task-strip { min-width: 0; }
+.task-strip strong { font-size: 13px; }
+.task-strip #task-owner { color: var(--muted); font-size: 12px; }
+@media (max-width: 900px) {
+  #review-preview .task-strip { order: 1; flex-basis: 100%; }
+}
 #preview-frame { width: 100%; flex: 1; min-height: 0; border: 0; }
 .embedded-review .app-header, .embedded-review .app-navigation, .embedded-review #reviews-back { display: none; }
 .embedded-review :is(#review-main, #reviews-main) { max-width: none; padding: clamp(14px, 2vw, 32px); }

@@ -20,13 +20,7 @@
       <a class="brand" href="/"><img src="/icon.png" alt="" width="30" height="30">Hey Boss</a>
       <span class="header-divider" aria-hidden="true"></span>
       <span class="review-label">Commit review</span>
-    </div>
-  </header>
-  <main id="review-main" tabindex="-1">
-    <p role="status" id="loading">Loading commit review…</p>
-    <div id="review" hidden>
-      <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
-      <section class="task-strip" aria-label="Task actions">
+      <section class="task-strip" aria-label="Task actions" hidden>
         <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
         <div class="task-actions">
           <button class="button small" id="rework">Reopen and assign to me</button>
@@ -36,6 +30,12 @@
           <button class="icon-button" id="refresh-task" title="Refresh task status" aria-label="Refresh task status"><span data-icon="refresh"></span></button>
         </div>
       </section>
+    </div>
+  </header>
+  <main id="review-main" tabindex="-1">
+    <p role="status" id="loading">Loading commit review…</p>
+    <div id="review" hidden>
+      <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
       <div id="status" role="status"></div><div id="review-error" role="alert" hidden></div>
       <header>
         <div class="eyebrow">Commit <code id="commit-sha"></code></div>

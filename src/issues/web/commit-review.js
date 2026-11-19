@@ -4,7 +4,9 @@ import { mountGitComments } from './git-review/git-comments.js';
 import { mountGitFiles } from './git-review/git-files.js';
 import { mountGitLayout } from './git-review/git-layout.js';
 
-const $ = selector => document.querySelector(selector);
+// The preview moves these controls into its own header. Keep using the same nodes.
+const taskStrip = document.querySelector(".task-strip");
+const $ = selector => taskStrip.querySelector(selector) || document.querySelector(selector);
 const params = new URLSearchParams(location.search);
 const project = params.get('project'), number = Number(params.get('issue')), commit = params.get('commit');
 const host = document.documentElement.dataset.issueMobile === 'true' ? null : params.get('host');
@@ -60,12 +62,12 @@ async function start() {
   $('#authored').title = snapshot.authored_at;
   $('#files').innerHTML = renderGitFiles({files});
   $('#file-count').textContent = files.length;
-  HeyBossUI.icons($('#review'));
+  HeyBossUI.icons($('#review')); HeyBossUI.icons(taskStrip);
   renderMessage(result.message_body_html);
   if (window !== window.top) $('#full-message').open = true;
   if (window === window.top && task.comments.length) $('#files').after(HeyBossUI.reviewDiscussion(task, project, host));
   $('#loading').remove(); $('#review').hidden = false;
-  taskBar(); mountGitFiles(); mountGitComments({comments:result.comments,request:review}); mountGitLayout();
+  taskBar(); taskStrip.hidden = false; mountGitFiles(); mountGitComments({comments:result.comments,request:review}); mountGitLayout();
   const reopenDialog = $('#reopen-dialog'), reopenForm = $('#reopen-form'), comment = $('#reopen-comment');
   $('#rework').onclick = () => {
     $('#reopen-title').textContent = $('#rework').textContent;

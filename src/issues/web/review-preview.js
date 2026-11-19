@@ -8,11 +8,14 @@
   };
   $("#preview-close").onclick = close;
   dialog.oncancel = event => { event.preventDefault(); close(); };
-  dialog.onclose = () => { frame.removeAttribute("src"); refresh(); };
+  dialog.onclose = () => { dialog.querySelector(".task-strip")?.remove(); frame.removeAttribute("src"); refresh(); };
   frame.onload = () => {
+    dialog.querySelector(".task-strip")?.remove();
     const doc = frame.contentDocument;
     if (!doc || !["/code-review", "/commit-review"].includes(doc.location.pathname)) return;
     doc.documentElement.classList.add("embedded-review");
+    const controls = doc.querySelector(".task-strip");
+    if (controls) $("#preview-title").after(controls);
     doc.addEventListener("input", event => edited.add(event.target));
     doc.defaultView.addEventListener("keydown", event => {
       if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); close(); }
