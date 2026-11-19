@@ -56,6 +56,7 @@ fn prepare(
     }
     progressed |= crate::pages::collect(db, Some(engine))? > 0;
     progressed |= crate::event_log::collect(db, engine)? > 0;
+    progressed |= retention::collect(db, engine)?;
     // The immutable journal is durable before exported advances. Keep only a
     // bounded application outbox rather than retaining a second full history.
     if db.query_row("SELECT EXISTS(SELECT 1 FROM distributed_outbox WHERE clock<=(SELECT exported FROM distributed_meta WHERE id=1))", [], |r| r.get::<_, bool>(0))? {

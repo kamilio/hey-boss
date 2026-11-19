@@ -43,8 +43,27 @@ The embedded replication engine uses the pinned open-source superfly/cr-sqlite
 fork. Application facts have immutable content identities. A retained local
 delivery log and atomic receipts provide resumable, duplicate-safe forwarding;
 cr-sqlite's sparse db_version is never treated as a contiguous receive cursor.
-Task revisions and attempt results remain available even when current views pick
-one conflicting field value. Completion is tied to the requirements used.
+Completion is tied to the requirements used. User history and attempt results
+remain durable; superseded synchronization revisions are disposable.
+
+The sync store keeps the facts needed to replay current state, plus the newest
+10,000 changes within 64 MiB of stored payloads. Cleanup examines at most 128
+records / eight MiB per pass (or one larger record), revisiting retained facts
+after another 1,000 arrivals or when the byte budget is exceeded. Only fully
+projected revisions whose every field is strictly older than retained state can
+be removed.
+Winning clocks, deletion markers, cold before-images, archives, resources and
+deferred records remain available.
+Independent secret, operational-event and publication consumers retain their
+own retirement rules. Queue rotations remain part of the replayable state.
+
+New peers replay all retained facts; an offline peer resumes from its existing
+cursor across explicitly declared compacted positions. Original per-field clocks
+merge its offline edits, and replay does not import credentials or local process
+ownership. Protocol 7 fences older readers before exchange. Removed facts and
+their CRR metadata commit with the compacted boundary, without resetting delivery
+identities. Existing databases reuse freed pages; new stores also return free
+pages incrementally. No full vacuum runs on the live synchronization path.
 
 Application changes and their outgoing journal commit together locally. Import
 checkpoints commit with reduced facts and pending projection work. Replication storage and application

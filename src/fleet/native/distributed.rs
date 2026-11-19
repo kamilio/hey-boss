@@ -15,6 +15,7 @@ mod ordering;
 mod projection;
 pub(super) mod reconcile;
 mod resources;
+mod retention;
 mod transport;
 pub(super) use transport::{serve, start};
 #[cfg(test)]

@@ -6,6 +6,8 @@ mod event_log;
 mod job_summary;
 #[path = "publishing_tests.rs"]
 mod publishing;
+#[path = "retention_tests.rs"]
+mod retention_tests;
 
 struct Fixture(std::path::PathBuf);
 impl Fixture {
@@ -1361,6 +1363,7 @@ fn deleted_attachments_keep_bytes_until_disconnected_peers_replay_their_facts() 
     let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
     let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
     capture_all(&a, &mut ea);
+    retention_tests::compact(&fa, &a, &mut ea);
     transfer(&ea, &mut eb);
     capture_all(&b, &mut eb);
     assert_eq!(
@@ -1990,6 +1993,8 @@ fn archived_inputs_remain_readable_after_relay_and_hot_history_cleanup() {
             break;
         }
     }
+    capture_all(&a, &mut ea);
+    retention_tests::compact(&source, &a, &mut ea);
     transfer(&ea, &mut eb);
     capture_all(&b, &mut eb);
     let row = replica::current_row(&b, "issues", &json!({"project_id":"p","number":1})).unwrap();

@@ -204,41 +204,7 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         seed_history(db, &fact.table, before, "before")?;
     }
     let entity = after_key.or(before_key).unwrap().to_string();
-    let before = fact
-        .before
-        .as_ref()
-        .map(|r| fields(&fact.table, r))
-        .transpose()?
-        .unwrap_or_default();
-    let after = fact
-        .after
-        .as_ref()
-        .map(|r| fields(&fact.table, r))
-        .transpose()?
-        .unwrap_or_default();
-    let mut changes = after
-        .into_iter()
-        .filter(|(name, value)| before.get(name) != Some(value))
-        .collect::<BTreeMap<_, _>>();
-    // Requirement edits do not manufacture a new completion. The snapshot
-    // travels only with an actual lifecycle transition (or initial creation).
-    if fact.table == "issues"
-        && let Some(lifecycle) = changes.get_mut("@lifecycle")
-    {
-        let row = fact.after.as_ref().unwrap();
-        lifecycle["@requirements"] = json!([row["title"], row["body"], row["labels"]]);
-    }
-    if fact.table == "issues"
-        && let Some(storage) = changes.get_mut("@storage")
-    {
-        storage["@archived_body"] = fact.after.as_ref().unwrap()["body"].clone();
-    }
-    if fact.before.is_none() {
-        changes.insert("@alive".into(), json!(true));
-    }
-    if fact.after.is_none() {
-        changes.insert("@alive".into(), json!(false));
-    }
+    let changes = changes(fact)?;
     let mut changed = false;
     let mut order_changed = false;
     for (field, value) in changes {
@@ -319,6 +285,122 @@ pub(super) fn reduce(db: &Connection, fact: &Revision) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn changes(fact: &Revision) -> Result<BTreeMap<String, Value>> {
+    let before = fact
+        .before
+        .as_ref()
+        .map(|r| fields(&fact.table, r))
+        .transpose()?
+        .unwrap_or_default();
+    let after = fact
+        .after
+        .as_ref()
+        .map(|r| fields(&fact.table, r))
+        .transpose()?
+        .unwrap_or_default();
+    let mut changes = after
+        .into_iter()
+        .filter(|(name, value)| before.get(name) != Some(value))
+        .collect::<BTreeMap<_, _>>();
+    // Requirement edits do not manufacture a new completion. The snapshot
+    // travels only with an actual lifecycle transition (or initial creation).
+    if fact.table == "issues"
+        && let Some(lifecycle) = changes.get_mut("@lifecycle")
+    {
+        let row = fact.after.as_ref().unwrap();
+        lifecycle["@requirements"] = json!([row["title"], row["body"], row["labels"]]);
+    }
+    if fact.table == "issues"
+        && let Some(storage) = changes.get_mut("@storage")
+    {
+        storage["@archived_body"] = fact.after.as_ref().unwrap()["body"].clone();
+    }
+    if fact.before.is_none() {
+        changes.insert("@alive".into(), json!(true));
+    }
+    if fact.after.is_none() {
+        changes.insert("@alive".into(), json!(false));
+    }
+    Ok(changes)
+}
+
+/// Keep every fact that still supplies a winning field, including deletion,
+/// lifecycle requirements and cold-history baselines. The remaining original
+/// facts replay with their original clocks; no synthetic edit wins a conflict.
+pub(super) fn superseded(db: &Connection, fact: &Revision) -> Result<bool> {
+    // These have additional owners/effects beyond the field projection.
+    if fact.resource.is_some()
+        || fact.archive.is_some()
+        || fact.table.starts_with("published_")
+        || !capture::TABLES.contains(&fact.table.as_str())
+    {
+        return Ok(false);
+    }
+    let before = fact
+        .before
+        .as_ref()
+        .map(|r| key(db, &fact.table, r))
+        .transpose()?;
+    let after = fact
+        .after
+        .as_ref()
+        .map(|r| key(db, &fact.table, r))
+        .transpose()?;
+    if before.is_some() && after.is_some() && before != after {
+        // Legacy scope-changing updates represent two entities.
+        return Ok(false);
+    }
+    let Some(entity) = after.or(before) else {
+        return Ok(false);
+    };
+    let rows = replica::rows(
+        db,
+        "SELECT field,clock,origin,value FROM distributed_fields WHERE table_name=?1 AND entity=?2",
+        &[json!(fact.table), json!(entity.to_string())],
+    )?;
+    let superseded = |fact: &Revision| -> Result<bool> {
+        let changes = changes(fact)?;
+        if changes.is_empty() {
+            // Even a no-op may supply the largest observed Lamport clock.
+            return Ok(false);
+        }
+        for (field, value) in changes {
+            let encoded = value.to_string();
+            let Some(saved) = rows.iter().find(|r| r["field"] == field) else {
+                return Ok(false);
+            };
+            if (
+                saved["clock"].as_i64().unwrap(),
+                saved["origin"].as_str().unwrap(),
+                saved["value"].as_str().unwrap(),
+            ) <= (fact.clock, fact.origin.as_str(), encoded.as_str())
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if !superseded(fact)? {
+        return Ok(false);
+    }
+    if matches!(
+        fact.table.as_str(),
+        "comments" | "events" | "issue_status_updates"
+    ) && let Some(before) = &fact.before
+    {
+        let mut seed = fact.clone();
+        seed.origin = format!(
+            "!before:{}",
+            hey_boss_sync::digest(before.to_string().as_bytes())
+        );
+        seed.clock = 0;
+        seed.after = Some(before.clone());
+        seed.before = None;
+        return superseded(&seed);
+    }
+    Ok(true)
 }
 
 pub(super) fn seed_history(db: &Connection, table: &str, row: &Value, source: &str) -> Result<()> {

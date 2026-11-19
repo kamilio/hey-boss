@@ -61,17 +61,16 @@ struct Turn {
 
 fn hello(engine: &Engine) -> Hello {
     Hello {
-        // Operational events share the journal; older application projectors
-        // must be rejected before receiving a record they cannot interpret.
-        protocol: 6,
+        // Compacted prefixes require readers that validate sparse replay pages.
+        protocol: 7,
         replica: engine.id().into(),
         presence: Vec::new(),
     }
 }
 fn validate(engine: &Engine, peer: &Hello) -> Result<()> {
-    if peer.protocol != 6 {
+    if peer.protocol != 7 {
         return Err(invalid(&format!(
-            "Incompatible sync protocol: local 6, peer {}. Operational events require upgraded peers; run hey-boss upgrade on all machines",
+            "Incompatible sync protocol: local 7, peer {}. Compacted replay requires upgraded peers; run hey-boss upgrade on all machines",
             peer.protocol,
         )));
     }
@@ -222,7 +221,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let mut engine = Engine::open(&root.path().join("sync.db")).unwrap();
         engine.put("existing immutable history").unwrap();
-        for protocol in [1, 2, 3, 4, 5] {
+        for protocol in [1, 2, 3, 4, 5, 6] {
             let mut frame = Vec::new();
             wire::send(
                 &mut frame,
@@ -239,7 +238,7 @@ mod tests {
             });
             let error = result.err().unwrap().to_string();
             assert!(error.contains("upgrade"));
-            assert!(error.contains(&format!("local 6, peer {protocol}")));
+            assert!(error.contains(&format!("local 7, peer {protocol}")));
             assert!(output.is_empty());
             assert_eq!(engine.head().unwrap(), 1);
             assert_eq!(engine.received(&"a".repeat(32)).unwrap(), 0);
@@ -450,6 +449,53 @@ mod tests {
         assert_eq!(b.head().unwrap(), 2);
         assert_eq!(a.received(b.id()).unwrap(), 2);
         assert_eq!(b.received(a.id()).unwrap(), 2);
+    }
+
+    #[test]
+    fn compacted_replay_recovers_after_losing_the_final_acknowledgment() {
+        let root = tempfile::tempdir().unwrap();
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        let old = a.put("superseded").unwrap();
+        let current = a.put("current state").unwrap();
+        let offline = b.put("offline edit").unwrap();
+        a.db.execute("UPDATE retention SET cutoff=1,head=2,recent_bytes=0", [])
+            .unwrap();
+        a.compact(2, |_, id, _| Ok(id == old)).unwrap();
+        let (mut left, mut right) = UnixStream::pair().unwrap();
+        std::thread::scope(|scope| {
+            let server = scope.spawn(|| serve(&mut b, &mut right.try_clone().unwrap(), &mut right));
+            wire::send(&mut left, &hello(&a)).unwrap();
+            let peer: Welcome = required(&mut left).unwrap();
+            let batch = a.batch(peer.received).unwrap();
+            assert_eq!(batch.compacted, 1);
+            assert_eq!(batch.records[0].position, 2);
+            wire::send(&mut left, &Turn { received: 0, batch }).unwrap();
+            let turn: Turn = required(&mut left).unwrap();
+            a.ingest(&turn.batch).unwrap();
+            drop(left);
+            assert!(server.join().unwrap().is_err());
+        });
+        drop(a);
+        drop(b);
+        let mut a = Engine::open(&root.path().join("a.db")).unwrap();
+        let mut b = Engine::open(&root.path().join("b.db")).unwrap();
+        for _ in 0..3 {
+            exchange(&mut a, &mut b);
+        }
+        for engine in [&a, &b] {
+            assert!(engine.payload(&old).unwrap().is_none());
+            assert_eq!(
+                engine.payload(&current).unwrap().as_deref(),
+                Some("current state")
+            );
+            assert_eq!(
+                engine.payload(&offline).unwrap().as_deref(),
+                Some("offline edit")
+            );
+        }
+        assert_eq!(a.received(b.id()).unwrap(), b.head().unwrap());
+        assert_eq!(b.received(a.id()).unwrap(), a.head().unwrap());
     }
 
     #[test]

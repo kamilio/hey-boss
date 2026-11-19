@@ -1,12 +1,13 @@
 //! Immutable facts replicated with Fly's open-source cr-sqlite fork over SSH.
 //! This library never connects to Fly or any cloud service.
 //!
-//! A local delivery log assigns a contiguous position to each first-seen fact.
+//! A local delivery log assigns a monotonic position to each first-seen fact.
 //! Peers acknowledge this log, not cr-sqlite's sparse, per-origin db_version.
 //! Relays forward facts from every origin without treating the highest version
 //! received as proof that all earlier changes were received.
 pub mod compression;
 mod extension;
+mod retention;
 pub mod session;
 #[cfg(test)]
 mod tests;
@@ -48,6 +49,9 @@ pub struct Batch {
     pub replica: String,
     pub after: i64,
     pub through: i64,
+    /// Only this prefix may contain holes. Its retained records are the replay
+    /// snapshot; positions above it must still be consecutive.
+    pub compacted: i64,
     pub records: Vec<Change>,
 }
 
@@ -80,6 +84,9 @@ impl Engine {
         initialization.lock()?;
         let mut db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(10))?;
+        // Takes effect on new stores; existing stores reuse reclaimed pages
+        // without a blocking, multi-gigabyte VACUUM during service startup.
+        db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         compression::register(&db)?;
         // Extension initialization and CRR registration read before writing.
@@ -93,6 +100,11 @@ impl Engine {
             CREATE TABLE IF NOT EXISTS sent(replica TEXT PRIMARY KEY,position INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS storage_compression(id INTEGER PRIMARY KEY CHECK(id=1),position INTEGER NOT NULL);
             INSERT OR IGNORE INTO storage_compression VALUES(1,0);
+            CREATE TABLE IF NOT EXISTS retention(id INTEGER PRIMARY KEY CHECK(id=1),compacted INTEGER NOT NULL DEFAULT 0,cursor INTEGER NOT NULL DEFAULT 0,cutoff INTEGER NOT NULL DEFAULT 0,head INTEGER NOT NULL DEFAULT 0,recent_bytes INTEGER NOT NULL DEFAULT 67108865);
+            INSERT OR IGNORE INTO retention(id) VALUES(1);
+            CREATE TRIGGER IF NOT EXISTS record_retention_bytes AFTER INSERT ON records BEGIN
+                UPDATE retention SET recent_bytes=recent_bytes+length(CAST(NEW.payload AS BLOB)) WHERE id=1;
+            END;
             CREATE TRIGGER IF NOT EXISTS record_delivery AFTER INSERT ON records BEGIN
                 INSERT OR IGNORE INTO delivery(id) VALUES(NEW.id);
             END;")?;
@@ -239,11 +251,11 @@ impl Engine {
     }
 
     pub fn head(&self) -> Result<i64> {
-        Ok(self
-            .db
-            .query_row("SELECT coalesce(max(position),0) FROM delivery", [], |r| {
-                r.get(0)
-            })?)
+        Ok(self.db.query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='delivery'),0)",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn received(&self, replica: &str) -> Result<i64> {
@@ -283,10 +295,11 @@ impl Engine {
 
     pub fn batch(&self, after: i64) -> Result<Batch> {
         let tx = self.db.unchecked_transaction()?;
-        let head: i64 =
-            tx.query_row("SELECT coalesce(max(position),0) FROM delivery", [], |r| {
-                r.get(0)
-            })?;
+        let head: i64 = tx.query_row(
+            "SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='delivery'),0)",
+            [],
+            |r| r.get(0),
+        )?;
         if after < 0 || after > head {
             return Err(invalid(
                 "Replication cursor is beyond retained history; restore requires a new replica identity",
@@ -325,12 +338,16 @@ impl Engine {
                 });
             }
         }
-        let through = records.last().map_or(after, |r| r.position);
+        let through = records.last().map_or(head, |r| r.position);
+        let compacted = tx.query_row("SELECT compacted FROM retention WHERE id=1", [], |r| {
+            r.get(0)
+        })?;
         tx.commit()?;
         Ok(Batch {
             replica: self.id.clone(),
             after,
             through,
+            compacted,
             records,
         })
     }
@@ -340,13 +357,16 @@ impl Engine {
             || !batch.replica.bytes().all(|c| c.is_ascii_hexdigit())
             || batch.after < 0
             || batch.through < batch.after
-            || batch.through - batch.after != batch.records.len() as i64
+            || batch.compacted < 0
             || batch.records.len() > 128
         {
             return Err(invalid("Invalid replication batch envelope"));
         }
-        for (index, record) in batch.records.iter().enumerate() {
-            if record.position != batch.after + index as i64 + 1
+        let mut previous = batch.after;
+        for record in &batch.records {
+            if record.position <= previous
+                || record.position > batch.through
+                || (record.position > previous + 1 && record.position - 1 > batch.compacted)
                 || record.site.len() != 16
                 || record.version < 1
                 || record.sequence < 0
@@ -358,6 +378,10 @@ impl Engine {
             {
                 return Err(invalid("Invalid or corrupt replication record"));
             }
+            previous = record.position;
+        }
+        if previous < batch.through && batch.through > batch.compacted {
+            return Err(invalid("Replication batch leaves an uncompacted gap"));
         }
         // Idle exchanges carry presence but no durable changes. Avoid acquiring
         // SQLite's writer (and rewriting receipts) on every peer's two-second tick.
