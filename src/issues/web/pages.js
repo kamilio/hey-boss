@@ -77,7 +77,8 @@
     return box;
   }
   if ($('page-frame')) {
-    const name = decodeURIComponent(location.pathname.slice('/pages/'.length).replace(/\/$/, ''));
+    const [pageName, ...path] = location.pathname.slice('/pages/'.length).split('/');
+    const name = decodeURIComponent(pageName);
     $('page-title').textContent = name; document.title = `${name} · Hey Boss`;
     $('page-frame').title = name;
     let contentURL = '', busy = false;
@@ -92,9 +93,10 @@
         $('page-status').hidden = !page.syncing;
         $('page-status').textContent = page.deployment ? 'An update is syncing. Showing the last complete version.' : 'Files are syncing to this machine. The page will open when they arrive.';
         if (!content_url) { $('page-frame').hidden = true; $('page-frame').removeAttribute('src'); contentURL = ''; }
-        if (content_url && contentURL !== content_url) {
-          contentURL = content_url;
-          $('page-frame').src = content_url;
+        const frameURL = content_url && content_url.slice(0, -'index.html'.length) + (path.join('/') || 'index.html') + location.search + location.hash;
+        if (frameURL && contentURL !== frameURL) {
+          contentURL = frameURL;
+          $('page-frame').src = frameURL;
           $('page-frame').hidden = false;
         }
       } catch(e) { error(e); $('page-status').hidden = true; $('page-frame').hidden = true; $('page-frame').removeAttribute('src'); contentURL = ''; }

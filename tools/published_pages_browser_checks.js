@@ -26,6 +26,12 @@ async page => {
   await frame.getByRole('link',{name:'Read more'}).click();
   await frame.getByRole('heading',{name:'Nested page'}).waitFor();
   check(true, 'Nested directory index and relative navigation work');
+  const nestedPath = new URL(page.frames().find(f=>f.parentFrame()).url()).pathname.split('/').slice(5).join('/');
+  await page.goto(origin+'/pages/weekly-report/'+nestedPath+'?example=../board.json#section');
+  await frame.getByRole('heading',{name:'Nested page'}).waitFor();
+  const nestedURL = new URL(page.frames().find(f=>f.parentFrame()).url());
+  check(nestedURL.search === '?example=../board.json' && nestedURL.hash === '#section', 'Nested viewer links preserve query parameters and fragments');
+  check(await page.locator('#page-title').textContent() === 'weekly-report', 'Nested viewer uses the publication name');
   await frame.getByRole('link',{name:'Back'}).click();
   await frame.locator('#counter').waitFor();
   await page.setViewportSize({width:390,height:844});
