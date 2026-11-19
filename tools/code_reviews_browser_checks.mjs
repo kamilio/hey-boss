@@ -95,8 +95,8 @@ try {
     verdict: "REQUEST_CHANGES",
     body: "A reminder scheduled just before midnight can appear on the wrong day.",
   };
-  const patch = "diff --git a/scheduler/reminders.rs b/scheduler/reminders.rs\n--- a/scheduler/reminders.rs\n+++ b/scheduler/reminders.rs\n" + first.comments[0].snippet;
-  await page.context().route("**/api/code-reviews/diff", route => route.fulfill({json:{ok:true,patch,truncated:false}}));
+  const patch = "diff --git a/scheduler/reminders.rs b/scheduler/reminders.rs\n--- a/scheduler/reminders.rs\n+++ b/scheduler/reminders.rs\n" + first.comments[0].snippet + "\ndiff --git a/scheduler/labels.rs b/scheduler/labels.rs\n--- a/scheduler/labels.rs\n+++ b/scheduler/labels.rs\n@@ -1 +1 @@\n-clear(labels);\n+preserve(labels);\n";
+  await page.context().route("**/api/code-reviews/diff", route => route.fulfill({json:{ok:true,patch,truncated:false,author:"reminder-author"}}));
   const saved = op(first).review;
   const approval = op({
     ...first,
@@ -129,6 +129,9 @@ try {
   assert.equal(new URL(page.url()).pathname, "/code-review");
   assert.equal(await page.locator(".review-index-row").count(), 0);
   assert.equal(await page.getByRole("link", {name:"Open PR #71 ↗"}).getAttribute("href"), "https://github.com/example/time/pull/71");
+  await page.getByText("Author: reminder-author", {exact:true}).waitFor();
+  assert.equal(await page.locator(".review-file[open]").count(), 2, "Every changed file starts expanded");
+  assert.ok(await page.locator(".review-actions").evaluate(el => el.getBoundingClientRect().bottom <= document.querySelector(".review-editor").getBoundingClientRect().top), "Review actions precede the review body");
   await page.reload();
   await heading.waitFor();
   await page
@@ -359,6 +362,7 @@ try {
   const chip = page.getByRole("link",{name:/Open commit ccccccc/});
   await chip.click();
   await full.getByRole("heading",{name:message}).waitFor();
+  assert.ok(await full.locator(".task-strip").evaluate(el => el.getBoundingClientRect().bottom <= document.querySelector("#review > header").getBoundingClientRect().top), "Task controls precede the commit message");
   await full.locator("#message-body details summary").click();
   await full.locator("#message-body details strong").filter({hasText:"Why:"}).waitFor();
   await full.locator('.diff-row.addition code').filter({hasText:"+preserve(labels);"}).first().waitFor();
@@ -367,9 +371,61 @@ try {
   await full.locator("#unassign").click();
   await full.locator("#task-owner").filter({hasText:"Unassigned"}).waitFor();
   await full.locator("#make-ready").click();
-  await full.locator("#rework").click();
-  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
+  await full.locator("#task-state").filter({hasText:"Ready"}).waitFor();
   if (snap) await modal.screenshot({path:join(snap,"preview-commit.png")});
+  const commentCount = () => run([...issue, "view", String(issueNumber)]).comments.length;
+  const beforeReopen = commentCount(), reopenOps = [];
+  page.on("request", req => {
+    if (new URL(req.url()).pathname === "/api/action") {
+      const op = req.postDataJSON()?.operation;
+      if (op?.number === issueNumber && ["comment", "rework"].includes(op.action)) reopenOps.push(op.action);
+    }
+  });
+  await full.locator("#rework").click();
+  await full.getByLabel("Comment optional").fill("Keep the existing reminder labels.");
+  await page.keyboard.press("Escape");
+  assert.ok(await modal.isVisible(), "Escape closes only the comment dialog");
+  assert.equal(await full.locator("#reopen-dialog").isVisible(), false);
+  assert.equal(await full.locator("#task-state").innerText(), "Ready");
+  await full.locator("#rework").click();
+  for (const [width,colorScheme] of [[320,"dark"],[1280,"light"]]) {
+    await page.setViewportSize({width,height:768});
+    await page.emulateMedia({colorScheme});
+    assert.ok(await full.locator("#reopen-dialog").evaluate(el => el.getBoundingClientRect().left >= 0 && el.getBoundingClientRect().right <= innerWidth));
+    if (snap) await modal.screenshot({path:join(snap,"preview-reopen-"+colorScheme+".png")});
+  }
+  await page.route("**/api/action", route => {
+    const op = route.request().postDataJSON()?.operation;
+    if (op?.action === "comment") return route.fulfill({status:409,json:{ok:false,error:{message:"Comment could not be saved"}}});
+    return route.fallback();
+  });
+  await full.getByLabel("Comment optional").press("Meta+Enter");
+  await full.getByText("Comment could not be saved", {exact:true}).waitFor();
+  assert.deepEqual(reopenOps, ["comment"], "Failed comments never reopen the task");
+  assert.equal(commentCount(), beforeReopen);
+  await page.unroute("**/api/action");
+  await page.route("**/api/action", route => {
+    if (route.request().postDataJSON()?.operation?.action === "rework") return route.fulfill({status:409,json:{ok:false,error:{message:"Reopen could not be saved"}}});
+    return route.fallback();
+  });
+  await full.getByLabel("Comment optional").press("Meta+Enter");
+  await full.getByText("Reopen could not be saved", {exact:true}).waitFor();
+  assert.equal(commentCount(), beforeReopen + 1);
+  assert.equal(await full.getByLabel("Comment optional").inputValue(), "", "Saved comments are not posted again on retry");
+  assert.equal(await full.locator("#task-state").innerText(), "Ready");
+  await page.unroute("**/api/action");
+  await full.getByLabel("Comment optional").press("Meta+Enter");
+  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
+  assert.deepEqual(reopenOps, ["comment", "comment", "rework", "rework"]);
+  assert.equal(commentCount(), beforeReopen + 1);
+  assert.equal(run([...issue, "view", String(issueNumber)]).comments.at(-1).body, "Keep the existing reminder labels.");
+  await full.locator("#make-ready").click();
+  await full.locator("#task-state").filter({hasText:"Ready"}).waitFor();
+  await full.locator("#rework").click();
+  await full.getByLabel("Comment optional").fill("   ");
+  await full.locator('#reopen-form button[type="submit"]').click();
+  await full.locator("#task-state").filter({hasText:"Open"}).waitFor();
+  assert.equal(commentCount(), beforeReopen + 1, "An empty comment reopens without posting");
   await page.keyboard.press("Escape");
   await modal.waitFor({state:"hidden"});
   const [commitPage] = await Promise.all([page.context().waitForEvent("page"),chip.click({modifiers:["Shift"]})]);

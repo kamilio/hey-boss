@@ -23,6 +23,7 @@
   color: var(--muted); font-size: 12px;
 }
 .review-meta { padding: 10px 0; border-block: 1px solid var(--line); }
+.review-author:empty { display: none; }
 .review-meta strong { font-weight: 550; color: var(--text); }
 .review-meta a { margin-left: auto; }
 #reviews-detail h2 { margin: 18px 0 6px; font-size: 14px; }
@@ -43,7 +44,7 @@
 .rv-code-line { display: block; min-width: max-content; padding: 0 10px; }
 .rv-code-line.marked { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
 .rv-line-number { display: inline-block; min-width: 3ch; margin-right: 1em; text-align: right; user-select: none; color: var(--muted); }
-.review-actions:not(:empty) { margin-top: 12px; padding-top: 14px; border-top: 1px solid var(--line); }
+.review-actions:not(:empty) { padding-block: 12px; border-bottom: 1px solid var(--line); }
 #reviews-error { color: var(--danger); margin-bottom: 12px; }
 
 .review-index-row { display: flex; align-items: center; }
@@ -69,7 +70,7 @@
 #reviews-more { margin-top: 12px; }
 
 .review-file { border: 1px solid var(--line); border-radius: 8px; margin-block: 6px; overflow: hidden; }
-.review-file summary { padding: 10px 12px; background: var(--surface); cursor: pointer; overflow-wrap: anywhere; font: 600 13px/1.5 ui-monospace, monospace; }
+.review-file summary { padding: 10px 12px; background: var(--surface); cursor: pointer; overflow-wrap: anywhere; font: 500 13px/1.5 ui-monospace, monospace; }
 .review-file pre { overflow: auto; margin: 0; font: 12px/1.65 ui-monospace, monospace; tab-size: 4; }
 .review-file .rv-hunk { color: var(--muted); background: var(--hover); }
 .review-file .addition { background: color-mix(in srgb, var(--green) 10%, transparent); }

@@ -197,11 +197,12 @@
     section.append(e("h2", "Changed code"), status);
     try {
       diff ??= HeyBossUI.post("/api/code-reviews/diff", {project, ...(host ? {host} : {}), id:r.id}, boot);
-      const [{patch, truncated}, {parseUnifiedDiff}] = await Promise.all([diff, import("/git-review/diff.js")]);
+      const [{patch, truncated, author}, {parseUnifiedDiff}] = await Promise.all([diff, import("/git-review/diff.js")]);
       if (!section.isConnected) return;
+      if (author) section.closest("#reviews-detail").querySelector(".review-author").textContent = "Author: " + author;
       const files = parseUnifiedDiff(patch);
       status.remove();
-      for (const [index, file] of files.entries()) {
+      for (const file of files) {
         const notes = r.comments.filter(c => c.anchor.path === file.path || (c.anchor.side === "LEFT" && c.anchor.path === file.oldPath));
         const details = e("details", undefined, "review-file");
         details.append(e("summary", file.path + "  +" + file.additions + " −" + file.deletions));
@@ -231,7 +232,7 @@
             if (!pre.childNodes.length) pre.remove();
           }
         }
-        details.open = index === 0 || notes.length > 0;
+        details.open = true;
         details.ontoggle = draw;
         section.append(details);
         draw();
@@ -358,6 +359,7 @@
     const meta = e("div", undefined, "review-meta");
     meta.append(
       e("span", "#" + r.number + " · " + stage[r.stage]),
+      e("span", undefined, "review-author"),
       e("strong", "Verdict: " + verdict[r.verdict]),
       e("code", r.head.slice(0, 8)),
     );
@@ -416,9 +418,9 @@
       cards.set(c.id, card);
     }
     if (url && ["submitted", "draft"].includes(r.stage)) showDiff(changes, r, cards, fallback, url);
-    const footer = e("div", undefined, "review-actions");
+    const actions = e("div", undefined, "review-actions");
     if (r.stage === "submitted") {
-      footer.append(
+      actions.append(
         publishButton(r),
         e("small", "Publishes under your GitHub account."),
       );
@@ -427,16 +429,16 @@
       url &&
       r.receipt.startsWith(url + "#")
     )
-      footer.append(
+      actions.append(
         link("View published review ↗", r.receipt),
         e("small", "Published by " + r.published_by),
       );
     else if (r.stage === "publishing")
-      footer.append(
+      actions.append(
         e("p", "Check GitHub for the publication receipt before retrying."),
       );
     if (r.stage === "outdated")
-      footer.append(e("small", "Review the new commit before publishing."));
+      actions.append(e("small", "Review the new commit before publishing."));
     if (["draft", "submitted", "outdated"].includes(r.stage)) {
       const discard = btn("Discard review", async () => {
         if (busy || !confirm("Discard this review? It will be removed from the queue without publishing.")) return;
@@ -452,9 +454,9 @@
         } finally { busy = false; }
       });
       discard.classList.add("review-discard");
-      footer.append(discard);
+      actions.append(discard);
     }
-    pane.insertBefore(footer, changes);
+    meta.after(actions);
     if (task) pane.append(HeyBossUI.reviewDiscussion(task, project, host));
   }
   async function navigate() {

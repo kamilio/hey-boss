@@ -185,7 +185,7 @@ pub(super) fn diff(app: &App, bytes: &[u8]) -> Result<Value> {
                 .unwrap_or(0),
         );
     }
-    Ok(json!({"ok": true, "patch": String::from_utf8_lossy(&bytes), "truncated": truncated}))
+    Ok(json!({"ok": true, "patch": String::from_utf8_lossy(&bytes), "truncated": truncated, "author": pr["user"]["login"]}))
 }
 
 fn github_client() -> reqwest::Result<Client> {

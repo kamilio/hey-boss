@@ -26,6 +26,17 @@
     <p role="status" id="loading">Loading commit review…</p>
     <div id="review" hidden>
       <a class="back-link" id="task-title"><span data-icon="arrow-left"></span><span></span></a>
+      <section class="task-strip" aria-label="Task actions">
+        <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
+        <div class="task-actions">
+          <button class="button small" id="rework">Reopen and assign to me</button>
+          <button class="button small" id="assign-me">Assign to me</button>
+          <button class="button small" id="make-ready">Mark ready</button>
+          <button class="button small" id="unassign">Unassign</button>
+          <button class="icon-button" id="refresh-task" title="Refresh task status" aria-label="Refresh task status"><span data-icon="refresh"></span></button>
+        </div>
+      </section>
+      <div id="status" role="status"></div><div id="review-error" role="alert" hidden></div>
       <header>
         <div class="eyebrow">Commit <code id="commit-sha"></code></div>
         <div id="message-reader">
@@ -45,17 +56,6 @@
           <div class="message-actions"><span id="message-error" role="alert"></span><button type="button" class="button" id="cancel-message">Cancel</button><button type="submit" class="button primary">Save message</button></div>
         </form>
       </header>
-      <section class="task-strip" aria-label="Task actions">
-        <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
-        <div class="task-actions">
-          <button class="button small" id="rework">Reopen and assign to me</button>
-          <button class="button small" id="assign-me">Assign to me</button>
-          <button class="button small" id="make-ready">Mark ready</button>
-          <button class="button small" id="unassign">Unassign</button>
-          <button class="icon-button" id="refresh-task" title="Refresh task status" aria-label="Refresh task status"><span data-icon="refresh"></span></button>
-        </div>
-      </section>
-      <div id="status" role="status"></div><div id="review-error" role="alert" hidden></div>
       <div class="changes-heading">
         <h2>Changed files <span class="heading-count" id="file-count"></span></h2>
         <span id="count"></span>
@@ -66,5 +66,19 @@
       <div id="files"></div>
     </div>
   </main>
+  <dialog id="reopen-dialog" aria-labelledby="reopen-title">
+    <form id="reopen-form">
+      <header class="dialog-heading"><h2 id="reopen-title">Reopen task</h2></header>
+      <div class="dialog-content">
+        <label class="field-label" for="reopen-comment">Comment <span>optional</span></label>
+        <textarea id="reopen-comment" rows="5" autofocus></textarea>
+        <p id="reopen-error" class="form-error" role="alert" hidden></p>
+      </div>
+      <footer class="dialog-footer">
+        <span><kbd>⌘</kbd><kbd>Enter</kbd> to reopen</span>
+        <div><button type="button" class="button" id="reopen-cancel">Cancel</button><button type="submit" class="button primary">Reopen task</button></div>
+      </footer>
+    </form>
+  </dialog>
 </body>
 </html>

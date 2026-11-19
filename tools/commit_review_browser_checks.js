@@ -64,6 +64,7 @@ async page => {
   const exported = await review({command:'patch'});
   check(exported.patch.includes('Subject: [PATCH] Preserve leading whitespace\n\nCheck validation before saving.'),'Patch export uses edited message');
   await page.getByRole('button',{name:/^Reopen (task|and assign to me)$/}).click();
+  await page.locator('#reopen-form button[type="submit"]').click();
   await page.waitForFunction(()=>document.querySelector('#task-state')?.textContent === 'Open');
   let task = (await view()).issue;
   check(task.state==='open' && task.assignee==='human:boss','Rework sets Open + Boss together');

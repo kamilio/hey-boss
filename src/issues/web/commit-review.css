@@ -15,7 +15,7 @@ textarea { color: var(--text); background: var(--solid); border: 1px solid var(-
 #commit-message { display: block; margin: 6px 0 10px; min-height: 10em; field-sizing: content; font: 13px/1.6 ui-monospace, monospace; }
 #message-form .message-actions { justify-content: flex-end; }
 #message-error, #review-error { color: var(--danger); }
-.task-strip { margin-top: 22px; padding: 12px 0; border-block: 1px solid var(--line); }
+.task-strip { margin-bottom: 22px; padding: 12px 0; border-block: 1px solid var(--line); }
 .task-strip strong { font-size: 13px; }
 .changes-heading { margin: 28px 0 12px; gap: 10px; }
 .changes-heading h2 { margin: 0 auto 0 0; font-size: 22px; font-weight: 650; letter-spacing: -.4px; }
@@ -34,7 +34,7 @@ textarea { width: 100%; padding: 10px 12px; resize: vertical; }
 }
 .file > header { padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--hover); }
 .file.collapsed > header { border-bottom: 0; }
-.file > header strong { margin-right: auto; overflow-wrap: anywhere; }
+.file > header strong { font-weight: 500; margin-right: auto; overflow-wrap: anywhere; }
 .file-directory, .empty, .outside-help { color: var(--muted); }
 .file-directory { font-weight: 400; }
 .file > header > span { white-space: nowrap; font-variant-numeric: tabular-nums; }

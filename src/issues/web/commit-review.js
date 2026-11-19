@@ -66,7 +66,45 @@ async function start() {
   if (window === window.top && task.comments.length) $('#files').after(HeyBossUI.reviewDiscussion(task, project, host));
   $('#loading').remove(); $('#review').hidden = false;
   taskBar(); mountGitFiles(); mountGitComments({comments:result.comments,request:review}); mountGitLayout();
-  $('#rework').onclick = () => action({action:'rework',number,if_version:issue.version});
+  const reopenDialog = $('#reopen-dialog'), reopenForm = $('#reopen-form'), comment = $('#reopen-comment');
+  $('#rework').onclick = () => {
+    $('#reopen-title').textContent = $('#rework').textContent;
+    $('#reopen-error').hidden = true;
+    reopenDialog.showModal(); comment.focus();
+  };
+  $('#reopen-cancel').onclick = () => reopenDialog.close();
+  reopenDialog.oncancel = event => { if (busy) event.preventDefault(); };
+  reopenDialog.onkeydown = event => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      if (!busy) reopenDialog.close();
+    } else if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !event.isComposing) {
+      event.preventDefault();
+      if (!busy) reopenForm.requestSubmit();
+    }
+  };
+  reopenForm.onsubmit = async event => {
+    event.preventDefault();
+    if (busy) return;
+    busy = true; showError(null); taskBar(); comment.readOnly = true;
+    for (const button of reopenForm.querySelectorAll('button')) button.disabled = true;
+    $('#reopen-error').hidden = true;
+    try {
+      if (comment.value.trim()) {
+        issue = (await request({action:'comment',number,body:comment.value})).issue;
+        comment.value = '';
+      }
+      await request({action:'rework',number,if_version:issue.version});
+      comment.value = ''; reopenDialog.close();
+      await refreshTask(); $('#status').textContent = 'Task reopened';
+    } catch (error) {
+      if (reopenDialog.open) { $('#reopen-error').textContent = error.message; $('#reopen-error').hidden = false; }
+      else showError(error);
+    } finally {
+      busy = false; taskBar(); comment.readOnly = false;
+      for (const button of reopenForm.querySelectorAll('button')) button.disabled = false;
+    }
+  };
   $('#unassign').onclick = () => action({action:'assign',number,target:'unassigned',if_version:issue.version});
   $('#assign-me').onclick = () => action({action:'assign',number,target:'boss',if_version:issue.version});
   $('#make-ready').onclick = () => action({action:'ready',number,force:false,guard:readyGuard});
@@ -82,7 +120,7 @@ async function start() {
   };
   $('#cancel-message').onclick = closeEditor;
   document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && !form.hidden && !$('#cancel-message').disabled) {
+    if (!event.defaultPrevented && event.key === 'Escape' && !form.hidden && !$('#cancel-message').disabled) {
       event.preventDefault(); closeEditor();
     }
   });
