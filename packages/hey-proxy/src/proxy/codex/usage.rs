@@ -1,4 +1,6 @@
+use super::super::subscription::resets;
 use super::*;
+use hey_proxy::usage::ResetRequest;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -383,6 +385,10 @@ pub(in crate::proxy) async fn usage(
 }
 
 pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
+    read_or_reset(proxy, None).await
+}
+
+pub(in crate::proxy) async fn read_or_reset(proxy: &Proxy, reset: Option<&ResetRequest>) -> Value {
     let service = &proxy.service;
     let default_provider;
     let provider = if let Some(configured) = &proxy.config.codex {
@@ -474,6 +480,28 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             identity: Some(identity),
             ..Default::default()
         };
+    }
+    if let Some(reset) = reset {
+        if cache.error.is_some() || !resets::validate(cache.data.as_ref(), cache.updated_at, reset)
+        {
+            return resets::result(false, "Refresh usage and select an available reset.");
+        }
+        let url = provider.usage_url().trim_end_matches("usage").to_owned()
+            + "rate-limit-reset-credits/consume";
+        let mut request = proxy
+            .client
+            .post(url)
+            .bearer_auth(&creds.access_token)
+            .json(&json!({"credit_id":reset.grant_id,"redeem_request_id":reset.request_id}));
+        if let Some(id) = &creds.account_id {
+            request = request.header("ChatGPT-Account-Id", id);
+        }
+        let result = resets::send(request, "codex").await;
+        cache.data = None;
+        cache.updated_at = None;
+        cache.retry_at = None;
+        cache.error = None;
+        return result;
     }
     if cache.error.is_none()
         && super::super::routes::quota::crossed_reset(cache.data.as_ref(), cache.updated_at)
@@ -570,6 +598,16 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
                 data["monthly_on_demand_credits"] =
                     json!(cache.monthly.as_ref().and_then(|(_, _, total)| *total));
             }
+            if value["rate_limit_reset_credits"]["available_count"]
+                .as_u64()
+                .is_some_and(|n| n > 0)
+            {
+                // A reset-list failure must not discard otherwise valid quota readings.
+                let grants = reset_grants(proxy, &usage_url, &creds).await.ok();
+                data["resets"] = json!(grants);
+            } else if value["rate_limit_reset_credits"].is_object() {
+                data["resets"] = json!([]);
+            }
             return Ok(data);
         }
         anyhow::bail!(
@@ -589,4 +627,37 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
         }
     }
     cache.value()
+}
+
+async fn reset_grants(
+    proxy: &Proxy,
+    usage_url: &str,
+    creds: &crate::codex_auth::Credentials,
+) -> Result<Vec<Value>> {
+    let mut request = proxy
+        .client
+        .get(usage_url.trim_end_matches("usage").to_owned() + "rate-limit-reset-credits")
+        .bearer_auth(&creds.access_token)
+        .timeout(Duration::from_secs(5));
+    if let Some(id) = &creds.account_id {
+        request = request.header("ChatGPT-Account-Id", id);
+    }
+    let mut response = request.send().await?;
+    ensure!(response.status().is_success(), "Reset list unavailable");
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        ensure!(
+            bytes.len() + chunk.len() <= 1024 * 1024,
+            "Reset list too large"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let value: Value = serde_json::from_slice(&bytes)?;
+    let credits = value["credits"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("Invalid reset list"))?;
+    Ok(credits.iter().take(64).filter(|g| g["status"] == "available").filter_map(|g| {
+        Some(json!({"id":bounded(&g["id"])? ,"label":bounded(&g["title"])? ,"remaining":1,
+            "expires_at":bounded(&g["expires_at"]),"usable":g["is_supported_by_plan"] == true && g["reset_type"] == "codex_rate_limits"}))
+    }).collect())
 }

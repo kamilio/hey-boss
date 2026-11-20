@@ -96,6 +96,8 @@ The CLI queries the running proxy at the address in `--config` (falling back to 
 
 Remaining percentages and reset times are account-wide, including usage outside this proxy. Extra spend shows the provider-reported monthly amount, cap, remaining budget, and amount above that cap. It is separate from the dashboard's estimated API-equivalent spend. Unknown values remain unknown; cached and stale readings retain their timestamps. CLI exit status is nonzero when the reading is stale, disabled, or unavailable; `--json` still prints that reading when the server returns one.
 
+The menu bar quota panel lists available reset grants with expiry dates and asks before spending one. It checks usage every minute and notifies once when a limit reaches 100% in a reset period, respecting notification quiet hours. Reset grants are also included in `usage --json`; spend a selected grant with `usage --provider claude --account default --reset GRANT_ID --confirm-reset`. Reset requests are never retried automatically; refresh usage after an uncertain result. Claude usage and reset calls identify as the Claude Code CLI to receive eligible grants.
+
 The Rust SDK is available as `hey_proxy::usage::Client`, with typed provider/account readings and `accounts()`, `usage(provider, account)`, and `recommend()` methods. [CLI, SDK, and API details](docs/claude-subscription.md#cli-and-rust-sdk).
 
 ## Connect Amazon Bedrock

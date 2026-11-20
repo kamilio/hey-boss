@@ -4005,6 +4005,7 @@ func auditFleetSync() {
 
 func auditSubscriptionQuota() {
     auditNativeBackdrops()
+    auditSubscriptionQuotaActions()
     let json = #"{"schema_version":1,"account":{"provider":"codex","id":"work"},"state":"ok","updated_at":2000,"data":{"windows":[{"id":"weekly","label":"Weekly · all models","remaining_percent":90,"resets_at":"2099-10-15T16:42:07Z"}]}}"#
     let reading = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: Data(json.utf8))
     precondition(reading.isFresh(now: 2005))
@@ -4148,6 +4149,7 @@ func auditSubscriptionQuota() {
         tracked = true; tracking.statusMenu.cancelTracking()
     }
     RunLoop.main.add(inspect, forMode: .common)
+    NSApp.activate(ignoringOtherApps: true)
     tracking.statusMenu.popUp(positioning: nil, at: NSPoint(x: 100, y: 600), in: nil)
     precondition(tracked && tracking.subscriptionQuota.timer != nil, "Tracking ends cleanly and keeps background refresh")
     let cache = FileManager.default.temporaryDirectory.appendingPathComponent("quota-cache-" + UUID().uuidString)
@@ -4170,6 +4172,62 @@ func auditSubscriptionQuota() {
     try! Data("broken cache".utf8).write(to: cache)
     precondition(SubscriptionQuotaController(cacheURL: cache).rows.isEmpty, "Invalid caches recover through normal refresh")
     print("PASS subscription quota: freshness, reset, unknown limits, named accounts, partial failures, cache, empty/error states, async inline menu")
+}
+
+func auditSubscriptionQuotaActions() {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent(".quota-audit-" + UUID().uuidString)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let now = Date().timeIntervalSince1970
+    func reading(remaining: Double = 0, reset: String = "2099-01-01T00:00:00Z", state: String = "ok") -> SubscriptionQuotaReading {
+        let value: [String: Any] = ["schema_version":1,"account":["provider":"claude","id":"work"],"state":state,"updated_at":now,"data":[
+            "windows":[["id":"five_hour","label":"Session","remaining_percent":remaining,"resets_at":reset]],
+            "resets":[["id":"grant-1","label":"Full reset","remaining":1,"expires_at":"2099-01-01T00:00:00Z","usable":true]]]]
+        return try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: JSONSerialization.data(withJSONObject: value))
+    }
+    let cache = root.appendingPathComponent("quota.json")
+    let ui = SubscriptionQuotaController(cacheURL: cache)
+    let initial = reading()
+    ui.rows = [SubscriptionQuotaRow(account: initial.account, reading: initial)]
+    var receipts: [String] = []
+    var delivery: ((Bool) -> Void)?
+    ui.notify = { id, title, message, reply in
+        precondition(title == "Claude limit reached" && message.contains("Session is fully used"))
+        receipts.append(id); delivery = reply
+    }
+    ui.checkNotifications(); ui.checkNotifications()
+    precondition(receipts.count == 1, "Coalesce pending alerts")
+    delivery!(false); ui.checkNotifications(); precondition(receipts.count == 2 && receipts[0] == receipts[1], "Retry failed delivery with the same receipt")
+    delivery!(true); ui.checkNotifications(); precondition(receipts.count == 2)
+    let restored = SubscriptionQuotaController(cacheURL: cache)
+    restored.notify = ui.notify; restored.checkNotifications(); precondition(receipts.count == 2, "Restart must not repeat the period alert")
+    ui.rows[0].reading = reading(reset: "2099-01-02T00:00:00Z", state: "stale")
+    ui.checkNotifications(); precondition(receipts.count == 2, "Stale limits cannot notify")
+    ui.rows[0].reading = reading(remaining: 0.1, reset: "2099-01-02T00:00:00Z")
+    ui.checkNotifications(); precondition(receipts.count == 2, "Only exhausted limits notify")
+    ui.rows[0].reading = reading(reset: "2099-01-02T00:00:00Z")
+    ui.checkNotifications(); precondition(receipts.count == 3 && receipts[2] != receipts[0]); delivery!(true)
+    let store = try! Store(root.appendingPathComponent("history.db").path)
+    var shown = 0
+    store.show = { _ in shown += 1 }
+    try! store.notifyQuota(receipts[0], title: "Quota", message: "Fully used")
+    try! store.notifyQuota(receipts[0], title: "Quota", message: "Fully used")
+    precondition(shown == 1, "Durable receipts prevent repeats after a lost acknowledgement")
+    var calls: [[String]] = []
+    var replies: [(Result<Data, Error>) -> Void] = []
+    ui.runner = { args, reply in calls.append(args); replies.append(reply) }
+    let grant = initial.data!.resets![0]
+    ui.confirmReset = { _, _ in false }
+    ui.useReset(grant, account: initial.account)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    precondition(calls.isEmpty && !ui.resetting, "Cancel never spends")
+    ui.confirmReset = { _, _ in true }; ui.reportReset = { _ in }
+    ui.useReset(grant, account: initial.account); ui.useReset(grant, account: initial.account)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+    precondition(calls.count == 1 && calls[0] == ["--provider","claude","--account","work","--reset","grant-1","--confirm-reset"], "One explicit account-specific spend")
+    replies.removeFirst()(.success(Data(#"{"schema_version":1,"success":false,"message":"Unconfirmed"}"#.utf8)))
+    precondition(calls.count == 2 && calls[1] == ["--accounts"] && ui.rows[0].reading?.state == "stale", "Uncertain spends refresh; never automatically retry")
+    print("PASS quota actions: confirmation, account selection, duplicate clicks, notification receipts and restart")
 }
 
 func auditNativeBackdrops() {
@@ -4225,12 +4283,17 @@ func previewSubscriptionQuota(_ state: String) {
         let now = Date().timeIntervalSince1970
         let reset = ISO8601DateFormatter().string(from: Date().addingTimeInterval(7620))
         func reading(_ provider: String, _ id: String, _ status: String, _ windows: [[String: Any]]) -> SubscriptionQuotaRow {
-            let value: [String: Any] = ["schema_version": 1, "account": ["provider": provider, "id": id], "state": status, "updated_at": now - (status == "stale" ? 7200 : 20), "data": ["windows": windows]]
+            var data: [String: Any] = ["windows": windows]
+            if state.contains("resets") {
+                data["resets"] = [["id":"full","label":"One full limit reset (November 2026)","remaining":1,"expires_at":"2026-12-10T22:00:00Z","usable":true], ["id":"fable","label":"New model launch: one Fable reset for Max, Team Premium and Enterprise Premium","remaining":3,"expires_at":"2027-03-09T07:59:00Z","usable":true]]
+            }
+            let value: [String: Any] = ["schema_version": 1, "account": ["provider": provider, "id": id], "state": status, "updated_at": now - (status == "stale" ? 7200 : 20), "data": data]
             let reading = try! JSONDecoder().decode(SubscriptionQuotaReading.self, from: JSONSerialization.data(withJSONObject: value))
-            return SubscriptionQuotaRow(account: reading.account, reading: reading)
+            return SubscriptionQuotaRow(account: reading.account, reading: reading, message: "")
         }
         func limit(_ name: String, _ value: Any) -> [String: Any] { ["label": name, "remaining_percent": value, "resets_at": reset] }
         ui.rows = [reading("codex", "work", "ok", [limit("5-hour · all models", 72), limit("Weekly · all models", 18)]), reading("claude", "personal", "ok", [limit("5-hour · all models", 0), limit("Weekly · Sonnet", 43)])]
+        if state.contains("resets") { ui.rows = [reading("claude", "personal", "ok", [limit("Session · 5 hours", 89), limit("Weekly · all models", 68), limit("Weekly · Fable", 85)])] }
         if state.contains("stale") { ui.rows = [reading("codex", "long-account-name-for-the-design-team-with-extra-detail", "stale", [limit("Weekly · all models and a very long provider-reported limit label", 18), limit("Weekly · unknown limit", NSNull())]), reading("claude", "personal", "disabled", [])] }
         if state.contains("many") { ui.rows = (1...12).map { reading("codex", "subscription-\($0)", "ok", [limit("Weekly · all models", 72)]) } }
         if state.contains("empty") { ui.rows = []; ui.message = "No subscriptions connected" }

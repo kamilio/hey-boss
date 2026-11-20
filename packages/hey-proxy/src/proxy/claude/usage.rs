@@ -1,4 +1,6 @@
+use super::super::subscription::resets;
 use super::*;
+use hey_proxy::usage::ResetRequest;
 use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
@@ -92,8 +94,14 @@ fn normalize(value: &Value) -> Result<Value> {
         !windows.is_empty() || extra.is_some(),
         "Claude did not report any subscription limits"
     );
-    Ok(json!({"windows":windows,"extra_usage":extra,
-        "availability_unknown":value["limits"].as_array().is_some_and(|limits|limits.len()>64)}))
+    let grants = value["cedar_ember"]["grants"].as_array().map(|grants| grants.iter().take(64).filter_map(|g| {
+        Some(json!({"id":bounded(&g["id"])? ,"label":bounded(&g["label"])? ,"remaining":g["resets_left"].as_u64()?,
+            "expires_at":bounded(&g["ends_at"]),"usable":value["cedar_ember"]["eligible"] == true && g["usable_now"] == true && g["paused"] != true}))
+    }).collect::<Vec<_>>());
+    Ok(
+        json!({"windows":windows,"extra_usage":extra,"resets":grants,
+        "availability_unknown":value["limits"].as_array().is_some_and(|limits|limits.len()>64)}),
+    )
 }
 // OAuth extra_usage uses hundredths of the currency unit, USD when omitted.
 // Keep legacy raw fields above; expose explicit major-unit amounts for all clients.
@@ -150,6 +158,10 @@ pub(in crate::proxy) async fn usage(
 }
 
 pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
+    read_or_reset(proxy, None).await
+}
+
+pub(in crate::proxy) async fn read_or_reset(proxy: &Proxy, reset: Option<&ResetRequest>) -> Value {
     let service = &proxy.service;
     let default_provider;
     let provider = if let Some(configured) = &proxy.config.claude {
@@ -234,6 +246,39 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
             ..Default::default()
         };
     }
+    if let Some(reset) = reset {
+        if cache.error.is_some() || !resets::validate(cache.data.as_ref(), cache.updated_at, reset)
+        {
+            return resets::result(false, "Refresh usage and select an available reset.");
+        }
+        let org = match crate::claude_auth::account_identity(
+            &path,
+            &proxy.client,
+            &provider.upstream_url,
+            &token,
+            None,
+        )
+        .await
+        {
+            Ok(org) if org.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-') => org,
+            _ => {
+                return resets::result(
+                    false,
+                    "Cannot verify the subscription account. Refresh usage.",
+                );
+            }
+        };
+        let request = proxy.client.post(format!("{}/api/organizations/{org}/reset_rate_limits", provider.upstream_url.trim_end_matches('/')))
+            .bearer_auth(&token).header("anthropic-beta", OAUTH_BETA).header("user-agent", resets::CLAUDE_USER_AGENT)
+            .json(&json!({"program":"cedar_ember","grant_id":reset.grant_id,"request_id":reset.request_id}));
+        let result = resets::send(request, "claude").await;
+        // Invalidate even an uncertain outcome; never offer the same cached credit again.
+        cache.data = None;
+        cache.updated_at = None;
+        cache.retry_at = None;
+        cache.error = None;
+        return result;
+    }
     if cache.error.is_none()
         && super::super::routes::quota::crossed_reset(cache.data.as_ref(), cache.updated_at)
     {
@@ -244,9 +289,9 @@ pub(in crate::proxy) async fn reading(proxy: &Proxy) -> Value {
     }
     let mut delay = Duration::from_secs(provider.usage_cache_seconds);
     let result = async {
-        let mut response = proxy.client.get(format!("{}/api/oauth/usage", provider.upstream_url.trim_end_matches('/')))
+        let mut response = proxy.client.get(format!("{}/api/oauth/usage?cedar_ember=1", provider.upstream_url.trim_end_matches('/')))
             .timeout(Duration::from_secs(20)).bearer_auth(token).header("anthropic-beta", OAUTH_BETA)
-            .header("user-agent", "hey-proxy/0.1.0").header("accept", "application/json").send().await
+            .header("user-agent", resets::CLAUDE_USER_AGENT).header("accept", "application/json").send().await
             .map_err(|_| anyhow::anyhow!("Cannot reach Claude usage endpoint"))?;
         let status = response.status();
             if status == StatusCode::UNAUTHORIZED { proxy.rejected_binding().await; }

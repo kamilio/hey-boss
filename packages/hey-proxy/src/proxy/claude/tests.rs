@@ -303,7 +303,8 @@ async fn usage_is_account_wide_allowlisted_cached_and_stale_on_rate_limit() {
     let (upstream, upstream_task) = serve(Router::new().fallback(any(move |request: Request| {
         let called = called.clone();
         async move {
-            assert_eq!(request.uri(), "/api/oauth/usage");
+            assert_eq!(request.uri(), "/api/oauth/usage?cedar_ember=1");
+            assert_eq!(request.headers()["user-agent"], super::super::subscription::resets::CLAUDE_USER_AGENT);
             assert_eq!(request.headers()["anthropic-beta"], OAUTH_BETA);
             assert_eq!(request.headers()["authorization"], "Bearer sk-ant-oat01-synthetic-old");
             if called.fetch_add(1, Ordering::SeqCst) > 0 {
@@ -323,7 +324,10 @@ async fn usage_is_account_wide_allowlisted_cached_and_stale_on_rate_limit() {
     assert_eq!(first["state"], "ok");
     assert_eq!(first["data"]["windows"][0]["used_percent"], 25.0);
     assert!(first["data"]["windows"][1]["used_percent"].is_null());
-    assert_eq!(first["data"]["windows"][2]["label"], "Weekly · Example model");
+    assert_eq!(
+        first["data"]["windows"][2]["label"],
+        "Weekly · Example model"
+    );
     assert!(!first.to_string().contains("PRIVATE"));
     let mut jobs = Vec::new();
     for _ in 0..5 {

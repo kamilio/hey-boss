@@ -1,9 +1,11 @@
 //! On-demand management API. No startup hooks, inference accounting, or model-path locks.
 use super::*;
+pub(in crate::proxy) mod resets;
 #[cfg(test)]
 mod tests;
 mod workers;
 use hey_proxy::usage::{Account, AccountUsage, Accounts, Reading, Recommendation, SCHEMA_VERSION};
+pub(super) use resets::reset;
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::Path;
 pub(super) use workers::recommend_workers;
@@ -242,6 +244,14 @@ pub(super) async fn recommend(State(service): State<Arc<Service>>) -> Response {
 // Independent of inference forwarding: no retries, body inspection or request-log writes.
 // Deserialize through the public schema to retain the allowlist across client relays.
 pub(super) async fn relay<T: DeserializeOwned + Serialize>(proxy: &Proxy, path: &str) -> Response {
+    relay_request::<T>(proxy, path, None).await
+}
+
+async fn relay_request<T: DeserializeOwned + Serialize>(
+    proxy: &Proxy,
+    path: &str,
+    reset: Option<&hey_proxy::usage::ResetRequest>,
+) -> Response {
     let result = tokio::time::timeout(Duration::from_secs(30), async {
         let source = proxy
             .config
@@ -256,16 +266,22 @@ pub(super) async fn relay<T: DeserializeOwned + Serialize>(proxy: &Proxy, path: 
                 Duration::from_secs(proxy.config.credential_cache_seconds),
             )
             .await?;
-        let mut response = proxy
+        let mut request = proxy
             .client
-            .get(format!(
-                "{}{path}",
-                proxy.config.upstream_url.trim_end_matches('/')
-            ))
+            .request(
+                if reset.is_some() {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                },
+                format!("{}{path}", proxy.config.upstream_url.trim_end_matches('/')),
+            )
             .bearer_auth(token.to_str()?)
-            .header("accept", "application/json")
-            .send()
-            .await?;
+            .header("accept", "application/json");
+        if let Some(reset) = reset {
+            request = request.json(reset);
+        }
+        let mut response = request.send().await?;
         let status = response.status();
         if !status.is_success() {
             return Ok::<_, anyhow::Error>(Err(status));

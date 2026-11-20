@@ -245,6 +245,10 @@ pub fn router_with(config: Config, options: Options) -> Result<Router> {
         .route("/claude/usage", axum::routing::get(claude::usage))
         .route("/codex/usage", axum::routing::get(codex::usage))
         .route(
+            "/usage/v1/{provider}/{account}/reset",
+            axum::routing::post(subscription::reset),
+        )
+        .route(
             "/usage/v1/recommend",
             axum::routing::get(subscription::recommend),
         )

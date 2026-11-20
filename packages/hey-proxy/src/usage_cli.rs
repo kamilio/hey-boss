@@ -21,6 +21,12 @@ pub(crate) struct Args {
     /// List configured accounts without fetching provider usage
     #[arg(long, conflicts_with_all = ["provider", "account", "recommend"])]
     accounts: bool,
+    /// Spend this reset grant; requires an explicit provider and confirmation
+    #[arg(long, requires_all = ["provider", "confirm_reset"], conflicts_with_all = ["accounts", "recommend", "spend"])]
+    reset: Option<String>,
+    /// Confirm spending the reset selected by --reset
+    #[arg(long, requires = "reset")]
+    confirm_reset: bool,
     /// Recommend the best provider (`codex` or `claude`) based on earliest expiring usage and remaining quota
     #[arg(long, conflicts_with_all = ["provider", "account", "accounts", "spend"])]
     recommend: bool,
@@ -293,6 +299,28 @@ pub(crate) async fn run(args: Args, config_path: Option<PathBuf>) -> Result<()> 
             for account in accounts.accounts {
                 println!("{}/{}", plain(&account.provider), plain(&account.id));
             }
+        }
+        return Ok(());
+    }
+    if let Some(grant_id) = args.reset {
+        let result = target
+            .client
+            .reset(
+                args.provider.as_deref().unwrap(),
+                &args.account,
+                &hey_proxy::usage::ResetRequest {
+                    grant_id,
+                    request_id: format!("{:032x}", rand::random::<u128>()),
+                },
+            )
+            .await?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("{}", result.message);
+        }
+        if !result.success {
+            bail!("{}", result.message);
         }
         return Ok(());
     }

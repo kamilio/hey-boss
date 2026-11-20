@@ -562,6 +562,23 @@ final class Store {
         do { try process(request, reply) }
         catch { reply.send(["status": "error", "error": String(describing: error)]); reportFailure(error) }
     }
+    func notifyQuota(_ id: String, title: String, message: String) throws {
+        let receipt = (source: "subscription-quota", id: id, fingerprint: id)
+        var created: Record?
+        try database.transaction {
+            guard try database.replay(receipt) == nil else { return }
+            var row = Record(taskID: UUID().uuidString.lowercased(), kind: "alert", question: message, project: "Subscriptions", title: title, description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970, status: "pending")
+            row.severity = "warning"; row.icon = "gauge.with.dots.needle.100percent"
+            row.sourceKnown = true; row.sourceHost = "This Mac"
+            row.quietHoursMuted = notificationsMuted()
+            try database.save(row); try database.saveReceipt(receipt, taskID: row.taskID)
+            created = row
+        }
+        if let row = created {
+            refreshPendingCount()
+            if row.quietHoursMuted != true { show(row) }
+        }
+    }
     func process(_ request: Request, _ reply: Reply) throws {
         func invalid(_ message: String) -> StorageError { StorageError(description: message) }
         if request.command.hasPrefix("inbox_") { try processInbox(request, reply); return }
@@ -4694,6 +4711,7 @@ struct SubscriptionQuotaAccounts: Decodable {
     let accounts: [SubscriptionQuotaAccount]
 }
 struct SubscriptionQuotaWindow: Codable {
+    let id: String?
     let label: String
     let remaining_percent: Double?
     let resets_at: String?
@@ -4718,6 +4736,21 @@ struct SubscriptionQuotaWindow: Codable {
         return "Resets in \(minutes / 1440)d \((minutes % 1440) / 60)h"
     }
 }
+struct SubscriptionQuotaReset: Codable {
+    let id: String
+    let label: String
+    let remaining: Int
+    let expires_at: String?
+    let usable: Bool
+    var expiry: Date? {
+        guard let expires_at else { return nil }
+        let format = ISO8601DateFormatter()
+        if let date = format.date(from: expires_at) { return date }
+        format.formatOptions.insert(.withFractionalSeconds)
+        return format.date(from: expires_at)
+    }
+    var available: Bool { usable && remaining > 0 && (expires_at == nil || expiry.map { $0 > Date() } == true) }
+}
 struct SubscriptionQuotaReading: Codable {
     struct ExtraUsage: Codable {
         struct Spend: Codable {
@@ -4737,6 +4770,7 @@ struct SubscriptionQuotaReading: Codable {
         let extra_usage: ExtraUsage?
         let windows: [SubscriptionQuotaWindow]
         let availability_unknown: Bool?
+        let resets: [SubscriptionQuotaReset]?
     }
     let schema_version: Int
     let account: SubscriptionQuotaAccount
@@ -4755,6 +4789,7 @@ struct SubscriptionQuotaRow: Codable {
     let account: SubscriptionQuotaAccount
     var reading: SubscriptionQuotaReading?
     var message: String = "Checking quota…"
+    var notified: [String: String]? = nil
 }
 final class QuotaCanvas: NSView {
     override var isFlipped: Bool { true }
@@ -4799,6 +4834,11 @@ final class SubscriptionQuotaController: NSObject {
     var signingIn: SubscriptionQuotaAccount?
     var failedSignIn: SubscriptionQuotaAccount?
     var loading = false
+    var resetting = false
+    var notifying: Set<String> = []
+    var notify: ((String, String, String, @escaping (Bool) -> Void) -> Void)?
+    var confirmReset: ((SubscriptionQuotaAccount, SubscriptionQuotaReset) -> Bool)?
+    var reportReset: ((String) -> Void)?
     var lastLoaded: Date?
     var timer: Timer?
     var runner: (([String], @escaping (Result<Data, Error>) -> Void) -> Void)?
@@ -4848,7 +4888,7 @@ final class SubscriptionQuotaController: NSObject {
     func close() {} // Keep the cache warm while the menu is closed.
     deinit { timer?.invalidate() }
     @objc func refresh() {
-        guard !loading, signingIn == nil else { return }
+        guard !loading && !resetting, signingIn == nil else { return }
         loading = true; message = "Checking subscriptions…"; render()
         request(["--accounts"]) { [weak self] result in
             guard let self else { return }
@@ -4887,19 +4927,84 @@ final class SubscriptionQuotaController: NSObject {
     }
     func finish() {
         loading = false; lastLoaded = Date()
+        checkNotifications()
+        saveCache()
+        render()
+    }
+    func saveCache() {
         if let cacheURL, let data = try? JSONEncoder().encode(rows), data.count <= 1024 * 1024 {
             try? FileManager.default.createDirectory(at: cacheURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? data.write(to: cacheURL, options: [.atomic, .completeFileProtectionUnlessOpen])
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: cacheURL.path)
         }
-        render()
+    }
+    func checkNotifications(now: Double = Date().timeIntervalSince1970) {
+        guard let notify else { return }
+        for row in rows {
+            guard let reading = row.reading, reading.isFresh(now: now) else { continue }
+            for limit in reading.data?.windows ?? [] {
+                let name = limit.id.map { $0.hasPrefix("limit_") ? limit.label : $0 } ?? limit.label
+                if name == "codex_included_limit", reading.data?.windows.contains(where: { $0.id != "codex_included_limit" && $0.remaining == 0 }) == true { continue }
+                // No reset timestamp: notify once until a fresh reading shows recovery.
+                let period = limit.reset.map { String(Int($0.timeIntervalSince1970)) } ?? "exhausted"
+                let key = row.account.provider + "/" + row.account.id + "/" + name
+                if let remaining = limit.remaining, remaining > 0, limit.reset == nil,
+                   let index = rows.firstIndex(where: { $0.account == row.account }) {
+                    rows[index].notified?.removeValue(forKey: name)
+                }
+                guard limit.remaining == 0, row.notified?[name] != period, !notifying.contains(key) else { continue }
+                notifying.insert(key)
+                let receiptPeriod = limit.reset == nil ? String(reading.updated_at ?? now) : period
+                let receipt = SHA256.hash(data: Data((key + "/" + receiptPeriod).utf8)).map { String(format: "%02x", $0) }.joined()
+                let title = row.account.title + " limit reached"
+                let message = row.account.title + " · " + row.account.id + "\n" + limit.label + " is fully used." + (limit.reset.map { " Resets " + $0.formatted(date: .abbreviated, time: .shortened) + "." } ?? "")
+                notify(receipt, title, message) { [weak self] success in
+                    guard let self else { return }
+                    self.notifying.remove(key)
+                    if success, let index = self.rows.firstIndex(where: { $0.account == row.account }) {
+                        if self.rows[index].notified == nil { self.rows[index].notified = [:] }
+                        self.rows[index].notified?[name] = period
+                        self.saveCache()
+                    }
+                }
+            }
+        }
+    }
+    func useReset(_ grant: SubscriptionQuotaReset, account: SubscriptionQuotaAccount) {
+        guard !loading && !resetting, signingIn == nil, grant.available,
+              rows.contains(where: { $0.account == account && $0.reading?.isFresh() == true }) else { return }
+        resetting = true; render()
+        content.enclosingMenuItem?.menu?.cancelTracking()
+        onMain { [weak self] in
+            guard let self else { return }
+            let confirmed: Bool
+            if let confirm = self.confirmReset { confirmed = confirm(account, grant) }
+            else {
+                let alert = NSAlert()
+                alert.messageText = "Use this \(account.title) reset?"
+                alert.informativeText = "\(account.id)\n\(grant.label)\n\nThis spends one of your remaining resets and cannot be undone."
+                alert.addButton(withTitle: "Cancel"); alert.addButton(withTitle: "Use reset")
+                NSApp.activate(ignoringOtherApps: true)
+                confirmed = alert.runModal() == .alertSecondButtonReturn
+            }
+            guard confirmed else { self.resetting = false; self.render(); return }
+            self.request(["--provider", account.provider, "--account", account.id, "--reset", grant.id, "--confirm-reset"]) { result in
+                struct ResetResult: Decodable { let schema_version: Int; let success: Bool; let message: String }
+                let response = try? JSONDecoder().decode(ResetResult.self, from: result.get())
+                let message = response?.schema_version == 1 ? response!.message : "Reset could not be confirmed. Refresh usage before trying again."
+                if let index = self.rows.firstIndex(where: { $0.account == account }) { self.rows[index].reading?.state = "stale" }
+                self.resetting = false; self.refresh()
+                if let report = self.reportReset { report(message) }
+                else { let alert = NSAlert(); alert.messageText = message; alert.runModal() }
+            }
+        }
     }
     var executable: String? {
         let paths = [cli, ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"], FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-boss").path, "/opt/homebrew/bin/hey-boss", "/usr/local/bin/hey-boss"].compactMap { $0 }
         return paths.first(where: { FileManager.default.isExecutableFile(atPath: $0) })
     }
     func signIn(_ account: SubscriptionQuotaAccount) {
-        guard signingIn == nil, !loading else { return }
+        guard signingIn == nil, !loading && !resetting else { return }
         guard let executable else { failedSignIn = account; render(); return }
         signingIn = account; failedSignIn = nil; render()
         content.enclosingMenuItem?.menu?.cancelTracking()
@@ -4926,13 +5031,13 @@ final class SubscriptionQuotaController: NSObject {
         queue.addOperation {
             let result: Result<Data, Error> = Result {
                 let process = Process(); process.executableURL = URL(fileURLWithPath: executable)
-                process.arguments = ["proxy", "usage", "--json", "--timeout-seconds", "8"] + args
+                process.arguments = ["proxy", "usage", "--json", "--timeout-seconds", args.contains("--reset") ? "30" : "8"] + args
                 process.currentDirectoryURL = FileManager.default.homeDirectoryForCurrentUser
                 let pipe = Pipe(); process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
                 defer { try? pipe.fileHandleForReading.close() }
                 try process.run()
                 let timeout = DispatchWorkItem { if process.isRunning { Darwin.kill(process.processIdentifier, SIGKILL) } }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 12, execute: timeout)
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (args.contains("--reset") ? 35 : 12), execute: timeout)
                 defer { timeout.cancel(); if process.isRunning { process.terminate() } }
                 let bytes = try readScannerOutput(pipe.fileHandleForReading); process.waitUntilExit()
                 // The CLI deliberately exits nonzero for stale/disabled readings;
@@ -4944,7 +5049,7 @@ final class SubscriptionQuotaController: NSObject {
         }
     }
     func render() {
-        refreshButton.isEnabled = !loading && signingIn == nil
+        refreshButton.isEnabled = !loading && !resetting && signingIn == nil
         subtitle.stringValue = "Subscription quota"
         let origin = scroll.contentView.bounds.origin
         body.subviews.forEach { $0.removeFromSuperview() }
@@ -4963,7 +5068,8 @@ final class SubscriptionQuotaController: NSObject {
             let windows = reading?.data?.windows ?? []
             let paid = reading?.data?.monthly_on_demand_credits
             let showSpend = reading?.data != nil && reading?.state != "disabled"
-            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60 + (showSpend ? 24 : 0)))
+            let resets = (reading?.data?.resets ?? []).filter { $0.remaining > 0 && ($0.expiry.map { $0 > Date() } ?? true) }
+            let card = QuotaCard(frame: NSRect(x: 12, y: y, width: cardWidth, height: 62 + CGFloat(windows.count) * 60 + CGFloat(resets.count) * 48 + (showSpend ? 24 : 0)))
             body.addSubview(card)
             let accountTitle = row.account.title + (row.account.id == "default" ? "" : " · " + row.account.id)
             let name = label(accountTitle, size: 13, weight: .semibold)
@@ -4972,7 +5078,7 @@ final class SubscriptionQuotaController: NSObject {
             let signIn = failed && row.message.contains("authorization rejected") && row.message.contains("claude-login")
             if signIn {
                 let button = ActionButton(signingIn == row.account ? "Signing in…" : "Sign in…", frame: NSRect(x: cardWidth - 100, y: 6, width: 88, height: 25), style: .link) { [weak self] in self?.signIn(row.account) }
-                button.isEnabled = signingIn == nil
+                button.isEnabled = signingIn == nil && !resetting
                 button.toolTip = "Sign in to Claude in your browser"
                 card.addSubview(button)
             } else {
@@ -5018,6 +5124,17 @@ final class SubscriptionQuotaController: NSObject {
                 rowY += 60
             }
             let footnote: String
+            for grant in resets {
+                let name = label(grant.label, size: 11, weight: .medium)
+                name.frame = NSRect(x: 12, y: rowY, width: cardWidth - 90, height: 16); card.addSubview(name)
+                let expiry = grant.expiry.map { " · Expires " + $0.formatted(date: .abbreviated, time: .omitted) } ?? ""
+                let detail = label("\(grant.remaining) left" + expiry, size: 10, color: .secondaryLabelColor)
+                detail.frame = NSRect(x: 12, y: rowY + 18, width: cardWidth - 90, height: 16); card.addSubview(detail)
+                let button = ActionButton("Reset", frame: NSRect(x: cardWidth - 72, y: rowY + 3, width: 60, height: 28), style: .link) { [weak self] in self?.useReset(grant, account: row.account) }
+                button.isEnabled = fresh && grant.available && !loading && !resetting
+                button.toolTip = "Use one reset: " + grant.label
+                card.addSubview(button); rowY += 48
+            }
             if signIn {
                 footnote = signingIn == row.account ? "Finish signing in with your browser." : failedSignIn == row.account ? "Sign-in didn’t finish. Try again." : "Sign in to update your Claude quota."
             } else if let reading {
@@ -11650,6 +11767,12 @@ struct Daemon {
         catch { reportFailure(error); return }
         let quietPath = ProcessInfo.processInfo.environment["HEY_BOSS_ISSUE_DB"] ?? directory + "/issues.db"
         store.notificationsMuted = { NotificationQuietHours.load(quietPath).active() }
+        overview.subscriptionQuota.notify = { id, title, message, completion in
+            store.queue.async {
+                do { try store.notifyQuota(id, title: title, message: message); onMain { completion(true) } }
+                catch { reportFailure(error); onMain { completion(false) } }
+            }
+        }
         ui.notificationsMuted = store.notificationsMuted
         // Check boundaries and settings changes even when no new requests arrive.
         let quietTimer = DispatchSource.makeTimerSource(queue: store.queue)

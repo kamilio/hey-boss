@@ -1,4 +1,4 @@
-use super::{AccountUsage, Accounts, Recommendation, SCHEMA_VERSION};
+use super::{AccountUsage, Accounts, Recommendation, ResetRequest, ResetResult, SCHEMA_VERSION};
 use reqwest::{Url, header::HeaderValue};
 use serde::de::DeserializeOwned;
 use std::{fmt, time::Duration};
@@ -224,13 +224,55 @@ impl Client {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
+        self.request(path, None).await
+    }
+
+    /// Spend one explicitly selected reset. Transport failures are never retried.
+    pub async fn reset(
+        &self,
+        provider: &str,
+        account: &str,
+        reset: &ResetRequest,
+    ) -> Result<ResetResult, Error> {
+        for id in [provider, account, &reset.grant_id, &reset.request_id] {
+            if id.is_empty()
+                || id.len() > 128
+                || !id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
+            {
+                return Err(Error::InvalidIdentifier);
+            }
+        }
+        let result: ResetResult = self
+            .request(&format!("usage/v1/{provider}/{account}/reset"), Some(reset))
+            .await?;
+        check_version(result.schema_version)?;
+        Ok(result)
+    }
+
+    async fn request<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        reset: Option<&ResetRequest>,
+    ) -> Result<T, Error> {
         let mut request = self
             .http
-            .get(self.base.join(path).map_err(|_| Error::InvalidBaseUrl)?)
+            .request(
+                if reset.is_some() {
+                    reqwest::Method::POST
+                } else {
+                    reqwest::Method::GET
+                },
+                self.base.join(path).map_err(|_| Error::InvalidBaseUrl)?,
+            )
             .timeout(self.timeout)
             .header("accept", "application/json");
         if let Some(token) = &self.token {
             request = request.header("authorization", token.clone());
+        }
+        if let Some(reset) = reset {
+            request = request.json(reset);
         }
         let mut response = request.send().await.map_err(|_| Error::Transport)?;
         if !response.status().is_success() {

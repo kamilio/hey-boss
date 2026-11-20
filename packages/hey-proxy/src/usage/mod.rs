@@ -104,6 +104,30 @@ pub struct UsageData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monthly_on_demand_credits: Option<f64>,
     pub extra_usage: Option<ExtraUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets: Option<Vec<ResetGrant>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetGrant {
+    pub id: String,
+    pub label: String,
+    pub remaining: u64,
+    pub expires_at: Option<String>,
+    pub usable: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetRequest {
+    pub grant_id: String,
+    pub request_id: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ResetResult {
+    pub schema_version: u32,
+    pub success: bool,
+    pub message: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
