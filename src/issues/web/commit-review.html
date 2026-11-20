@@ -23,7 +23,7 @@
       <section class="task-strip" aria-label="Task actions" hidden>
         <strong>Task</strong><span id="task-state"></span><span id="task-owner"></span>
         <div class="task-actions">
-          <button class="button small" id="rework">Reopen and assign to me</button>
+          <button class="button small" id="rework">Mark not ready</button>
           <button class="button small" id="assign-me">Assign to me</button>
           <button class="button small" id="make-ready">Mark ready</button>
           <button class="button small" id="unassign">Unassign</button>
@@ -68,15 +68,15 @@
   </main>
   <dialog id="reopen-dialog" aria-labelledby="reopen-title">
     <form id="reopen-form">
-      <header class="dialog-heading"><h2 id="reopen-title">Reopen task</h2></header>
+      <header class="dialog-heading"><h2 id="reopen-title">Mark not ready</h2></header>
       <div class="dialog-content">
         <label class="field-label" for="reopen-comment">Comment <span>optional</span></label>
         <textarea id="reopen-comment" rows="5" autofocus></textarea>
         <p id="reopen-error" class="form-error" role="alert" hidden></p>
       </div>
       <footer class="dialog-footer">
-        <span><kbd>⌘</kbd><kbd>Enter</kbd> to reopen</span>
-        <div><button type="button" class="button" id="reopen-cancel">Cancel</button><button type="submit" class="button primary">Reopen task</button></div>
+        <span><kbd>⌘</kbd><kbd>Enter</kbd> to confirm</span>
+        <div><button type="button" class="button" id="reopen-cancel">Cancel</button><button type="submit" class="button primary">Mark not ready</button></div>
       </footer>
     </form>
   </dialog>

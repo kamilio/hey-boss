@@ -26,7 +26,9 @@ function taskBar() {
   $('#unassign').hidden = !issue.assignee || !assignable;
   $('#assign-me').hidden = mine || !assignable;
   $('#rework').hidden = issue.state === 'open';
-  $('#rework').textContent = mine ? 'Reopen task' : 'Reopen and assign to me';
+  const reworkLabel = issue.state === 'ready' ? 'Mark not ready' : 'Reopen task';
+  $('#rework').textContent = reworkLabel + (mine ? '' : ' and assign to me');
+  $('#reopen-form button[type="submit"]').textContent = reworkLabel;
   for (const id of ['#unassign','#assign-me','#rework']) $(id).disabled = busy;
   $('#make-ready').hidden = issue.state === 'ready'; $('#make-ready').disabled = busy;
   $('#refresh-task').disabled = busy;
@@ -98,7 +100,7 @@ async function start() {
       }
       await request({action:'rework',number,if_version:issue.version});
       comment.value = ''; reopenDialog.close();
-      await refreshTask(); $('#status').textContent = 'Task reopened';
+      await refreshTask(); $('#status').textContent = 'Task updated';
     } catch (error) {
       if (reopenDialog.open) { $('#reopen-error').textContent = error.message; $('#reopen-error').hidden = false; }
       else showError(error);
