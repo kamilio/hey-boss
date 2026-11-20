@@ -45,19 +45,24 @@ fn normalize(value: &Value) -> Result<Value> {
     }
     if let Some(limits) = value["limits"].as_array() {
         for (index, limit) in limits.iter().take(64).enumerate() {
-            if !limit.is_object() || limit["is_active"] == false {
+            if !limit.is_object() {
                 continue;
             }
-            // Claude can include the same session in both legacy and new fields.
+            // Claude repeats the session and weekly totals in both legacy and new fields.
             // Only discard an alias with matching measurements and no model scope.
-            if limit["kind"] == "session"
-                && limit["scope"]
-                    .as_object()
-                    .is_none_or(|scope| scope.values().all(Value::is_null))
+            // `is_active` marks the binding limit, not whether the limit exists.
+            let alias = match limit["kind"].as_str() {
+                Some("session") => "five_hour",
+                Some("weekly_all") => "seven_day",
+                _ => "",
+            };
+            if limit["scope"]
+                .as_object()
+                .is_none_or(|scope| scope.values().all(Value::is_null))
                 && percent(&limit["percent"]).is_some()
                 && bounded(&limit["resets_at"]).is_some()
                 && windows.iter().any(|window| {
-                    window["id"] == "five_hour"
+                    window["id"] == alias
                         && percent(&window["used_percent"]) == percent(&limit["percent"])
                         && bounded(&window["resets_at"]) == bounded(&limit["resets_at"])
                 })
@@ -65,6 +70,9 @@ fn normalize(value: &Value) -> Result<Value> {
                 continue;
             }
             let label = bounded(&limit["scope"]["model"]["display_name"])
+                .map(|name| format!("Weekly · {name}"))
+                .filter(|_| limit["kind"] == "weekly_scoped")
+                .or_else(|| bounded(&limit["scope"]["model"]["display_name"]))
                 .or_else(|| bounded(&limit["scope"]["model"]["id"]))
                 .or_else(|| bounded(&limit["kind"]))
                 .unwrap_or_else(|| "Subscription limit".into());
@@ -290,6 +298,18 @@ mod tests {
         assert_eq!(data["windows"].as_array().unwrap().len(), 4);
         assert_eq!(data["windows"][0]["id"], "five_hour");
         assert_eq!(data["windows"][1]["model"], "sonnet");
+        let real = normalize(&json!({
+            "five_hour":{"utilization":10.0,"resets_at":"2026-11-20T23:10:00Z"},
+            "seven_day":{"utilization":32.0,"resets_at":"2026-11-23T05:00:00Z"},
+            "limits":[
+                {"kind":"session","percent":10,"resets_at":"2026-11-20T23:10:00Z","scope":null,"is_active":false},
+                {"kind":"weekly_all","percent":32,"resets_at":"2026-11-23T05:00:00Z","scope":null,"is_active":true},
+                {"kind":"weekly_scoped","group":"weekly","percent":15,"resets_at":"2026-11-23T05:00:00Z","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null},"is_active":false}
+            ]
+        })).unwrap();
+        assert_eq!(real["windows"].as_array().unwrap().len(), 3);
+        assert_eq!(real["windows"][2]["label"], "Weekly · Fable");
+        assert_eq!(real["windows"][2]["used_percent"], 15.0);
         let only_new = normalize(&json!({"limits":[{"kind":"session","percent":72}]})).unwrap();
         assert_eq!(only_new["windows"].as_array().unwrap().len(), 1);
     }

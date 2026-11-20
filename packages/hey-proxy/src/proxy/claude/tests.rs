@@ -323,7 +323,7 @@ async fn usage_is_account_wide_allowlisted_cached_and_stale_on_rate_limit() {
     assert_eq!(first["state"], "ok");
     assert_eq!(first["data"]["windows"][0]["used_percent"], 25.0);
     assert!(first["data"]["windows"][1]["used_percent"].is_null());
-    assert_eq!(first["data"]["windows"][2]["label"], "Example model");
+    assert_eq!(first["data"]["windows"][2]["label"], "Weekly · Example model");
     assert!(!first.to_string().contains("PRIVATE"));
     let mut jobs = Vec::new();
     for _ in 0..5 {
