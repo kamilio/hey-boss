@@ -85,12 +85,21 @@ const IssueFilters = (() => {
     $("#applied-issue-filters").hidden = $("#clear-issue-filters").hidden;
     const quick = $("#issue-filter-presets");
     const options = presets(route);
+    const saved = model.savedFilters || [];
+    const signature = JSON.stringify([route.state, saved]);
     // Keep preset buttons in place during polling and selection, including focus.
-    if (quick.dataset.state !== route.state) {
-      quick.innerHTML = options.map(p => `<button type="button" class="issue-filter-preset" data-preset="${p.key}" aria-pressed="false">${icon(p.icon)}<span>${p.label}</span><span class="preset-check">${icon("check")}</span></button>`).join("");
-      quick.dataset.state = route.state;
+    if (quick.dataset.signature !== signature) {
+      const focused = quick.contains(document.activeElement) ? document.activeElement.getAttribute("data-saved-filter") : null;
+      quick.innerHTML = options.map(p => `<button type="button" class="issue-filter-preset" data-preset="${p.key}" aria-pressed="false">${icon(p.icon)}<span>${p.label}</span><span class="preset-check">${icon("check")}</span></button>`).join("")
+        + saved.map(p => `<button type="button" class="issue-filter-preset" data-saved-filter="${esc(p.name)}" aria-pressed="false" title="Saved filter: ${esc(p.name)}">${icon("link")}<span>${esc(p.name)}</span><span class="preset-check">${icon("check")}</span></button>`).join("");
+      quick.dataset.signature = signature;
+      if (focused !== null) ($$("[data-saved-filter]", quick).find(b => b.dataset.savedFilter === focused) || $("#add-issue-filter")).focus({preventScroll:true});
     }
     for (const option of options) $(`[data-preset="${option.key}"]`, quick).setAttribute("aria-pressed", String(selected(route, option)));
+    for (const button of $$("[data-saved-filter]", quick)) {
+      const filter = saved.find(p => p.name === button.dataset.savedFilter);
+      button.setAttribute("aria-pressed", String(Object.entries(filter.filters).every(([key, value]) => (route[key] || "") === value)));
+    }
   }
   function position() {
     const menu = $("#issue-filter-menu");
@@ -150,6 +159,11 @@ const IssueFilters = (() => {
       if (remove) apply({[remove.dataset.removeFilter]:empty[remove.dataset.removeFilter]});
     };
     $("#issue-filter-presets").onclick = e => {
+      const saved = e.target.closest("[data-saved-filter]");
+      if (saved) {
+        const filter = model.savedFilters.find(p => p.name === saved.dataset.savedFilter);
+        return apply({...empty, ...filter.filters, page:1});
+      }
       const button = e.target.closest("[data-preset]");
       if (button) apply(toggle(model.route, presets(model.route).find(p => p.key === button.dataset.preset)));
     };

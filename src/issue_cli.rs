@@ -267,6 +267,11 @@ enum Action {
     },
     #[command(skip)]
     GlobalSettings { operation: Box<Operation> },
+    /// Save named issue-list filters as project shortcuts.
+    Filter {
+        #[command(subcommand)]
+        command: FilterAction,
+    },
     /// Shared and conditional project prompts, worktree choices, and PR behavior.
     Settings {
         #[command(subcommand)]
@@ -806,6 +811,16 @@ enum PrAction {
     },
 }
 #[derive(Subcommand)]
+enum FilterAction {
+    /// Save or replace a named shortcut. The URL supplies the project and filters.
+    Save { name: String, url: String },
+    /// List this project's saved shortcuts.
+    List,
+    /// Remove a named shortcut from this project.
+    Delete { name: String },
+}
+
+#[derive(Subcommand)]
 enum SettingsAction {
     /// Compose a Markdown sequence against saved prompt sections without running it.
     Compose {
@@ -1070,6 +1085,18 @@ impl Options {
                 operation: serde_json::from_str(&read_text(std::io::stdin(), issues::WIRE_LIMIT)?)?,
             },
             Action::GlobalSettings { operation } => operation.as_ref().clone(),
+            Action::Filter { command } => Operation::SavedFilters {
+                operation: match command {
+                    FilterAction::Save { name, url } => issues::saved_filters::Operation::Save {
+                        name: name.clone(),
+                        url: url.clone(),
+                    },
+                    FilterAction::List => issues::saved_filters::Operation::List,
+                    FilterAction::Delete { name } => {
+                        issues::saved_filters::Operation::Delete { name: name.clone() }
+                    }
+                },
+            },
             Action::Settings { command } => match command {
                 SettingsAction::Show | SettingsAction::Compose { .. } => Operation::ProjectSettings,
                 SettingsAction::Set {
@@ -1735,9 +1762,25 @@ pub fn run(options: &Options) -> Result<()> {
         Store::open(&issues::database_path()?)?.execute(&request)?
     } else {
         let mut operation = options.operation()?;
+        let filter_route = if let Operation::SavedFilters {
+            operation: issues::saved_filters::Operation::Save { url, .. },
+        } = &operation
+        {
+            Some(hey_boss::routes::resolve(url)?)
+        } else {
+            None
+        };
         let cwd = std::env::current_dir()?.canonicalize()?;
         let machine = issues::identity::machine()?;
-        let project_override = options.project.clone().or_else(worker_project);
+        let project_override = options
+            .project
+            .clone()
+            .or_else(|| {
+                filter_route
+                    .as_ref()
+                    .and_then(|route| route.project.clone())
+            })
+            .or_else(worker_project);
         // Full IDs already provide the request context. Keep the override so
         // the store still resolves saved names and canonical destinations.
         let project = if let Some(id) = project_override
@@ -1829,11 +1872,15 @@ pub fn run(options: &Options) -> Result<()> {
             operation,
             request_id: options.request_id.clone(),
         };
-        let host = options.host.clone().or_else(|| {
-            std::env::var("HEY_BOSS_ISSUE_HOST")
-                .ok()
-                .filter(|s| !s.is_empty())
-        });
+        let host = options
+            .host
+            .clone()
+            .or_else(|| filter_route.as_ref().and_then(|route| route.host.clone()))
+            .or_else(|| {
+                std::env::var("HEY_BOSS_ISSUE_HOST")
+                    .ok()
+                    .filter(|s| !s.is_empty())
+            });
         let mut value = crate::cli_request::execute(&request, host.as_deref(), options.supervisor)
             .map_err(|mut error| {
                 if let Some(info) = &mut error.details {
@@ -1950,6 +1997,17 @@ fn scope_allocation(info: &mut Value, host: &str) {
 }
 
 pub(crate) fn print_text(value: &Value) {
+    if value["issues"].is_null()
+        && let Some(filters) = value["saved_filters"].as_array()
+    {
+        if filters.is_empty() {
+            println!("No saved filters.");
+        }
+        for filter in filters {
+            println!("{}\n  {}", line(&filter["name"]), filter["filters"]);
+        }
+        return;
+    }
     if let Some(history) = value["verdict_comments"].as_array() {
         if history.is_empty() {
             println!("No verdict comments yet.");

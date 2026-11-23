@@ -24,6 +24,7 @@ mod project_pause;
 pub(crate) mod provenance;
 pub mod remote;
 mod reviewed_evidence;
+pub mod saved_filters;
 pub mod search;
 mod store;
 pub mod vocabulary;
@@ -395,6 +396,9 @@ pub enum Operation {
         settings: Option<ProjectInitSettings>,
     },
     ProjectSettings,
+    SavedFilters {
+        operation: saved_filters::Operation,
+    },
     ProjectConfig {
         operation: project_config::Operation,
     },
@@ -778,6 +782,9 @@ pub struct ProjectInitSettings {
 
 impl Operation {
     pub fn writes(&self) -> bool {
+        if let Self::SavedFilters { operation } = self {
+            return !matches!(operation, saved_filters::Operation::List);
+        }
         if let Self::ProjectConfig { operation } = self {
             return operation.writes();
         }
@@ -870,6 +877,7 @@ impl Operation {
             | Self::ConfigureGlobal { .. }
             | Self::ProjectInit { .. }
             | Self::ProjectSettings
+            | Self::SavedFilters { .. }
             | Self::ProjectConfig { .. }
             | Self::ConfigureProject { .. }
             | Self::WorkerStatus

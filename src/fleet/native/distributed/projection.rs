@@ -58,6 +58,7 @@ fn group<'a>(table: &str, column: &'a str) -> &'a str {
         "issues" if matches!(column, "archive_key" | "archived_comments") => "@storage",
         "scheduled_jobs"
         | "project_config_revisions"
+        | "project_issue_filters"
         | "scheduled_job_revisions"
         | "scheduled_job_runs"
         | "worker_runs"

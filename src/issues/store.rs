@@ -1509,6 +1509,7 @@ impl Store {
         super::chief::migrate(&db)?;
         jobs::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_config_history' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::project_config::SCHEMA)?; }
+        if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_issue_filters' AND type='table')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::saved_filters::SCHEMA)?; }
         crate::event_log::install(&db)?;
         crate::pages::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='project_chiefs_worker' AND type='index')", [], |r| r.get::<_,bool>(0))? {
@@ -2162,6 +2163,9 @@ impl Store {
             None
         };
         let mut result = match &r.operation {
+            Operation::SavedFilters { operation } => {
+                super::saved_filters::execute(&tx, &project, operation)?
+            }
             Operation::ProjectConfig { operation } => {
                 super::project_config::execute(&tx, &project, operation, actor)?
             }
@@ -2786,6 +2790,9 @@ impl Store {
             }
         }
         let project_settings = registry::project_settings(&tx, &response_project)?;
+        if matches!(r.operation, Operation::List { .. }) {
+            result["saved_filters"] = json!(super::saved_filters::list(&tx, &response_project.id)?);
+        }
         // Worker previews may disable PR delivery for artifact-only tasks.
         result
             .as_object_mut()

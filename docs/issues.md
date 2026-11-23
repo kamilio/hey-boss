@@ -106,6 +106,14 @@ referenced inside Markdown are not imported.
 
 ## Web interface
 
+Save an issue-list URL as a named project shortcut with
+`hey-boss issue filter save 'Push blocked' 'COPIED_URL'`. The URL supplies the
+project and filters; the shortcut appears in **Quick filters** and syncs across
+machines. Saving the same name replaces it. Use `issue filter list` or
+`issue filter delete NAME` with `--project PROJECT` to manage shortcuts. Page
+number and machine are not part of the saved filter; applying it keeps the current
+project host.
+
 ```sh
 hey-boss issue web
 # Open http://hey-boss.test/; Ctrl+C stops the server.

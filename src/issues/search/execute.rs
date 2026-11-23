@@ -147,6 +147,7 @@ impl Store {
             actor_labels::enrich(&tx, &mut result)?;
         }
         let settings = registry::project_settings(&tx, &project)?;
+        result["saved_filters"] = json!(super::super::saved_filters::list(&tx, &project.id)?);
         if !options.compact && settings["code_reviews_enabled"] == true {
             result["pending_reviews"] = super::super::code_reviews::pending_links(&tx, &project.id)?;
         }

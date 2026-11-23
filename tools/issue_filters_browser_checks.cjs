@@ -180,6 +180,46 @@ let web;
       assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).has('states'), false);
       sql("UPDATE issues SET state='open' WHERE number=2;");
 
+      // CLI-saved URLs appear without issue changes, restore the complete view,
+      // survive reloads, and stay scoped to their project.
+      await page.goto(url('all'));
+      await expect([1,2,3,4,5,6,7]);
+      const savedName = 'Work & "review"';
+      const savedUrl = url('all')+'&states=open,blocked,ready&label=reliability&page=9';
+      run(['issue','filter','save',savedName,savedUrl]);
+      await page.locator('#refresh').click();
+      const shortcut = page.getByRole('button',{name:savedName,exact:true});
+      await shortcut.waitFor();
+      await preset('owner').click();
+      await shortcut.click(); await expect([1,2,4,5,6]);
+      assert.equal(await shortcut.getAttribute('aria-pressed'),'true');
+      assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).has('page'),false);
+      await page.reload(); await expect([1,2,4,5,6]);
+      assert.equal(await shortcut.getAttribute('aria-pressed'),'true');
+      await page.locator('#issue-search').fill('streaming'); await expect([1]);
+      assert.equal(await shortcut.getAttribute('aria-pressed'),'false');
+      await shortcut.click(); await expect([1,2,4,5,6]);
+      assert.equal(await page.locator('#issue-search').inputValue(),'');
+      for (const width of [320,1440]) {
+        await page.setViewportSize({width,height:1000});
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),true,'Saved shortcuts fit');
+        if (process.env.FILTER_SCREENSHOTS) {
+          await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-saved-${width}.png`)});
+        }
+      }
+      run(['issue','filter','save',savedName,url('closed')+'&label=reliability']);
+      await page.locator('#refresh').click();
+      await page.waitForFunction(() => model.savedFilters[0]?.filters.state === 'closed');
+      await shortcut.click(); await expect([7]);
+      sql("INSERT OR IGNORE INTO projects(id,name,next_number) VALUES('named:Other QA','Other QA',1);");
+      await page.goto(url('all').replace('Filter+QA','Other+QA'));
+      await page.waitForFunction(() => model.project.id === 'named:Other QA' && model.signature);
+      assert.equal(await page.locator('[data-saved-filter]').count(),0);
+      await page.goto(url('closed')+'&label=reliability'); await expect([7]);
+      run(['issue','--project','named:Filter QA','filter','delete',savedName]);
+      await page.locator('#refresh').click();
+      await shortcut.waitFor({state:'detached'});
+
       await page.goto(url('blocked'));
       await preset('blocked').click(); await preset('min_launches').click(); await choose('label','reliability');
       await expect([4,6]);

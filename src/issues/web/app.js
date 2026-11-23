@@ -50,6 +50,7 @@ let model = {
   boss: { id: "human:boss", name: "Boss" },
   assignees: [],
   creators: [],
+  savedFilters: [],
   assignmentMachines: [],
   projects: [],
   labels: [],
@@ -918,9 +919,10 @@ function renderList(result) {
   model.drafts_enabled = result.drafts_enabled;
   if (result.assignment_machines) model.assignmentMachines = result.assignment_machines;
   model.deletedLabels = model.route.state === "deleted" ? [...new Set(result.issues.flatMap(i => i.labels))] : [];
+  model.savedFilters = result.saved_filters || [];
   IssueFilters.render();
   model.pendingReviews = result.pending_reviews;
-  model.signature = JSON.stringify([result.issues, result.pending_reviews]);
+  model.signature = JSON.stringify([result.issues, result.pending_reviews, result.saved_filters]);
   renderSearchStatus(result.search);
   // The list API returns the complete set (all:true); filter before rendering and counting.
   result = {...result, issues:result.issues.filter(issue => IssueFilters.matches(issue, model.route))};
@@ -1068,7 +1070,10 @@ async function renderRoute() {
   model.deletedLabels = [];
   const previous = model.project?.id;
   model.route = parseRoute();
-  if (previous !== model.route.project || model.activeHost !== model.route.host) model.creators = [];
+  if (previous !== model.route.project || model.activeHost !== model.route.host) {
+    model.creators = [];
+    model.savedFilters = [];
+  }
   model.project = currentProject();
   if (model.project?.id) model.route.project = model.project.id;
   updateAppNavigation();
@@ -1270,7 +1275,7 @@ async function refresh(quiet = true) {
     } else {
       model.orderVersion = result.order_version;
       model.drafts_enabled = result.drafts_enabled;
-      if (JSON.stringify([result.issues, result.pending_reviews]) !== model.signature) renderList(result);
+      if (JSON.stringify([result.issues, result.pending_reviews, result.saved_filters]) !== model.signature) renderList(result);
       else renderSearchStatus(result.search);
     }
     connection(true);

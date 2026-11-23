@@ -853,6 +853,97 @@ fn transfer(from: &hey_boss_sync::Engine, to: &mut hey_boss_sync::Engine) {
 }
 
 #[test]
+fn saved_filters_sync_independent_names_replacements_and_deletions() {
+    use crate::issues::saved_filters::{Operation, execute, list};
+    let fa = Fixture::new();
+    let fb = Fixture::new();
+    let a = fa.db();
+    let b = fb.db();
+    for (db, node) in [(&a, "a"), (&b, "b")] {
+        seed(db);
+        install(db, node).unwrap();
+        db.execute("UPDATE distributed_meta SET active=1", [])
+            .unwrap();
+    }
+    let project = crate::issues::Project {
+        id: "p".into(),
+        name: "Project".into(),
+    };
+    let mut ea = hey_boss_sync::Engine::open(&fa.0.join("sync.db")).unwrap();
+    let mut eb = hey_boss_sync::Engine::open(&fb.0.join("sync.db")).unwrap();
+    execute(
+        &a,
+        &project,
+        &Operation::Save {
+            name: "Work".into(),
+            url: "http://hey-boss.test/#project=p&state=all&states=open,blocked,ready".into(),
+        },
+    )
+    .unwrap();
+    execute(
+        &b,
+        &project,
+        &Operation::Save {
+            name: "Review".into(),
+            url: "http://hey-boss.test/#project=p&state=ready".into(),
+        },
+    )
+    .unwrap();
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    transfer(&ea, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    capture_all(&b, &mut eb);
+    assert_eq!(list(&a, "p").unwrap(), list(&b, "p").unwrap());
+    assert_eq!(list(&b, "p").unwrap().len(), 2);
+    execute(
+        &b,
+        &project,
+        &Operation::Save {
+            name: "Work".into(),
+            url: "http://hey-boss.test/#project=p&state=blocked&label=review".into(),
+        },
+    )
+    .unwrap();
+    execute(
+        &b,
+        &project,
+        &Operation::Delete {
+            name: "Review".into(),
+        },
+    )
+    .unwrap();
+    capture_all(&b, &mut eb);
+    transfer(&eb, &mut ea);
+    capture_all(&a, &mut ea);
+    let saved = list(&a, "p").unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0]["filters"]["state"], "blocked");
+    assert_eq!(saved[0]["filters"]["label"], "review");
+
+    for action in ["INSERT", "UPDATE", "DELETE"] {
+        a.execute_batch(&format!(
+            "DROP TRIGGER distributed_capture_project_issue_filters_{action}"
+        ))
+        .unwrap();
+    }
+    install(&a, "a").unwrap();
+    execute(
+        &a,
+        &project,
+        &Operation::Delete {
+            name: "Work".into(),
+        },
+    )
+    .unwrap();
+    capture_all(&a, &mut ea);
+    transfer(&ea, &mut eb);
+    capture_all(&b, &mut eb);
+    assert!(list(&b, "p").unwrap().is_empty());
+}
+
+#[test]
 fn dictation_vocabulary_merges_offline_edits_and_late_imports() {
     use crate::issues::vocabulary::{Operation as VocabularyOperation, execute};
     use serde_json::json;

@@ -22,6 +22,7 @@ pub(super) const TABLES: &[&str] = &[
     "commit_review_comments",
     "project_settings",
     "project_config_revisions",
+    "project_issue_filters",
     "global_settings",
     "dictation_vocabulary",
     "issue_pull_requests",
