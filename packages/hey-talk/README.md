@@ -86,8 +86,8 @@ Hey Proxy at `127.0.0.1:8080` with reasoning disabled and storage off. By defaul
 To use Bedrock, choose an OpenAI profile ID from `/bedrock/v1/models` and run `defaults write local.hey-talk correctionBedrockProfile -string 'PROFILE_ID'`. Correction then uses `/bedrock/v1/responses` on the default tier. Delete that preference to restore ordinary proxy routing.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
-If correction fails during dictation, Hey Talk keeps the raw transcript in History; Hyper+V inserts it. Dictation restores the previous clipboard after pasting. Escape discards pending correction too.
-If correction times out, click the retry arrow next to the close button to continue with the same transcript and original destination. Completed actions won’t run again.
+If correction fails or times out, Hey Talk pastes the raw transcript without submitting, keeps it in History, and shows a failure notice. The usual destination checks still apply, and completed actions stay completed. Dictation restores the previous clipboard after pasting. Escape discards pending correction too.
+Raw fallback pastes have no retry button, so retrying cannot insert the dictation twice.
 Paste is the default. In a T3 thread composer, say “Rename this thread to Release Notes”
 to change the title. Hey Talk identifies the original chat through Accessibility and
 uses T3’s server API without submitting a message or touching the clipboard.

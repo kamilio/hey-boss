@@ -1077,9 +1077,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
 
     private func deliverTranscript(_ original: String, context: (text: String?, milliseconds: Double)?, correctionEnabled: Bool,
-                                   id generation: UInt64, audioSeconds: Double, elapsed: Double, selections: [SelectionCapture.Selection]) {
-        var id = generation
-        var started = ProcessInfo.processInfo.systemUptime
+                                   id: UInt64, audioSeconds: Double, elapsed: Double, selections: [SelectionCapture.Selection]) {
+        let started = ProcessInfo.processInfo.systemUptime
         let target = self.target, host = recordingHost, automatic = autoTarget
         let visibleThread = self.visibleThread
         var field = automatic ?? startingInput
@@ -1102,19 +1101,23 @@ final class TalkService: NSObject, NSApplicationDelegate {
             response["correction"] = info
             let reply = pendingReply; pendingReply = nil; reply?(response)
         }
-        func finish(_ delivery: String, _ reason: PasteBlockReason? = nil, action: CorrectionAction? = nil, retry: (() -> Void)? = nil) {
+        func finish(_ delivery: String, _ reason: PasteBlockReason? = nil, action: CorrectionAction? = nil) {
             guard current(), session.finish(id, text: response["text"] as? String ?? original) else { return }
             report(delivery, reason)
             waitingPaste = nil; self.automatic = nil; hotkey?.reset()
             overlay?.finishProcessing(); scheduleRelease()
             lastPasteBlock = reason
-            if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.", retry: retry) }
+            if response["history_saved"] as? Bool == false { overlay?.error("Not saved. Copy from History before quitting.") }
             else if reason == .slackUnavailable { overlay?.showActivity(info["error"] as? String ?? "Slack unavailable", failed: true) }
             else if let action, reason == .t3Unavailable || reason == .newThreadUnavailable {
                 overlay?.confirmAction(action, failed: true)
             }
-            else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility, retry: retry) }
-            else if let error = info["error"] as? String { overlay?.error(error, retry: retry) }
+            else if let reason { overlay?.error(reason.message(targetName: targetName, pasted: delivery == "pasted"), accessibilityAction: reason == .accessibility) }
+            else if let error = info["error"] as? String {
+                let notice = delivery == "pasted"
+                    ? "AI correction failed. Raw dictation pasted, not submitted.\n" + error : error
+                overlay?.error(notice)
+            }
             if automatic != nil, reason == nil, info["error"] == nil, ["submitted", "switched", "pinned", "unpinned", "settled", "navigated", "vocabulary_added"].contains(delivery) {
                 restartAutomatic(id: id)
             }
@@ -1191,7 +1194,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     return
                 }
                 Paste.deliver(action, target: target, originalField: originalField,
-                              visibleThread: visibleThread, shouldPressEnter: allowsSubmit,
+                              visibleThread: visibleThread, shouldPressEnter: { info["error"] == nil && allowsSubmit() },
                               returnToField: self.returnToField ? originalField : nil, needsField: needsField,
                               onWait: lastDelivery == nil && (!needsField || originalField != nil) ? { timer in
                                   self.waitingPaste = (timer, action.text)
@@ -1204,7 +1207,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                         self.waitingPaste = nil
                         self.overlay?.processing(audioSeconds: audioSeconds, correction: correctionEnabled)
                     }
-                    guard correctionEnabled, reason == nil, delivery != "history" else { finish(delivery, reason, action: action); return }
+                    guard correctionEnabled, info["error"] == nil, reason == nil, delivery != "history" else { finish(delivery, reason, action: action); return }
                     self.commands.executed(action)
                     self.overlay?.confirmAction(action)
                     lastDelivery = delivery
@@ -1233,22 +1236,8 @@ final class TalkService: NSObject, NSApplicationDelegate {
             case .failure(let error):
                 info["error"] = error.localizedDescription
                 info["status"] = lastDelivery == nil ? "fallback" : "partial"
-                func recover() {
-                    var retry: (() -> Void)?
-                    if self.paste, let timeout = error as? CorrectionTimeout {
-                        retry = { [finishedID = id] in
-                            guard let next = self.session.retryProcessing(finishedID) else { return }
-                            id = next; started = ProcessInfo.processInfo.systemUptime
-                            info["status"] = "applied"; info["error"] = nil
-                            self.idleRelease?.cancel(); self.hotkey?.captureEscape(true)
-                            self.overlay?.processing(audioSeconds: audioSeconds, correction: true)
-                            timeout.retry()
-                        }
-                    }
-                    finish(lastDelivery ?? (self.paste ? "history" : "stdout"), retry: retry)
-                }
-                if lastDelivery != nil || response["history_saved"] as? Bool == true { recover() }
-                else { save(.paste(original), then: recover) }
+                Paste.log.error("AI correction failed: \(error.localizedDescription, privacy: .public)")
+                perform(.paste(original)) { _ in }
             }
         }
     }
