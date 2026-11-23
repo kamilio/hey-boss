@@ -46,9 +46,23 @@ impl Definition {
     }
     pub fn launch(&self, args: &[OsString]) -> io::Result<Command> {
         self.validate()?;
-        let mut command = Command::new("/bin/sh");
+        // Fleet services have a minimal PATH. Resolve destination tools using
+        // the user's terminal startup files, including Node version managers.
+        let remote = self.destination.is_some();
+        let shell = if remote {
+            std::env::var_os("SHELL").filter(|shell| !shell.is_empty())
+        } else {
+            None
+        };
+        let mut command = Command::new(shell.unwrap_or_else(|| "/bin/sh".into()));
+        if remote {
+            // Keep configured commands' existing POSIX shell semantics.
+            command.args(["-lic", "exec /bin/sh -c \"$@\"", "hey-boss-utils"]);
+        } else {
+            command.arg("-c");
+        }
         command
-            .args(["-c", &format!("{} \"$@\"", self.command), "hey-boss-utils"])
+            .args([&format!("{} \"$@\"", self.command), "hey-boss-utils"])
             .args(args);
         Ok(command)
     }
@@ -169,6 +183,51 @@ fn execute_inner(request: &Value, timeout: Duration) -> io::Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn destination_shell_resolves_updated_terminal_tools_and_preserves_arguments() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::current_dir()
+            .unwrap()
+            .join(format!(".utility-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(root.join(".zprofile"), "export UTILITY_LOGIN_READY=yes\n").unwrap();
+        std::fs::write(root.join(".zshrc"), "export PATH=\"$ZDOTDIR/bin:$PATH\"\n").unwrap();
+        let tool = root.join("bin/wire");
+        let definition = Definition {
+            command: "wire".into(),
+            destination: Some("local".into()),
+            global: false,
+        };
+        let args = ["two words", "", "$(touch injected)", "--help"].map(OsString::from);
+        let launch = definition.launch(&args).unwrap();
+        assert_eq!(
+            launch.get_program(),
+            std::env::var_os("SHELL")
+                .filter(|shell| !shell.is_empty())
+                .unwrap_or_else(|| "/bin/sh".into())
+        );
+        for version in ["first", "updated"] {
+            std::fs::write(
+                &tool,
+                format!("#!/bin/sh\nprintf '%s\\0' {version} \"$UTILITY_LOGIN_READY\" \"$@\"\n"),
+            )
+            .unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let output = Command::new("/bin/zsh")
+                .args(launch.get_args())
+                .env("ZDOTDIR", &root)
+                .env("PATH", "/usr/bin:/bin")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                output.stdout,
+                format!("{version}\0yes\0two words\0\0$(touch injected)\0--help\0").as_bytes()
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn shell_function_keeps_fixed_suffix_after_caller_arguments() {
         let result = execute(&json!({

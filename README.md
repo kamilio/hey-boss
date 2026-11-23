@@ -61,6 +61,8 @@ Configured names override built-ins. Without `destination`, the command inherits
 the caller's directory, environment, and terminal. A destination names an existing
 `machines` key (`local` means the supervisor); its command runs in that user's home
 through the existing fleet tunnel, without caller-to-destination SSH setup.
+Destination commands load the user's login and interactive shell startup files
+before running, so names such as `wire` use the terminal's PATH.
 Utility dispatch, execution, replies, and keepalives run independently of database
 synchronization, so a slow pull does not hold up commands or disconnect a live peer.
 Destination runs are noninteractive: piped stdin and both output streams preserve
