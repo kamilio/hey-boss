@@ -1,0 +1,6 @@
+.build/
+dist/
+renderer/target/
+web/node_modules/
+Sources/Sticky/Resources/diagrams.js
+Sources/Sticky/Resources/diagrams.js.LEGAL.txt

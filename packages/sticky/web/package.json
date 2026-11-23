@@ -1,0 +1,12 @@
+{
+  "name": "sticky-diagrams",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.12",
+    "mermaid": "11.17.2"
+  }
+}
