@@ -375,7 +375,7 @@ function updateHeader() {
   $$('[role="tab"][data-state]').forEach((b) => {
     const selected = b.dataset.state === model.route.state;
     const filtered = model.route.state === "all" && (model.route.states || "").split(",").includes(b.dataset.state);
-    b.classList.toggle("selected", selected || filtered);
+    b.classList.toggle("selected", filtered || (selected && !model.route.states));
     b.setAttribute("aria-description", filtered ? "Included in State filter" : "");
     b.setAttribute("aria-selected", selected);
     b.tabIndex = selected ? 0 : -1;
