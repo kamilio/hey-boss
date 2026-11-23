@@ -29,7 +29,9 @@ reasoning defaults to medium when available. Use - for message stdin.
 Schedule examples: {"type":"once","runAt":"2027-01-01T09:00:00Z"},
 {"type":"interval","everyMs":3600000}, {"type":"fixed_time","timeOfDay":"09:30"}.
 Reads and changes print JSON. Use the link field from hey-t3 list.
-Remote threads use machines already connected in Hey Boss.`;
+Projects, lists, and search include machines already connected in Hey Boss.
+Project commands use the first match: this Mac, then connected machines.
+Use a project ID or --env to choose a specific match.`;
 const home = join(homedir(), '.t3');
 const idFile = join(home, 'userdata/environment-id');
 const localID = () => readFileSync(idFile, 'utf8').trim().toLowerCase();
@@ -274,8 +276,8 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
     if (op === 'projects') return shell.projects;
     const key = ['start', 'project'].includes(op) ? arg : options.project;
     const projects = shell.projects.filter((p) => [p.id, p.title, p.workspaceRoot].includes(key));
-    if (key !== undefined && projects.length !== 1)
-      throw Error('Project missing or ambiguous; use an ID from hey-t3 projects.');
+    if (key !== undefined && !projects.length)
+      throw Error('Project missing; use an ID from hey-t3 projects.');
     const project = projects[0];
     if (op === 'project') return project;
     const threads = [...shell.threads, ...(shell.archivedThreads ?? [])];
@@ -475,29 +477,54 @@ function companionArgs(socket) {
   ];
 }
 
-async function connection(environment) {
+async function connections() {
   const dir = join(homedir(), '.local/share/hey-boss');
   const sockets = existsSync(dir)
     ? readdirSync(dir, { withFileTypes: true }).filter(
         (entry) => entry.isSocket() && /^ssh-[a-f0-9]{16}\.sock$/.test(entry.name),
       )
     : [];
-  try {
-    return await Promise.any(
-      sockets.map(async ({ name }) => {
-        const path = join(dir, name);
-        const { stdout } = await promisify(execFile)(
-          '/usr/bin/ssh',
-          [...companionArgs(path), 'cat "$HOME/.t3/userdata/environment-id"'],
-          { encoding: 'utf8', timeout: 3000, maxBuffer: 8192 },
-        );
-        if (stdout.trim().split(/\r?\n/).at(-1)?.toLowerCase() !== environment) throw Error();
-        return path;
-      }),
-    );
-  } catch {
-    throw Error('This thread’s machine is not connected in Hey Boss, or T3 is unavailable on it.');
+  const hosts = existsSync(idFile) ? [{ environment: localID() }] : [];
+  const remote = await Promise.allSettled(
+    sockets.sort((a, b) => a.name.localeCompare(b.name)).map(async ({ name }) => {
+      const path = join(dir, name);
+      const { stdout } = await promisify(execFile)(
+        '/usr/bin/ssh',
+        [...companionArgs(path), 'cat "$HOME/.t3/userdata/environment-id"'],
+        { encoding: 'utf8', timeout: 3000, maxBuffer: 8192 },
+      );
+      const environment = stdout.trim().split(/\r?\n/).at(-1)?.toLowerCase();
+      if (!uuid.test(environment ?? '')) throw Error();
+      return { environment, socket: path };
+    }),
+  );
+  for (const result of remote) {
+    if (result.status === 'fulfilled' && !hosts.some(host => host.environment === result.value.environment)) hosts.push(result.value);
   }
+  return hosts;
+}
+
+export async function acrossHosts(input, hosts, request = onConnection) {
+  const key = ['start', 'project'].includes(input.op) ? input.arg : input.options.project;
+  const discovery = key === undefined ? input : { op: 'projects', options: {} };
+  const results = await Promise.allSettled(hosts.map(host => request({ ...discovery, environment: host.environment }, host.socket)));
+  const available = [];
+  for (const [index, result] of results.entries()) {
+    if (result.status === 'fulfilled') available.push({ host: hosts[index], rows: result.value });
+    else console.error(`T3 ${hosts[index].environment}: ${result.reason.message}`);
+  }
+  if (!available.length) throw Error('No reachable T3 environments were found.');
+  if (key === undefined) return available.flatMap(result => result.rows);
+  for (const { host, rows } of available) {
+    const project = rows.find(p => [p.id, p.title, p.workspaceRoot].includes(key));
+    if (!project) continue;
+    // Resolve before dispatching; a failed write must never try another host.
+    return request({ ...input, environment: host.environment,
+      arg: ['start', 'project'].includes(input.op) ? project.id : input.arg,
+      options: { ...input.options, ...(input.options.project === undefined ? {} : { project: project.id }) },
+    }, host.socket);
+  }
+  throw Error('Project not found on reachable machines; use an ID from hey-t3 projects.');
 }
 
 // Desktop bridge: closing stdin releases only the run created by this call.
@@ -591,9 +618,9 @@ async function main(args) {
   )
     throw Error(usage);
   const { environment, id } = envOps.includes(op)
-    ? { environment: (options.env ?? (op === 'list' ? arg : null) ?? localID()).toLowerCase() }
+    ? { environment: (options.env ?? (op === 'list' ? arg : undefined))?.toLowerCase() }
     : target(arg);
-  if (!uuid.test(environment)) throw Error('Invalid environment ID.');
+  if (environment !== undefined && !uuid.test(environment)) throw Error('Invalid environment ID.');
   let text =
     op === 'schedule' ? third : ['start', 'send', 'queue', 'rename'].includes(op) ? value : undefined;
   if (text === '-' && op !== 'rename') text = readFileSync(0, 'utf8');
@@ -608,24 +635,35 @@ async function main(args) {
     arg: ['schedule', 'promote'].includes(op) ? value : arg,
   };
 
-  const stdinLines = () => createInterface({ input: process.stdin })[Symbol.asyncIterator]();
-  if (existsSync(idFile) && environment === localID()) {
-    console.log(JSON.stringify(await onHost(input, guarded ? stdinLines() : null)));
+  if (environment === undefined) {
+    console.log(JSON.stringify(await acrossHosts(input, await connections())));
     return;
   }
-  const socket = await connection(environment);
+  const host = existsSync(idFile) && environment === localID()
+    ? { environment } : (await connections()).find(host => host.environment === environment);
+  if (!host) throw Error('This thread’s machine is not connected in Hey Boss, or T3 is unavailable on it.');
+  const lines = guarded ? createInterface({ input: process.stdin })[Symbol.asyncIterator]() : null;
+  console.log(JSON.stringify(await onConnection(input, host.socket, lines)));
+}
+
+async function onConnection(input, socket, lines) {
+  if (!socket) return onHost(input, lines);
+  const { guarded } = input;
   // Run the same source on the owning host. Only fixed program text enters
   // the remote shell; thread data and the focus acknowledgement travel on stdin.
   const source = readFileSync(fileURLToPath(import.meta.url), 'utf8').replaceAll("'", "'\\''");
   const entry = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" exec node --input-type=module -e '${source}' -- --worker`;
   const child = spawn('/usr/bin/ssh', [...companionArgs(socket), entry], {
-    stdio: ['pipe', 'pipe', 'inherit'],
+    stdio: ['pipe', 'pipe', 'pipe'],
     timeout: 180000,
   });
   const done = new Promise((resolve, reject) => {
     child.once('error', reject);
     child.once('close', resolve);
   });
+  let diagnostic = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { diagnostic += chunk; });
   child.stdin.on('error', () => {});
   child.stdin.write(JSON.stringify(input) + '\n');
   if (!guarded) child.stdin.end();
@@ -633,17 +671,16 @@ async function main(args) {
   for await (const line of createInterface({ input: child.stdout })) {
     if (line === 'READY' && guarded) {
       console.log('READY');
-      child.stdin.end((await stdinLines().next()).value === 'GO' ? 'GO\n' : 'STOP\n');
+      child.stdin.end((await lines.next()).value === 'GO' ? 'GO\n' : 'STOP\n');
     } else result = line;
   }
   const status = await done;
   if (status !== 0) {
     if (status === 255 || status === null)
       throw Error('The Hey Boss connection to this thread’s machine closed.');
-    process.exitCode = status;
-    return; // The worker already printed the cause on stderr.
+    throw Error(diagnostic.trim() || 'T3 failed on the connected machine.');
   }
-  console.log(JSON.stringify(JSON.parse(result)));
+  return JSON.parse(result);
 }
 
 if (

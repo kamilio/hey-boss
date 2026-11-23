@@ -5,7 +5,76 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { target, desiredCommand, recapPage, serverCLI } from './hey-t3.mjs';
+import { target, desiredCommand, recapPage, serverCLI, acrossHosts } from './hey-t3.mjs';
+
+test('default projects, thread listing and search combine connected machines in stable order', async (t) => {
+  const hosts = [{ environment: 'local' }, { environment: 'devbox', socket: 'connected' }, { environment: 'offline', socket: 'old' }];
+  const warnings = [];
+  t.mock.method(console, 'error', message => warnings.push(message));
+  for (const op of ['projects', 'list', 'search']) {
+    const rows = await acrossHosts({ op, options: {}, arg: 'query' }, hosts, async (input, socket) => {
+      assert.equal(input.op, op);
+      if (socket === 'old') throw Error('Disconnected');
+      if (!socket) await new Promise(resolve => setImmediate(resolve));
+      return [{ id: input.environment }];
+    });
+    assert.deepEqual(rows, [{ id: 'local' }, { id: 'devbox' }]);
+  }
+  assert.equal(warnings.length, 3);
+});
+
+test('project lookup, launch and filtered reads route automatically to the matching machine', async () => {
+  const hosts = [{ environment: 'local' }, { environment: 'devbox', socket: 'connected' }];
+  for (const op of ['project', 'start', 'list', 'search']) {
+    const calls = [], options = { ...(op === 'list' || op === 'search' ? { project: 'automations' } : {}), model: 'chosen-model' };
+    const input = { op, options, arg: op === 'search' ? 'query' : 'automations', text: 'exact\nmessage' };
+    const result = await acrossHosts(input, hosts, async (request, socket) => {
+      if (request.op === 'projects') return socket ? [{ id: 'remote-project', title: 'automations', workspaceRoot: '/work/automations' }] : [];
+      calls.push({ request, socket });
+      return 'accepted';
+    });
+    assert.equal(result, 'accepted');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].socket, 'connected');
+    assert.equal(calls[0].request.environment, 'devbox');
+    assert.equal(calls[0].request.text, input.text);
+    assert.equal(calls[0].request.options.model, 'chosen-model');
+    assert.equal(['project', 'start'].includes(op) ? calls[0].request.arg : calls[0].request.options.project, 'remote-project');
+    if (op === 'search') assert.equal(calls[0].request.arg, 'query');
+  }
+});
+
+test('duplicate project names choose the first host; a project ID or path chooses the other', async () => {
+  const hosts = [{ environment: 'local' }, { environment: 'remote', socket: 'connected' }];
+  const request = async input => input.op === 'projects'
+    ? [{ id: input.environment, title: 'shared', workspaceRoot: '/' + input.environment }]
+    : input.environment;
+  assert.equal(await acrossHosts({ op: 'project', arg: 'shared', options: {} }, hosts, request), 'local');
+  for (const arg of ['remote', '/remote']) {
+    assert.equal(await acrossHosts({ op: 'project', arg, options: {} }, hosts, request), 'remote');
+  }
+});
+
+test('a failed launch is never retried on another matching project', async () => {
+  const writes = [];
+  await assert.rejects(acrossHosts({ op: 'start', arg: 'shared', options: {} },
+    [{ environment: 'local' }, { environment: 'remote', socket: 'connected' }], async input => {
+      if (input.op === 'projects') return [{ id: input.environment, title: 'shared' }];
+      writes.push(input.environment);
+      throw Error('Reply lost after dispatch');
+    }), /Reply lost after dispatch/);
+  assert.deepEqual(writes, ['local']);
+});
+
+test('missing projects and unavailable environments never dispatch a launch', async (t) => {
+  t.mock.method(console, 'error', () => {});
+  const input = { op: 'start', arg: 'missing', options: {} };
+  await assert.rejects(acrossHosts(input, [], async () => assert.fail()), /No reachable/);
+  await assert.rejects(acrossHosts(input, [{ environment: 'local' }], async request => {
+    assert.equal(request.op, 'projects'); return [];
+  }), /Project not found/);
+  await assert.rejects(acrossHosts(input, [{ environment: 'local' }], async () => { throw Error('Offline'); }), /No reachable/);
+});
 
 test('authentication follows the live server across desktop nightly updates', async (t) => {
   const home = mkdtempSync(join(process.cwd(), '.hey-t3-test-'));
