@@ -9,7 +9,9 @@ the window title; the rest renders as the document. Drag the header to move,
 resize from the bottom-right corner, and click **×** to hide. That is the only
 button. The note floats above other windows like the dictation pill, never takes
 keyboard focus, and stays out of Command-Tab and the Dock. Clicking a link opens
-its destination app. Closing or hiding never deletes text; positions and sizes persist.
+its destination app. Closing or hiding never deletes text. Positions and sizes persist
+separately for each display. Disconnecting a display uses the laptop position;
+reconnecting restores the preferred display. New positions start near the top-right.
 
 Everything else is on the CLI. `sticky edit` explicitly opens a separate, large
 Markdown editor. **⌘S** saves and updates the floating note; closing the editor

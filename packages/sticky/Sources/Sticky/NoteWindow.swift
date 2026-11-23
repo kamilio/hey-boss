@@ -6,11 +6,13 @@ private final class StickyPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 private final class NoteHeader: NSView {
+    var moved: (() -> Void)?
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var mouseDownCanMoveWindow: Bool { true }
-    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event) }
+    override func mouseDown(with event: NSEvent) { window?.performDrag(with: event); moved?() }
 }
 private final class ResizeHandle: NSView {
+    var resized: (() -> Void)?
     private var originalFrame: NSRect?
     private var origin = NSPoint.zero
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
@@ -23,7 +25,7 @@ private final class ResizeHandle: NSView {
         let height = max(window.minSize.height, frame.height - point.y + origin.y)
         window.setFrame(NSRect(x: frame.minX, y: frame.maxY - height, width: width, height: height), display: true)
     }
-    override func mouseUp(with event: NSEvent) { originalFrame = nil }
+    override func mouseUp(with event: NSEvent) { originalFrame = nil; resized?() }
 }
 
 final class NoteWindow: NSObject, NSWindowDelegate {
@@ -33,10 +35,12 @@ final class NoteWindow: NSObject, NSWindowDelegate {
     private var note: Note
     private let saveNote: (Note) throws -> Void
     private var editor: NoteEditor?
+    private let placement: NotePlacement
     var dirty: Bool { editor?.dirty ?? false }
     var id: String { note.id }
     init(note: Note, position: Int, save: @escaping (Note) throws -> Void) throws {
         self.note = note; self.saveNote = save
+        placement = NotePlacement(id: note.id, position: position)
         let panel = StickyPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 420), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         window = panel
         super.init()
@@ -55,6 +59,7 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         glass.style = .regular; glass.cornerRadius = 22
         glass.contentView = content; panel.contentView = glass
         let header = NoteHeader(frame: NSRect(x: 0, y: 358, width: 400, height: 62))
+        header.moved = { [weak self] in self?.saveFrame() }
         header.autoresizingMask = [.width, .minYMargin]; content.addSubview(header)
         heading.frame = NSRect(x: 26, y: 17, width: 310, height: 27)
         heading.font = .systemFont(ofSize: 19, weight: .semibold); heading.textColor = .labelColor
@@ -70,18 +75,14 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         renderer.web.frame = NSRect(x: 0, y: 10, width: 400, height: 348)
         renderer.web.autoresizingMask = [.width, .height]; content.addSubview(renderer.web)
         let resize = ResizeHandle(frame: NSRect(x: 374, y: 4, width: 20, height: 20))
+        resize.resized = { [weak self] in self?.saveFrame() }
         resize.autoresizingMask = [.minXMargin, .maxYMargin]; content.addSubview(resize)
         renderer.ready = { [weak self] result in
             if case .failure(let error) = result { self?.heading.toolTip = error.localizedDescription }
         }
         try render(note)
-        if let frame = UserDefaults.standard.string(forKey: "frame.\(note.id)") {
-            panel.setFrame(NSRectFromString(frame), display: false)
-        } else if let screen = NSScreen.main {
-            let area = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: area.maxX - 432 - CGFloat(position * 28), y: area.maxY - 460 - CGFloat(position * 28)))
-        }
-        if !NSScreen.screens.contains(where: { $0.visibleFrame.intersects(panel.frame) }) { panel.center() }
+        restoreFrame()
+        NotificationCenter.default.addObserver(self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
     private func render(_ value: Note) throws {
         note = value; window.title = value.title; heading.stringValue = value.title
@@ -101,11 +102,19 @@ final class NoteWindow: NSObject, NSWindowDelegate {
         }
         editor?.show()
     }
-    func show() { window.orderFrontRegardless() }
+    func show() { restoreFrame(); window.orderFrontRegardless() }
     @objc func hideNote() { window.orderOut(nil) }
     func windowShouldClose(_ sender: NSWindow) -> Bool { hideNote(); return false }
-    func windowDidMove(_ notification: Notification) { saveFrame() }
-    func windowDidResize(_ notification: Notification) { saveFrame() }
-    private func saveFrame() { UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: "frame.\(note.id)") }
-    func invalidate() { renderer.invalidate(); window.orderOut(nil) }
+    @objc private func screensChanged() {
+        // Let AppKit finish moving windows after a display change before restoring ours.
+        DispatchQueue.main.async { [weak self] in self?.restoreFrame() }
+    }
+    private func restoreFrame() {
+        if let frame = placement.frame(on: NoteScreen.current) { window.setFrame(frame, display: true) }
+    }
+    private func saveFrame() {
+        // Only user drags/resizes save positions; AppKit's disconnect fallback must not overwrite them.
+        placement.save(window.frame, on: NoteScreen.current)
+    }
+    func invalidate() { NotificationCenter.default.removeObserver(self); renderer.invalidate(); window.orderOut(nil) }
 }

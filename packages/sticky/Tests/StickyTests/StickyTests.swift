@@ -8,7 +8,10 @@ final class StickyTests: XCTestCase {
         app.setActivationPolicy(.accessory)
         let previous = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let note = try NoteWindow(note: Note(id: "passive-test", markdown: "# Focus\n\nA passive note."), position: 0, save: { _ in })
-        defer { note.invalidate(); UserDefaults.standard.removeObject(forKey: "frame.passive-test") }
+        defer {
+            note.invalidate()
+            for key in ["frame", "frames", "screen"] { UserDefaults.standard.removeObject(forKey: "\(key).passive-test") }
+        }
         note.show()
         RunLoop.current.run(until: Date().addingTimeInterval(0.1))
         XCTAssertTrue(note.window.isVisible)
@@ -19,6 +22,7 @@ final class StickyTests: XCTestCase {
         XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, previous)
         let surface = try XCTUnwrap(note.window.contentView as? NSGlassEffectView)
         let handle = try XCTUnwrap(surface.contentView?.subviews.last)
+        note.window.setFrameOrigin(NSPoint(x: note.window.frame.minX - 100, y: note.window.frame.minY))
         let start = NSPoint(x: 384, y: 12)
         XCTAssertTrue(surface.hitTest(start) === handle)
         let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: start, modifierFlags: [], timestamp: 0, windowNumber: note.window.windowNumber, context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
@@ -26,6 +30,11 @@ final class StickyTests: XCTestCase {
         handle.mouseDown(with: down); handle.mouseDragged(with: drag); handle.mouseUp(with: drag)
         XCTAssertEqual(note.window.frame.size, NSSize(width: 440, height: 520))
         XCTAssertFalse(note.window.isKeyWindow)
+        let savedFrame = note.window.frame
+        note.window.setFrameOrigin(NSPoint(x: savedFrame.minX - 50, y: savedFrame.minY))
+        NotificationCenter.default.post(name: NSApplication.didChangeScreenParametersNotification, object: app)
+        RunLoop.current.run(until: Date().addingTimeInterval(0.1))
+        XCTAssertEqual(note.window.frame, savedFrame, "Automatic display moves must not overwrite the user's placement")
         note.hideNote()
         XCTAssertFalse(note.window.isVisible)
         XCTAssertEqual(NSWorkspace.shared.frontmostApplication?.processIdentifier, previous)
