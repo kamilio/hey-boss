@@ -112,6 +112,20 @@ final class PasteTests: XCTestCase {
         }
     }
 
+    func testFocusChangeWhilePreparingClipboardNeverPostsPaste() {
+        board.setString("original", forType: .string)
+        var checks = 0
+        Paste.send("Dictated text", shouldPressEnter: { true }, check: {
+            checks += 1
+            return checks == 1 ? nil : .focusChanged
+        }, isCurrent: { true }, board: board,
+                   post: { _, _ in XCTFail("Focus changed before Command-V"); return true },
+                   afterPaste: { _ in XCTFail("Nothing was pasted") }) { delivery, reason in
+            XCTAssertEqual(delivery, "history"); XCTAssertEqual(reason, .focusChanged)
+        }
+        XCTAssertEqual(board.string(forType: .string), "original")
+    }
+
     func testRepeatedShortcutCannotCaptureTemporaryClipboardAsOriginal() {
         board.setString("original", forType: .string)
         var pending: (() -> Void)?

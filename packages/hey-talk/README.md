@@ -20,8 +20,8 @@ starting another dictation replaces it. The transcript stays in History.
 brings the destination window forward and focuses the original input. It can
 recognize the same T3 message box after a thread rename or editor replacement,
 find a replaced Slack composer, or reselect a cmux terminal tab in
-the same workspace. After two seconds it stops trying to move focus. While a
-paste is pending, it only checks whether you’ve returned; Esc cancels the wait.
+the same workspace. It keeps restoring the destination until keyboard focus is
+confirmed and the text can be inserted; Esc cancels the wait.
 Turn it off in the waveform menu or the pill’s right-click menu to return manually.
 
 To inspect a missed paste, run `/usr/bin/log show --last 1h --style compact --predicate 'subsystem == "local.hey-talk" AND category == "paste"'`.

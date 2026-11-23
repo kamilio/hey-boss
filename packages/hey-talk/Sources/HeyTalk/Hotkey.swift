@@ -245,20 +245,21 @@ enum Paste {
                 }
             }
         }
-        func retry(_ onWait: (Timer) -> Void, restoring field: FocusedInput? = nil) {
-            let deadline = ProcessInfo.processInfo.systemUptime + 2
+        func retry(_ onWait: (Timer) -> Void) {
+            var nextRestore = ProcessInfo.processInfo.systemUptime + 1
             var expectedTab: AXUIElement?
-            var reportedDeadline = false
             let timer = Timer(timeInterval: 0.35, repeats: true) { timer in
                 guard isCurrent() else { timer.invalidate(); return }
                 if check() == .focusChanged {
-                    if let field, ProcessInfo.processInfo.systemUptime < deadline {
+                    if let field = returnToField {
+                        let now = ProcessInfo.processInfo.systemUptime
+                        if now >= nextRestore {
+                            field.restoreFocus()
+                            nextRestore = now + 1
+                        }
                         if let expectedTab, SpeechAX.value(expectedTab, kAXSelectedAttribute) as? Bool != true { return }
                         if let next = field.stepTowardCmuxTab() { expectedTab = next }
                         else { field.focusReturnedField() }
-                    } else if field != nil && !reportedDeadline {
-                        log.notice("Return: two seconds elapsed; waiting for manual focus")
-                        reportedDeadline = true
                     }
                     return
                 }
@@ -268,10 +269,10 @@ enum Paste {
             timer.tolerance = 0.05
             RunLoop.main.add(timer, forMode: .common)
             onWait(timer)
+            if timer.isValid, isCurrent() { returnToField?.restoreFocus() }
         }
         if windowThread == nil, let onWait, check() == .focusChanged {
-            retry(onWait, restoring: returnToField)
-            returnToField?.restoreFocus()
+            retry(onWait)
         } else { paste() }
     }
 
@@ -310,7 +311,12 @@ enum Paste {
             }
             pasting = false
         }
-        guard written, post(9, .maskCommand) else {
+        guard written else {
+            restore(); completion("history", .eventUnavailable); return
+        }
+        guard isCurrent() else { restore(); completion("history", nil); return }
+        if let reason = check() { restore(); completion("history", reason); return }
+        guard post(9, .maskCommand) else {
             restore(); completion("history", .eventUnavailable); return
         }
         // Keep the text available while the target handles Command-V, even in paste-only mode.

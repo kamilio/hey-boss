@@ -55,6 +55,8 @@ struct ConversationFocus {
                 guard current() else { throw TalkError("The conversation target changed.") }
                 if field.isFocused() { break }
                 try await Task.sleep(nanoseconds: 50_000_000)
+                guard current() else { throw TalkError("The conversation target changed.") }
+                field.restoreFocus()
             }
         }
         guard current(), field.isFocused() else { throw TalkError("Could not return to the original field. Nothing was pasted.") }

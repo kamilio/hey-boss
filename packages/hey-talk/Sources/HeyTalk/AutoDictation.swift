@@ -237,13 +237,25 @@ struct FocusedInput: Equatable {
             Paste.log.notice("Return: original window unavailable")
             return
         }
-        if !app.isActive && !app.activate(options: []), let bundle = app.bundleURL {
+        // Activating an already-active app does not release another app's
+        // nonactivating panel. Transfer activation through our accessory app.
+        if NSWorkspace.shared.frontmostApplication == app && Self.keyboardApp != app {
+            Paste.log.notice("Return: active app does not own the keyboard; reactivating")
+            NSApp.activate(); return
+        }
+        NSApp.yieldActivation(to: app)
+        if !app.activate(options: []), let bundle = app.bundleURL {
             NSWorkspace.shared.openApplication(at: bundle, configuration: .init())
         }
         AXUIElementPerformAction(window, kAXRaiseAction as CFString)
         if cmuxTab.map({ Self.value($0, kAXSelectedAttribute) as? Bool == true }) ?? true, Self.identify(element, app: app) == self,
            AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success, isFocused() { return }
+        focusReturnedField()
+        if isFocused() { return }
         guard composerLabel != nil, let document, let bundle = app.bundleURL else { return }
+        // A slow editor mount only needs focus retries, not repeated navigation.
+        if app.bundleIdentifier == "com.t3tools.t3code",
+           BrowserPage.page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.12)?.url.absoluteString == document { return }
         let link = app.bundleIdentifier == "com.tinyspeck.slackmacgap" && document.hasPrefix("slack://channel?")
             ? URL(string: document) : Self.composerLink(document)
         guard let link else { Paste.log.notice("Return: no link for original composer"); return }
@@ -312,7 +324,7 @@ struct FocusedInput: Equatable {
               Self.equal(Self.axElement(AXUIElementCreateApplication(app.processIdentifier), kAXFocusedWindowAttribute), window) else { return }
         if let cmuxTab, Self.value(cmuxTab, kAXSelectedAttribute) as? Bool != true { return }
         if Self.identify(element, app: app) == self,
-           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success { return }
+           AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue) == .success, isFocused() { return }
         guard composerLabel != nil else { return }
         guard let editor = remountedEditor() else { return }
         AXUIElementSetAttributeValue(editor, kAXFocusedAttribute as CFString, kCFBooleanTrue)
