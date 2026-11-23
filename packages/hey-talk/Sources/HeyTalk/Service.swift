@@ -17,6 +17,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private var correctionMenuItem: NSMenuItem?
     private var overlayMenuItem: NSMenuItem?
     private let selectionCapture = SelectionCapture()
+    private var recordingSelections: [Task<SelectionCapture.Selection?, Never>] = []
     private let speech = SpeechController()
     private var speechWasActive = false
     private let history: DictationHistory
@@ -165,7 +166,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: ""); item.target = self; menu.addItem(item)
             if action == #selector(toggleOverlay) { overlayMenuItem = item }
         }
-        menu.insertItem(selectionCapture.menuItem(), at: 4)
         menuItem?.menu = menu
         let autoItem = NSMenuItem(title: "Auto Mode", action: #selector(toggleAutoMode), keyEquivalent: "")
         autoItem.target = self; menu.insertItem(autoItem, at: 2); autoMenuItem = autoItem
@@ -219,7 +219,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if pausedConversation != nil { cancel(keepMicrophoneWarm: false) }
         return .terminateLater
     }
-    func applicationWillTerminate(_ notification: Notification) { selectionCapture.stop(); speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); correction.cancel(); history.finishPendingWrites() }
+    func applicationWillTerminate(_ notification: Notification) { speech.shutdown(); vocabularyTimer?.cancel(); focusMonitor.stop(); autoSubmitKey.stop(); capture.cancel(); inference.cancel(); correction.cancel(); history.finishPendingWrites() }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         showOverlay(true); showHistory(); return true
@@ -329,7 +329,6 @@ final class TalkService: NSObject, NSApplicationDelegate {
             conversationFocus = ConversationFocus(app: app)
         }
         let previous = conversation != nil
-        selectionCapture.setConversation(next)
         conversation = next; conversationLevel = 0
         if next != nil || previous {
             overlay?.showConversation(next)
@@ -414,7 +413,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case .insertLast: insertLast()
         case .toggleSpeech: speech.toggle()
         case .toggleSpeechMode: speech.toggleEnabled()
-        case .captureSelection: selectionCapture.insertSelection()
+        case .captureSelection: captureSelection()
         case .catchUp: catchUp()
         case .cancel:
             if openingConversation { controlConversation("stop"); return }
@@ -441,7 +440,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     }
     private func showOverlay(_ show: Bool) {
         if overlay == nil {
-            let view = Overlay(selectionCapture: selectionCapture)
+            let view = Overlay()
             view.onCancelPaste = { [weak self] in self?.cancelDictation() }
             view.onToggle = { [weak self] in self?.toggle() }
             view.onToggleSpeech = { [weak self] in self?.speech.toggleEnabled() }
@@ -921,6 +920,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let id: UInt64
         do { id = try session.begin(listening: focusedInput != nil) } catch { reply(failure(error.localizedDescription)); return }
         speech.stop()
+        recordingSelections = []
         pendingStartReply = reply
         error = nil; captureReady = false; captureMilliseconds = 0
         self.paste = paste; self.pressEnter = pressEnter; transcriptionSource = "microphone"
@@ -959,6 +959,21 @@ final class TalkService: NSObject, NSApplicationDelegate {
         if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined {
             AVCaptureDevice.requestAccess(for: .audio) { _ in DispatchQueue.main.async(execute: begin) }
         } else { begin() }
+    }
+    private func captureSelection() {
+        let dictating = session.phase == .recording || session.phase == .listening
+        guard dictating || session.phase != .processing else {
+            selectionCapture.toast("Selection not added", "Wait for dictation to finish, then capture for your next message."); return
+        }
+        let id = session.generation
+        let chat = conversation?["selection_chat"] as? String
+        let task = selectionCapture.capture()
+        if dictating { recordingSelections.append(task) }
+        Task { @MainActor in
+            guard let selection = await task.value, self.session.generation == id else { return }
+            if !dictating { guard self.conversation?["selection_chat"] as? String == chat else { return } }
+            self.selectionCapture.show(selection, insert: !dictating, chat: dictating ? nil : chat)
+        }
     }
     private func recordingBegan() {
         previousCommands = commands.beginRecording()
@@ -1040,23 +1055,26 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func decode(_ samples: [Float], id: UInt64, snapshot: ContextSnapshot? = nil) {
         let audioSeconds = Double(samples.count) / 16_000
         let useCorrection = correctionSettings.enabled
+        let captures = recordingSelections; recordingSelections = []
         overlay?.processing(audioSeconds: audioSeconds, correction: useCorrection)
         hotkey?.captureEscape(true)
         inference.transcribe(samples) { result in Task { @MainActor in
             let context = useCorrection ? await snapshot?.value : nil
+            var selections: [SelectionCapture.Selection] = []
+            for capture in captures { if let selection = await capture.value { selections.append(selection) } }
             guard self.session.generation == id else { return }
             switch result {
             case .failure(let error): self.fail(error.localizedDescription)
             case .success(let (text, elapsed)):
                 guard !text.isEmpty else { self.noSpeechDetected(id: id); return }
                 self.deliverTranscript(text, context: context, correctionEnabled: useCorrection, id: id,
-                                       audioSeconds: audioSeconds, elapsed: elapsed)
+                                       audioSeconds: audioSeconds, elapsed: elapsed, selections: selections)
             }
         } }
     }
 
     private func deliverTranscript(_ original: String, context: (text: String?, milliseconds: Double)?, correctionEnabled: Bool,
-                                   id generation: UInt64, audioSeconds: Double, elapsed: Double) {
+                                   id generation: UInt64, audioSeconds: Double, elapsed: Double, selections: [SelectionCapture.Selection]) {
         var id = generation
         var started = ProcessInfo.processInfo.systemUptime
         let target = self.target, host = recordingHost, automatic = autoTarget
@@ -1100,6 +1118,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
         }
         // Keep each tool's text recoverable before touching the original field.
         func save(_ action: CorrectionAction, then: @escaping () -> Void) {
+            let action = SelectionCapture.Selection.attaching(selections, to: action)
             let entry = Dictation(text: action.text, originalText: original, audioSeconds: audioSeconds,
                                   source: transcriptionSource, appContext: context?.text)
             history.save(entry) { saved in
@@ -1131,6 +1150,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
             }
             let originalField = field
             save(action) {
+                let action = SelectionCapture.Selection.attaching(selections, to: action)
                 guard self.paste else { finish("stdout"); return }
                 if case .addVocabularyTerm(let term) = action {
                     self.refreshVocabulary(["add", term]) { result in
@@ -1247,6 +1267,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func cancel(keepMicrophoneWarm: Bool = true) {
         captureReady = false
         recordingContext?.cancel(); recordingContext = nil
+        recordingSelections = []
         clearAutomatic()
         session.cancel(); maximumDuration?.cancel(); maximumDuration = nil
         capture.cancel(keepWarm: keepMicrophoneWarm); returnMicrophoneToConversation(); inference.cancel(); correction.cancel(); hotkey?.reset(); overlay?.update(.idle)
@@ -1256,6 +1277,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
     private func fail(_ message: String, keepMicrophoneWarm: Bool = false) {
         captureReady = false
         recordingContext?.cancel(); recordingContext = nil
+        recordingSelections = []
         clearAutomatic()
         capture.cancel(keepWarm: keepMicrophoneWarm); returnMicrophoneToConversation(); session.fail(session.generation); hotkey?.reset()
         correction.cancel()

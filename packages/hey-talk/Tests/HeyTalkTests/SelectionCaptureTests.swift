@@ -2,46 +2,17 @@ import XCTest
 @testable import HeyTalk
 
 final class SelectionCaptureTests: XCTestCase {
-    @MainActor func testCaptureChoicesSurviveChatChangesAndStayInTheirOwnMode() throws {
-        let suite = UUID().uuidString
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
-        defer { defaults.removePersistentDomain(forName: suite) }
-        let capture = SelectionCapture(defaults: defaults)
-        let statusItem = capture.menuItem()
-        capture.setConversation(["selection_chat": "first"])
-        XCTAssertTrue(capture.shouldMonitor)
-        XCTAssertEqual(capture.menuItem(.dictation).state, .off)
-        XCTAssertTrue(capture.validateMenuItem(statusItem))
-        XCTAssertEqual(statusItem.state, .on)
-
-        capture.setConversation(nil)
-        XCTAssertFalse(capture.shouldMonitor, "Leaving a voice chat must not enable dictation capture")
-        defaults.set(true, forKey: SelectionCapture.Mode.dictation.rawValue)
-        let dictationItem = capture.menuItem(.dictation)
-        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(dictationItem.action), to: dictationItem.target, from: dictationItem))
-        capture.setConversation(["selection_chat": "first"])
-        XCTAssertTrue(capture.shouldMonitor, "Turning off dictation capture must not mute chat capture")
-
-        let chatItem = capture.menuItem(.conversation)
-        XCTAssertTrue(NSApplication.shared.sendAction(try XCTUnwrap(chatItem.action), to: chatItem.target, from: chatItem))
-        capture.setConversation([:]) // microphone paused
-        capture.setConversation(["selection_chat": "first"])
-        XCTAssertFalse(capture.shouldMonitor)
-        capture.setConversation(nil)
-        XCTAssertFalse(capture.shouldMonitor)
-        capture.setConversation(["selection_chat": "second"])
-        XCTAssertFalse(capture.shouldMonitor)
-
-        defaults.set(true, forKey: SelectionCapture.Mode.dictation.rawValue)
-        let relaunched = SelectionCapture(defaults: defaults)
-        relaunched.setConversation(nil)
-        XCTAssertTrue(relaunched.shouldMonitor)
-        relaunched.setConversation([:])
-        XCTAssertFalse(relaunched.shouldMonitor)
-        relaunched.setConversation(["selection_chat": "second"])
-        XCTAssertFalse(relaunched.shouldMonitor)
-        XCTAssertEqual(relaunched.menuItem(.conversation).state, .off)
-        XCTAssertEqual(relaunched.menuItem(.dictation).state, .on)
+    func testDictationPreservesExactSelectionsAfterCorrectionAndWithoutCorrection() {
+        let selections = [
+            SelectionCapture.Selection(time: Date(), source: "Safari · Address bar", text: "https://example.com/a?q=b&c=d"),
+            SelectionCapture.Selection(time: Date(), source: "TextEdit", text: "first\nsecond [1] ```")
+        ]
+        let expected = "Check these [1] [2]\n\n[1] Safari · Address bar\nhttps://example.com/a?q=b&c=d\n\n[2] TextEdit\nfirst\nsecond [1] ```"
+        XCTAssertEqual(SelectionCapture.Selection.attaching(selections, to: .paste("Check these")), .paste(expected))
+        XCTAssertEqual(SelectionCapture.Selection.attaching(selections, to: .newThread(project: "test", text: "Check these")), .newThread(project: "test", text: expected))
+        XCTAssertEqual(SelectionCapture.Selection.attaching([], to: .paste("Unchanged")), .paste("Unchanged"))
+        XCTAssertEqual(SelectionCapture.Selection.attaching(selections, to: .rename("Title")), .rename("Title"))
+        XCTAssertEqual(SelectionCapture.Selection.attaching(selections, to: .clearInput), .clearInput)
     }
 
     func testBrowserAddressFieldsAreDistinctFromOtherSearchFields() {
