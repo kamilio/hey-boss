@@ -9880,6 +9880,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             button.image = NSImage(systemSymbolName: done ? (failed ? "exclamationmark.circle" : "checkmark.circle") : "terminal", accessibilityDescription: done ? (failed ? "Failed" : "Completed") : "Running")
             button.imagePosition = .imageLeading; button.isBordered = false; button.contentTintColor = failed ? .systemOrange : .secondaryLabelColor
             button.lineBreakMode = .byTruncatingMiddle; button.target = self; button.action = #selector(showTool(_:))
+            button.setContentCompressionResistancePriority(.init(249), for: .horizontal)
             if tools[id] == nil { tools[id] = button; turns.addArrangedSubview(button); button.widthAnchor.constraint(lessThanOrEqualTo: turns.widthAnchor).isActive = true }
             let result = item["aggregatedOutput"] as? String ?? (item["result"] ?? item["changes"]).map { String(describing: $0) } ?? ""
             details[button] = title + (result.isEmpty ? "" : "\n\n" + String(result.prefix(10000)))
@@ -9911,6 +9912,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         button.imagePosition = .imageLeading; button.isBordered = false
         button.contentTintColor = failed ? .systemOrange : .tertiaryLabelColor
         button.lineBreakMode = .byTruncatingTail; button.toolTip = activity.state + (activity.provider == nil ? " · Show command and output" : " · Show request and response")
+        // Let the split view resize before preserving the full tool title.
+        button.setContentCompressionResistancePriority(.init(249), for: .horizontal)
         button.setAccessibilityLabel(activity.description + " · " + activity.state)
         button.target = self; button.action = #selector(showTool(_:))
         if tools[activity.id] == nil {

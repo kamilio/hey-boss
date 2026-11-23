@@ -50,6 +50,26 @@ func audit() {
         precondition((saved["draftSelections"] as? [[String:Any]])?.compactMap { $0["text"] as? String } == ["Keep this quote"])
         precondition(descendants(view).compactMap { $0 as? NSButton }.contains { $0.title == "[1] Keep this quote" })
         print("PASS sidebar filtering and individual attachment removal, renumbering and draft persistence")
+        chat.window.makeKeyAndOrderFront(nil)
+        let split = chat.window.contentViewController as! NSSplitViewController
+        for input in [["description": String(repeating: "Inspect a long tool description. ", count: 80)],
+                      ["command": String(repeating: "long-command ", count: 80)]] {
+            chat.event(["ToolStarted": ["id": UUID().uuidString, "input": input]])
+            chat.window.setContentSize(NSSize(width: 860, height: 610))
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            precondition(abs(chat.window.frame.width - 860) < 1, "Tool titles must truncate instead of imposing a minimum window width")
+            split.splitView.setPosition(190, ofDividerAt: 0)
+            view.layoutSubtreeIfNeeded()
+            let narrow = split.splitViewItems[0].viewController.view.frame.width
+            split.splitView.setPosition(280, ofDividerAt: 0)
+            view.layoutSubtreeIfNeeded()
+            precondition(split.splitViewItems[0].viewController.view.frame.width > narrow + 60, "Long tool titles must not pin the sidebar divider")
+            chat.window.performZoom(nil)
+            RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+            precondition(chat.window.frame.width <= chat.window.screen!.visibleFrame.width + 1, "Zoom must fit the screen")
+        }
+        chat.window.close()
+        print("PASS long tool descriptions and commands allow window resizing, sidebar resizing and zoom")
         return
     }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PHONE_QUEUE"] {
