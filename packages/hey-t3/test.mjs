@@ -1,10 +1,61 @@
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { target, desiredCommand, recapPage } from './hey-t3.mjs';
+import { target, desiredCommand, recapPage, serverCLI } from './hey-t3.mjs';
+
+test('authentication follows the live server across desktop nightly updates', async (t) => {
+  const home = mkdtempSync(join(process.cwd(), '.hey-t3-test-'));
+  const cli = (path, version) => {
+    mkdirSync(path, { recursive: true });
+    writeFileSync(join(path, 't3'), `#!/bin/sh\necho 't3 v${version}'\n`, { mode: 0o755 });
+  };
+  try {
+    const current = '0.1.12-nightly.20261123.5138', running = '0.1.11-nightly.20261119.4928';
+    cli(join(home, 'bin'), current);
+    const name = `t3-${running}-${process.platform}-${process.arch}`;
+    cli(join(home, name), running);
+    const archive = join(home, 'runtime.tar.gz');
+    assert.equal(spawnSync('tar', ['-czf', archive, '-C', home, name]).status, 0);
+    const bytes = readFileSync(archive), checksum = createHash('sha256').update(bytes).digest('hex');
+    const urls = [];
+    t.mock.method(globalThis, 'fetch', async url => {
+      urls.push(url);
+      return new Response(url.endsWith('/SHA256SUMS') ? `${checksum}  ${name}.tar.gz\n` : bytes);
+    });
+    assert.equal(await serverCLI(home, current), join(home, 'bin/t3'));
+    assert.equal(urls.length, 0);
+    const cached = await serverCLI(home, running);
+    assert.equal(cached, join(home, 'caches/hey-t3', running, 't3'));
+    assert.deepEqual(urls, ['SHA256SUMS', `${name}.tar.gz`].map(file => `https://github.com/pingdotgg/t3code/releases/download/v${running}/${file}`));
+    assert.equal(await serverCLI(home, running), cached);
+    assert.equal(urls.length, 2);
+    // Once the server restarts into the new nightly, use its installed CLI.
+    assert.equal(await serverCLI(home, current), join(home, 'bin/t3'));
+    await assert.rejects(serverCLI(home, '../invalid'), /Invalid T3 server version/);
+    assert.equal(urls.length, 2);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a damaged CLI download is rejected and its staging files are removed', async (t) => {
+  const home = mkdtempSync(join(process.cwd(), '.hey-t3-test-'));
+  const version = '1.2.3', name = `t3-${version}-${process.platform}-${process.arch}.tar.gz`;
+  t.mock.method(globalThis, 'fetch', async url => new Response(
+    url.endsWith('/SHA256SUMS') ? `${'0'.repeat(64)}  ${name}\n` : 'damaged archive',
+  ));
+  try {
+    await assert.rejects(serverCLI(home, version), /checksum mismatch/);
+    assert.equal(existsSync(join(home, 'caches/hey-t3', version)), false);
+    assert.deepEqual(readdirSync(join(home, 'caches/hey-t3')), []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 const env = '00000000-0000-0000-0000-000000000001',
   id = '00000000-0000-0000-0000-000000000002';

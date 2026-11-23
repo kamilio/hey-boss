@@ -18,4 +18,6 @@ Use `-` instead of the message to read from stdin. Both commands return a messag
 
 A thread link identifies its environment. For remote threads, the CLI matches that ID against machines already connected in Hey Boss. It does not open a separate login or need its own host list. T3 credentials stay on the owning machine.
 
+Authentication uses the running server's version. If a desktop update has replaced its CLI, hey-t3 downloads the matching official release, verifies its checksum, and caches it under `~/.t3/caches/hey-t3/`. Active threads keep running; no version setting or server restart is needed.
+
 Use `hey-t3 start PROJECT [MESSAGE]` to launch with the project's or environment's configured model. If neither has one, hey-t3 uses Codex GPT-6.1-Sol. Use `--model` to override it, or `--worktree BASE` to start in a worktree. Run `hey-t3 --help` for project lookup, search, queue promotion, stopping, and scheduling.

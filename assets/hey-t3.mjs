@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { execFile, execFileSync, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { parseArgs, promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -32,6 +33,44 @@ Remote threads use machines already connected in Hey Boss.`;
 const home = join(homedir(), '.t3');
 const idFile = join(home, 'userdata/environment-id');
 const localID = () => readFileSync(idFile, 'utf8').trim().toLowerCase();
+
+export async function serverCLI(home, version) {
+  if (!/^[0-9][a-zA-Z0-9.+-]*$/.test(version ?? '')) throw Error('Invalid T3 server version.');
+  const cached = join(home, 'caches/hey-t3', version);
+  for (const cli of [join(cached, 't3'), join(home, 'runtime/versions', version, 't3'), join(home, 'bin/t3')]) {
+    if (!existsSync(cli)) continue;
+    try {
+      const { stdout } = await promisify(execFile)(cli, ['--version'], { encoding: 'utf8', timeout: 12000 });
+      if (stdout.trim() === `t3 v${version}`) return cli;
+    } catch { /* An updated desktop launcher may no longer match the live server. */ }
+  }
+  const name = `t3-${version}-${process.platform}-${process.arch}`;
+  const release = `https://github.com/pingdotgg/t3code/releases/download/v${version}/`;
+  const download = async (file) => {
+    const response = await fetch(release + file, { signal: AbortSignal.timeout(60000) });
+    if (!response.ok) throw Error(`Could not download T3 ${version}: HTTP ${response.status}.`);
+    return response;
+  };
+  mkdirSync(join(home, 'caches/hey-t3'), { recursive: true });
+  const stage = mkdtempSync(join(home, 'caches/hey-t3/.download-'));
+  try {
+    const sums = await (await download('SHA256SUMS')).text();
+    const expected = sums.split('\n').find(line => line.trim().split(/\s+/)[1] === `${name}.tar.gz`)?.split(/\s+/)[0];
+    if (!/^[a-f0-9]{64}$/.test(expected ?? '')) throw Error(`No official T3 CLI for ${process.platform}/${process.arch}.`);
+    const archive = join(stage, 'runtime.tar.gz');
+    await pipeline((await download(`${name}.tar.gz`)).body, createWriteStream(archive));
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(archive)) hash.update(chunk);
+    if (hash.digest('hex') !== expected) throw Error('T3 CLI download checksum mismatch.');
+    await promisify(execFile)('tar', ['-xzf', archive, '-C', stage], { timeout: 30000 });
+    // A concurrent invocation may have finished the same download first.
+    try { renameSync(join(stage, name), cached); }
+    catch (error) { if (!['EEXIST', 'ENOTEMPTY'].includes(error.code) || !existsSync(join(cached, 't3'))) throw error; }
+    return join(cached, 't3');
+  } finally {
+    rmSync(stage, { recursive: true, force: true });
+  }
+}
 
 export function target(link) {
   const parts = link.replace(/^t3code:\/\/(?:threads\/|app\/#\/)/, '').split('/');
@@ -135,7 +174,7 @@ const sessions = new Map();
 async function onHost({ op, environment, id, text, guarded, options = {}, arg }, lines) {
   const actual = localID();
   if (actual !== environment) throw Error('The connected machine no longer serves this T3 environment.');
-  const { origin, serverVersion } = JSON.parse(
+  const { origin, serverVersion, startedAt } = JSON.parse(
     readFileSync(join(home, 'userdata/server-runtime.json'), 'utf8'),
   );
   const base = new URL(origin);
@@ -157,11 +196,6 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
   };
   if ((await get('/.well-known/t3/environment')).environmentId !== environment)
     throw Error('The running T3 server does not match the thread link.');
-  let cli = join(home, 'bin/t3');
-  if (!existsSync(cli)) {
-    if (!/^[0-9][a-zA-Z0-9.+-]*$/.test(serverVersion)) throw Error('Invalid T3 version.');
-    cli = join(home, 'runtime/versions', serverVersion, 't3');
-  }
   const write = [
     'pin',
     'unpin',
@@ -176,10 +210,11 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
   ].includes(op);
   const args = ['auth', 'session', 'issue', '--scope', 'orchestration:read'];
   if (write) args.push('--scope', 'orchestration:operate');
-  const scope = environment + ':' + write;
+  const scope = environment + ':' + startedAt + ':' + write;
   let session = sessions.get(scope);
   if (!session || Date.now() >= session.renewAt) {
-    const token = execFileSync(cli, [...args, '--ttl', '1m', '--label', 'hey-t3', '--token-only'], {
+    const cli = await serverCLI(home, serverVersion);
+    const token = execFileSync(cli, [...args, '--base-dir', home, '--ttl', '1m', '--label', 'hey-t3', '--token-only'], {
       encoding: 'utf8', timeout: 12000, stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     sessions.set(scope, session = {token, renewAt: Date.now() + 45000});
@@ -585,7 +620,7 @@ async function main(args) {
   const entry = `PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:$PATH" exec node --input-type=module -e '${source}' -- --worker`;
   const child = spawn('/usr/bin/ssh', [...companionArgs(socket), entry], {
     stdio: ['pipe', 'pipe', 'inherit'],
-    timeout: 90000,
+    timeout: 180000,
   });
   const done = new Promise((resolve, reject) => {
     child.once('error', reject);
