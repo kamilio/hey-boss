@@ -1,5 +1,10 @@
 # Native Markdown reader
 
+Documents open in native macOS tabs in one window. Reopening an open document
+selects its existing tab; switching tabs keeps edits, selection and rendered
+content in memory. Cmd-` and Cmd-Shift-` follow the visible tab order, and Cmd-W
+closes the current tab. The document library loads when its sidebar is opened.
+
 Document previews use a single AppKit `NSTextView`. The node model and syntax
 lexer adapt poe-code's terminal Markdown renderer; pulldown-cmark parses
 CommonMark/GFM in Rust. Attribution is retained in

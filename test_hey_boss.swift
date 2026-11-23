@@ -243,6 +243,7 @@ func audit() {
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CONVERSATION"] { auditConversation(root); return }
     #endif
     if let id = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_SPOKEN_REVIEW"] { auditSpokenReview(id); return }
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_DOCUMENT_TABS"] == "1" { app.finishLaunching(); auditDocumentTabs(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_EDITOR"] == "1" { auditArtifactEditor(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_HTML_READER"] == "1" { auditHTMLReader(); return }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ARTIFACT_LIBRARY"] == "1" { auditArtifactLibrary(); return }
@@ -3421,6 +3422,10 @@ func auditArtifactLibrary() {
     wait { editor.documents.count == 1 }
     for file in [nil, cli.path] as [String?] {
         let unscoped = NativeArtifactEditor(launch: ArtifactLaunch(project: "global", file: file), journalRoot: root, cli: cli.path, present: false)
+        if file != nil {
+            precondition(!unscoped.libraryStarted && unscoped.listGeneration == 0, "Opening a file does not fetch the hidden library")
+            unscoped.toggleFocus()
+        }
         wait { unscoped.documents.count == 2 && !unscoped.libraryLoading }
         precondition(unscoped.libraryProject == "named:Atlas" && !unscoped.libraryFailed, "Local skill files and restored global windows browse a registered project")
         precondition(!unscoped.projectPicker.itemTitles.contains("global") && unscoped.gallery.subtitle.stringValue == "Atlas · 2+ documents")
@@ -3809,16 +3814,74 @@ func auditArtifactEditor() {
     let third = NativeArtifactEditor(launch: cleanLaunch, journalRoot: root, cli: "/usr/bin/false", present: false)
     wait { third.session.ready }
     let manager = ArtifactEditors(); manager.windows = [nextOpen, second, third]
-    precondition(manager.cycleWindow(from: nextOpen.window, backwards: false) === second)
-    precondition(manager.cycleWindow(from: nextOpen.window, backwards: true) === third)
-    precondition(manager.cycleWindow(from: third.window, backwards: false) === nextOpen)
+    nextOpen.window.addTabbedWindow(second.window, ordered: .above)
+    second.window.addTabbedWindow(third.window, ordered: .above)
+    precondition(manager.cycleTab(from: nextOpen.window, backwards: false) === second)
+    precondition(manager.cycleTab(from: nextOpen.window, backwards: true) === third)
+    precondition(manager.cycleTab(from: third.window, backwards: false) === nextOpen)
     let beforeCycle = nextOpen.text.string
-    precondition(nextOpen.command("`", shift: false) && nextOpen.text.string == beforeCycle, "Command-backtick cycles windows instead of inserting code marks")
+    precondition(nextOpen.command("`", shift: false) && nextOpen.text.string == beforeCycle, "Command-backtick cycles tabs instead of inserting code marks")
     second.window.close()
-    precondition(manager.cycleWindow(from: nextOpen.window, backwards: false) === third, "Closed windows are skipped")
+    precondition(manager.cycleTab(from: nextOpen.window, backwards: false) === third, "Closed tabs are skipped")
     third.window.close()
     nextOpen.window.close()
     print("PASS focus, quick switch, find, undo/redo, automatic disk save and external-edit protection")
+}
+
+func auditDocumentTabs() {
+    let root = URL(fileURLWithPath: ProcessInfo.processInfo.environment["HEY_BOSS_STATE_DIR"]!)
+    try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let manager = ArtifactEditors()
+    func wait(_ condition: () -> Bool) {
+        let deadline = Date().addingTimeInterval(10)
+        while !condition() && Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        precondition(condition(), "Document tabs finished loading")
+    }
+    var launches: [ArtifactLaunch] = []
+    for (index, title) in ["Release notes", "Design decisions", "Large document"].enumerated() {
+        let file = root.appendingPathComponent(title + ".md")
+        let body = "# \(title)\n\n" + String(repeating: "Keep every document together.\n\n", count: index == 2 ? 36_000 : 30)
+        try! Data(body.utf8).write(to: file)
+        launches.append(ArtifactLaunch(project: "global", file: file.path))
+        manager.open(launches.last!)
+        precondition(manager.windows.count == index + 1)
+        let editor = manager.windows.last!
+        wait { editor.session.ready && editor.previewSource != nil }
+        precondition(!editor.libraryStarted && editor.listGeneration == 0, "Hidden libraries do not start backend requests")
+        precondition(editor.window.tabGroup?.windows.count == index + 1, "All documents share one tab group")
+        precondition(editor.window.tabGroup?.selectedWindow === editor.window, "New documents select their tab")
+    }
+    let first = manager.windows[0], second = manager.windows[1], third = manager.windows[2]
+    first.togglePreview(); manager.open(launches[0])
+    first.text.setSelectedRange(NSRange(location: 3, length: 7))
+    let generation = first.renderGeneration, storage = first.reader.textStorage
+    let selected = first.text.selectedRange(), body = first.text.string
+    var latencies: [Double] = []
+    for index in 0..<30 {
+        let start = Date()
+        manager.open(launches[index % launches.count])
+        NSApp.updateWindows()
+        latencies.append(Date().timeIntervalSince(start) * 1_000)
+    }
+    precondition(manager.windows.count == 3, "Reopening a document reuses its tab")
+    RunLoop.main.run(until: Date().addingTimeInterval(0.02))
+    precondition(NSApp.mainMenu?.items.contains { $0.submenu?.title == "Format" } == true, "Switching tabs keeps the document menus")
+    precondition(first.text.string == body && first.text.selectedRange() == selected && first.reader.textStorage === storage && first.renderGeneration == generation, "Tab switches preserve document views and selection without rendering again")
+    precondition(latencies.reduce(0, +) / Double(latencies.count) < 100, "Switching loaded tabs must stay responsive")
+    print(String(format: "PASS document tabs: %.2f ms average switch, %.2f ms slowest, including a 1 MiB document", latencies.reduce(0, +) / Double(latencies.count), latencies.max()!))
+    first.window.tabGroup?.insertWindow(third.window, at: 1)
+    precondition(manager.cycleTab(from: first.window, backwards: false) === third, "Keyboard navigation follows the visible tab order")
+    second.window.performClose(nil)
+    precondition(manager.windows.count == 2 && first.window.tabGroup?.windows.count == 2, "Closing a tab leaves the other documents open")
+    manager.open(launches[0])
+    third.window.performClose(nil); first.window.performClose(nil)
+    precondition(manager.windows.isEmpty)
+    manager.open(launches[0])
+    wait { manager.windows.first?.session.ready == true }
+    precondition(manager.windows.count == 1 && manager.windows[0].window.isVisible, "Opening after the final tab closes creates a usable window")
+    manager.windows[0].window.newWindowForTab(nil)
+    precondition(manager.windows[0].libraryStarted && !manager.windows[0].gallery.isHidden, "New note offers project selection when a local file has no project")
+    manager.windows[0].window.performClose(nil)
 }
 
 func auditPaging() {

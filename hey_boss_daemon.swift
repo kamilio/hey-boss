@@ -6723,6 +6723,7 @@ final class ArtifactMarkdownText: NSTextView {
 
 final class ArtifactEditorWindow: NSWindow {
     var command: ((String, Bool) -> Bool)?
+    override func newWindowForTab(_ sender: Any?) { _ = command?("n", false) }
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         if flags.contains(.command), !flags.contains(.option), !flags.contains(.control),
@@ -10572,6 +10573,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let projectPicker = NSPopUpButton(frame: .zero, pullsDown: false)
     var libraryProject: String
     var libraryLoading = false
+    var libraryStarted = false
     var libraryFailed = false
     var libraryMore = false
     var documents: [ArtifactLibraryDocument] = []
@@ -10625,6 +10627,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             self.reader.string = self.session.body; self.status.stringValue = "Preview unavailable · showing source"
         }
         window.title = "Artifacts"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
+        window.tabbingIdentifier = "hey-boss-documents"; window.tabbingMode = .preferred
         window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
         window.command = { [weak self] key, shift in self?.command(key, shift: shift) ?? false }
@@ -10634,8 +10637,6 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         session.changed = { [weak self] in self?.updateStatus() }
         session.writer = { [weak self] request, completion in self?.write(request, completion: completion) }
         load()
-        refreshLibrary()
-        refreshProjects()
     }
     func buildUI() {
         let toolbar = NSToolbar(identifier: "artifact-writing")
@@ -10869,7 +10870,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         closed = false
         if present {
             NSApp.setActivationPolicy(.regular)
+            if window.isMiniaturized { window.deminiaturize(nil) }
+            window.tabGroup?.selectedWindow = window
             window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+            Self.installMenu(for: self)
         }
     }
     func write(_ request: ArtifactSave, completion: @escaping (Result<ArtifactDocument, Error>) -> Void) {
@@ -11022,6 +11026,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func updateStatus() {
         updateReviewControls()
         window.title = session.title
+        window.tab.toolTip = session.launch.file ?? session.title
         recovery.isHidden = session.failure == nil; reload.isHidden = session.failure == nil
         if let failure = imageFailure ?? session.failure { status.stringValue = failure; status.textColor = .systemRed }
         else {
@@ -11494,12 +11499,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     @objc func toggleFocus() {
         focusMode.toggle()
         if focusMode { split.removeArrangedSubview(sidebar); sidebar.removeFromSuperview() }
-        else { split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0) }
+        else {
+            split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0)
+            if !libraryStarted { libraryStarted = true; refreshLibrary(); refreshProjects() }
+        }
         if session.ready && gallery.isHidden { window.makeFirstResponder(previewing ? reader : text) }
         updateStatus()
     }
     @objc func newDocument() {
-        guard libraryProject != "global" else { return }
+        guard libraryProject != "global" else { showLibrary(); return }
         onOpen(ArtifactLaunch(project: libraryProject, host: session.launch.host, title: "Untitled artifact"))
     }
     @objc func openFile() {
@@ -11595,7 +11603,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         case ("8", true), ("*", true):
             guard window.firstResponder === text else { return false }; text.prefixLines("- ")
         case ("c", true) where window.firstResponder === text: text.wrap("`")
-        case ("`", false), ("`", true), ("~", true): ArtifactEditors.shared.cycleWindow(from: window, backwards: shift)
+        case ("`", false), ("`", true), ("~", true): ArtifactEditors.shared.cycleTab(from: window, backwards: shift)
         case ("1"..."6", false) where window.firstResponder === text: text.prefixLines(String(repeating: "#", count: Int(key)!) + " ")
         default: return false
         }
@@ -11636,7 +11644,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
         let windowsItem = NSMenuItem(); let windowsMenu = NSMenu(title: "Window")
         windowsItem.submenu = windowsMenu; bar.addItem(windowsItem)
-        for (title, shift) in [("Next Window", false), ("Previous Window", true)] where editor != nil {
+        for (title, shift) in [("Next Tab", false), ("Previous Tab", true)] where editor != nil {
             let item = NSMenuItem(title: title, action: #selector(menuCommand(_:)), keyEquivalent: "`")
             item.keyEquivalentModifierMask = shift ? [.command, .shift] : [.command]; item.target = editor; windowsMenu.addItem(item)
         }
@@ -11653,7 +11661,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         }
     }
     func windowDidResignKey(_ notification: Notification) {
-        Self.installMenu()
+        DispatchQueue.main.async {
+            guard let window = NSApp.keyWindow else { return }
+            Self.installMenu(for: (window.tabGroup?.selectedWindow ?? window).delegate as? NativeArtifactEditor)
+        }
+        endReview()
         session.flush()
     }
     func windowDidResize(_ notification: Notification) { window.saveFrame(usingName: "hey-boss-artifact-editor"); resizePreviewImages() }
@@ -11693,17 +11705,31 @@ final class ArtifactEditors: NSObject, NSApplicationDelegate {
             UserDefaults.standard.set(launch.project, forKey: "artifact-last-project")
             UserDefaults.standard.set(launch.host, forKey: "artifact-last-host")
         }
+        let editor: NativeArtifactEditor
         if let existing = windows.first(where: { editor in
             let previous = editor.session.launch
             return launch.file != nil ? previous.file == launch.file : launch.id != nil && previous.id == launch.id && previous.project == launch.project && previous.host == launch.host
-        }) { existing.revealDocument(); existing.show(); return }
-        let editor = NativeArtifactEditor(launch: launch, journalRoot: root)
-        editor.onOpen = { [weak self] launch in self?.open(launch) }
-        editor.onClose = { [weak self, weak editor] in self?.windows.removeAll { $0 === editor && !$0.session.dirty } }
-        windows.append(editor); editor.show()
+        }) {
+            editor = existing
+            if editor.closed {
+                editor.closed = false; editor.load()
+                if editor.previewing { editor.renderPreview() }
+            }
+            editor.revealDocument()
+        } else {
+            editor = NativeArtifactEditor(launch: launch, journalRoot: root)
+            editor.onOpen = { [weak self] launch in self?.open(launch) }
+            editor.onClose = { [weak self, weak editor] in self?.windows.removeAll { $0 === editor && !$0.session.dirty } }
+            windows.append(editor)
+        }
+        if let sibling = windows.first(where: { $0 !== editor && !$0.closed }),
+           sibling.window.tabGroup !== editor.window.tabGroup {
+            sibling.window.addTabbedWindow(editor.window, ordered: .above)
+        }
+        editor.show()
     }
-    @discardableResult func cycleWindow(from window: NSWindow, backwards: Bool) -> NativeArtifactEditor? {
-        let editors = windows.filter { !$0.closed }
+    @discardableResult func cycleTab(from window: NSWindow, backwards: Bool) -> NativeArtifactEditor? {
+        let editors = (window.tabGroup?.windows ?? [window]).compactMap { tab in windows.first { $0.window === tab && !$0.closed } }
         guard !editors.isEmpty else { return nil }
         let current = editors.firstIndex { $0.window === window } ?? 0
         let next = editors[(current + (backwards ? editors.count - 1 : 1)) % editors.count]
