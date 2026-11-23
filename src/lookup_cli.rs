@@ -105,6 +105,10 @@ fn issue_collection(route: &Route, options: &Options) -> Result<Value> {
     // Keep old/invalid URL values inert, just like IssueFilters.read.
     let created_by = param("created_by");
     let drafts_only = param("draft") == "1";
+    let states: Vec<_> = param("states")
+        .split(',')
+        .filter(|value| state == "all" && matches!(*value, "open" | "blocked" | "ready" | "closed"))
+        .collect();
     let raw_min = param("min_launches");
     let min = raw_min
         .parse::<u64>()
@@ -118,6 +122,12 @@ fn issue_collection(route: &Route, options: &Options) -> Result<Value> {
     };
     if let Some(issues) = value["issues"].as_array_mut() {
         issues.retain(|issue| {
+            if !states.is_empty()
+                && (!issue["deleted_at"].is_null()
+                    || !states.contains(&issue["state"].as_str().unwrap_or("")))
+            {
+                return false;
+            }
             if !created_by.is_empty() && issue["created_by"] != created_by {
                 return false;
             }

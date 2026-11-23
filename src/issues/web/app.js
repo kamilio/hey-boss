@@ -279,7 +279,7 @@ async function mutate(operation, project = model.project.id, host = model.route.
 }
 function routeHash(route) {
   route = { ...route };
-  for (const [key, filters] of [["page", ["project", "host", "state", "owner", "created_by", "label", "search", "blocked", "draft", "min_launches"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
+  for (const [key, filters] of [["page", ["project", "host", "state", "states", "owner", "created_by", "label", "search", "blocked", "draft", "min_launches"]], ["inbox_page", ["inbox_state", "inbox_project", "inbox_search"]]]) {
     if (model.route && filters.some(filter => (route[filter] || "") !== (model.route[filter] || ""))) route[key] = 1;
     if (HeyBossPagination.number(route[key]) === 1) delete route[key];
   }
@@ -1041,7 +1041,7 @@ $("#issue-search").oninput = () => {
 };
 IssueFilters.init();
 $$('[role="tab"][data-state]').forEach(
-  (b) => (b.onclick = () => navigate({ state: b.dataset.state, blocked: "", search: $("#issue-search").value })),
+  (b) => (b.onclick = () => navigate({ state: b.dataset.state, states: "", blocked: "", search: $("#issue-search").value })),
 );
 $("#refresh").onclick = () => refresh(false);
 async function refreshProjects(project = model.project.id) {

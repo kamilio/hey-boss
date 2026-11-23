@@ -1,9 +1,11 @@
 "use strict";
 const IssueFilters = (() => {
-  const empty = {owner:"all", created_by:"", label:"", blocked:"", draft:"", min_launches:"", search:""};
+  const states = ["open", "blocked", "ready", "closed"];
+  const empty = {states:"", owner:"all", created_by:"", label:"", blocked:"", draft:"", min_launches:"", search:""};
   function read(params) {
     const value = params.get("min_launches") || "";
     return {
+      states: params.get("state") === "all" ? states.filter(state => (params.get("states") || "").split(",").includes(state)).join(",") : "",
       created_by: params.get("created_by") || "",
       draft: params.get("draft") === "1" ? "1" : "",
       min_launches: /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)) ? value : "",
@@ -11,7 +13,8 @@ const IssueFilters = (() => {
     };
   }
   function matches(issue, route) {
-    return (!route.created_by || issue.created_by === route.created_by)
+    return (!route.states || (!issue.deleted_at && route.states.split(",").includes(issue.state)))
+      && (!route.created_by || issue.created_by === route.created_by)
       && (!route.draft || issue.draft === true)
       && (issue.agent_launch_count || 0) >= Number(route.min_launches || 0)
       && IssueBlockers.matches(issue, route.blocked);
@@ -24,13 +27,20 @@ const IssueFilters = (() => {
       ...(route.state === "blocked" ? [{key:"blocked", value:"hold", label:"On hold", icon:"blocked"}] : []),
     ];
   }
-  const selected = (route, option) => (option.key === "owner" && route.owner === "mine" ? "human:boss" : route[option.key]) === option.value;
-  const toggle = (route, option) => ({[option.key]: selected(route, option) ? empty[option.key] : option.value});
+  const selected = (route, option) => option.key === "states" && option.value
+    ? (route.states || "").split(",").includes(option.value)
+    : (option.key === "owner" && route.owner === "mine" ? "human:boss" : route[option.key]) === option.value;
+  const toggle = (route, option) => ({[option.key]: option.key === "states" && option.value
+    ? states.filter(state => state === option.value ? !selected(route, option) : (route.states || "").split(",").includes(state)).join(",")
+    : selected(route, option) ? empty[option.key] : option.value});
   const active = route => Object.keys(empty).filter(key => key !== "search" && route[key] && route[key] !== empty[key]);
   function fields() {
     const owners = [...new Set(["human:boss", "watcher:github", ...model.assignmentMachines.map(m => `machine:${m.id}`), ...model.assignees,
       ...(!["all", "mine", "unassigned"].includes(model.route.owner) ? [model.route.owner] : [])])];
     return [
+      ...(model.route.state === "all" ? [{key:"states", label:"State", icon:"issue", options:[
+        {value:"", label:"Any state"}, ...states.map(value => ({value, label:value[0].toUpperCase() + value.slice(1)})),
+      ]}] : []),
       {key:"owner", label:"Assignment", icon:"user", options:[
         {value:"all", label:"Any assignment"}, {value:"human:boss", label:"Assigned to boss", detail:model.boss.name},
         {value:"unassigned", label:"Unassigned"},
@@ -63,7 +73,8 @@ const IssueFilters = (() => {
       const field = definitions.find(f => f.key === key);
       if (!field) return "";
       const value = key === "owner" && route.owner === "mine" ? "human:boss" : route[key];
-      const name = key === "min_launches" ? `${value}+ launches` : field.options.find(o => o.value === value)?.label || value;
+      const name = key === "states" ? field.options.filter(o => value.split(",").includes(o.value)).map(o => o.label).join(" + ")
+        : key === "min_launches" ? `${value}+ launches` : field.options.find(o => o.value === value)?.label || value;
       return `<span class="issue-filter-chip"><button type="button" data-edit-filter="${key}" aria-label="Edit ${esc(field.label)} filter: ${esc(name)}" aria-haspopup="dialog">${icon(field.icon)}<span class="filter-chip-key">${esc(field.label)}</span><span class="filter-chip-value">${esc(name)}</span></button><button type="button" data-remove-filter="${key}" aria-label="Remove ${esc(field.label)} filter">${icon("x")}</button></span>`;
     }).join("");
     if (chips.innerHTML !== html) {
@@ -150,6 +161,11 @@ const IssueFilters = (() => {
         $("#issue-filter-search").value = "";
         choices();
         $("#issue-filter-search").focus();
+      } else if (button.dataset.filterKey === "states") {
+        const value = button.dataset.filterValue;
+        apply(toggle(model.route, {key:"states", value}));
+        open(trigger?.isConnected ? trigger : $("#add-issue-filter"), "states");
+        $(`[data-filter-key="states"][data-filter-value="${value}"]`).focus({preventScroll:true});
       } else {
         close(true);
         apply({[button.dataset.filterKey]:button.dataset.filterValue});

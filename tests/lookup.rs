@@ -318,6 +318,25 @@ fn lookup_combines_launches_assignment_labels_search_and_blocked_reason() {
             .unwrap()
             .contains("Mixed blockers at ten")
     );
+    db.execute("UPDATE issues SET state='ready' WHERE number=4", [])
+        .unwrap();
+    f.execute(json!({"action":"close","number":1,"force":false}));
+    assert_eq!(
+        numbers("&state=all&states=open,blocked,ready"),
+        vec![2, 3, 4, 5, 6]
+    );
+    assert_eq!(
+        numbers("&state=all&states=open,blocked,ready&label=review&min_launches=8"),
+        vec![3, 6]
+    );
+    assert_eq!(numbers("&state=all&states=ready"), vec![4]);
+    assert_eq!(numbers("&state=all&states=closed"), vec![1]);
+    assert_eq!(
+        numbers("&state=all&states=unknown,ready,ready,deleted"),
+        vec![4]
+    );
+    assert_eq!(numbers("&state=all&states=unknown"), vec![1, 2, 3, 4, 5, 6]);
+    assert_eq!(numbers("&state=open&states=closed"), vec![3]);
 }
 
 #[test]

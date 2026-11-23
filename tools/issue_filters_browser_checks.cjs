@@ -1,12 +1,11 @@
 // NODE_PATH must contain Playwright. Runs the real server and lookup on a temporary database.
 const assert = require('node:assert/strict');
 const {mkdtempSync, rmSync, mkdirSync, readFileSync} = require('node:fs');
-const {tmpdir} = require('node:os');
 const {resolve, join} = require('node:path');
 const {spawn, execFileSync} = require('node:child_process');
 const {chromium, webkit} = require('playwright');
 const binary = resolve(process.argv[2] || 'target/debug/hey-boss');
-const root = mkdtempSync(join(tmpdir(), 'hey-boss-filters-'));
+const root = mkdtempSync(resolve('.hey-boss-filters-'));
 const db = join(root, 'issues.db');
 const env = {...process.env, HEY_BOSS_ISSUE_DB:db, HEY_BOSS_FLEET_STATE:root, HEY_BOSS_INBOX_SOCKET:join(root,'inbox.sock')};
 for (const key of ['HEY_BOSS_ISSUE_HOST','HEY_BOSS_ISSUE_PROJECT','HEY_BOSS_STATE_DIR']) delete env[key];
@@ -138,6 +137,49 @@ let web;
         await preset('owner').click();
         await expect(expected);
       }
+
+      sql("UPDATE issues SET state='ready' WHERE number=2;");
+      await page.goto(url('all')+'&label=reliability');
+      await expect([1,2,4,5,6,7]);
+      await choose('states','open'); await expect([1]);
+      const stateOption = value => page.locator(`[data-filter-key="states"][data-filter-value="${value}"]`);
+      await stateOption('blocked').click(); await expect([1,4,5,6]);
+      await stateOption('ready').focus(); await page.keyboard.press('Enter'); await expect([1,2,4,5,6]);
+      assert.equal(await stateOption('ready').getAttribute('aria-pressed'), 'true');
+      assert.equal(await page.locator('#issue-filter-menu').evaluate(el => el.matches(':popover-open')), true);
+      assert.equal(await page.getByRole('tab',{name:/All/}).getAttribute('aria-selected'), 'true');
+      assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).get('states'), 'open,blocked,ready');
+      await page.keyboard.press('Escape');
+      await page.reload(); await expect([1,2,4,5,6]);
+      for (const width of [320,1440]) {
+        await page.setViewportSize({width,height:1000});
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, 'State chip fits');
+        await page.getByRole('button',{name:'Edit State filter: Open + Blocked + Ready',exact:true}).click();
+        const menu = await page.locator('#issue-filter-menu').boundingBox();
+        assert.ok(menu.x >= 0 && menu.x+menu.width <= width && menu.y >= 0 && menu.y+menu.height <= 1000, 'State menu fits');
+        if (process.env.FILTER_SCREENSHOTS) {
+          mkdirSync(process.env.FILTER_SCREENSHOTS,{recursive:true});
+          await page.screenshot({path:join(process.env.FILTER_SCREENSHOTS,`${engine.name()}-states-${width}.png`)});
+        }
+        await page.keyboard.press('Escape');
+      }
+      await page.getByRole('button',{name:'Edit State filter: Open + Blocked + Ready',exact:true}).click();
+      await stateOption('open').click(); await expect([2,4,5,6]);
+      await page.keyboard.press('Escape');
+      await page.goBack(); await expect([1,2,4,5,6]);
+      await page.goForward(); await expect([2,4,5,6]);
+      await page.getByRole('button',{name:'Remove State filter',exact:true}).click(); await expect([1,2,4,5,6,7]);
+      await choose('states','ready'); await expect([2]);
+      await stateOption('ready').click(); await expect([1,2,4,5,6,7]);
+      await stateOption('closed').click(); await expect([7]);
+      await stateOption('').click(); await expect([1,2,4,5,6,7]);
+      await stateOption('ready').click(); await page.keyboard.press('Escape');
+      await page.locator('#clear-issue-filters').click(); await expect([1,2,3,4,5,6,7]);
+      await choose('states','ready'); await page.keyboard.press('Escape');
+      await page.getByRole('tab',{name:/Open/}).click(); await expect([1,3]);
+      assert.equal(new URLSearchParams(new URL(page.url()).hash.slice(1)).has('states'), false);
+      sql("UPDATE issues SET state='open' WHERE number=2;");
+
       await page.goto(url('blocked'));
       await preset('blocked').click(); await preset('min_launches').click(); await choose('label','reliability');
       await expect([4,6]);
@@ -175,7 +217,7 @@ let web;
     } catch (error) {
       const page = browser.contexts()[0]?.pages()[0];
       if (page) {
-        await page.screenshot({path:join(tmpdir(),'hey-boss-filter-failure.png')});
+        await page.screenshot({path:join(root,'failure.png')});
         console.error(await page.locator('body').innerText());
       }
       throw error;
