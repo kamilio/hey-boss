@@ -451,12 +451,16 @@ input.once('line', line => {
 "#,
     )?;
     let request = "Compare 'a' and $b.\nKeep both lines.";
+    let description = "Compare the two values";
     let (url, server) = mock(vec![
-        tool("delegate", json!({"request":request})),
+        tool(
+            "delegate",
+            json!({"request":request,"description":description}),
+        ),
         msg("Finished."),
     ])
     .await?;
-    let (_, mut acks) = mpsc::unbounded_channel();
+    let (_ack, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
         focus: None,
         home: dir,
@@ -467,12 +471,38 @@ input.once('line', line => {
         acks: &mut acks,
     };
     let path = dir.join("chat.agent.json");
-    agent::run(&path, &url, &json!({"turn":"Check."}), &mut p).await?;
+    // Leave the acknowledgement channel open and silent: playback must not gate delegation.
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        agent::run(&path, &url, &json!({"turn":"Check."}), &mut p),
+    )
+    .await??;
     let requests = server.await??;
+    let schema = requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "delegate")
+        .unwrap();
+    assert_eq!(
+        schema["parameters"]["properties"]["description"]["type"],
+        "string"
+    );
+    assert_eq!(
+        schema["parameters"]["required"],
+        json!(["request", "description"])
+    );
     let result = requests[1]["input"].as_array().unwrap().last().unwrap();
     assert_eq!(result["call_id"], "call_1");
     assert_eq!(result["output"], format!("Answer: {request}"));
     let book = hey_boss_conversation::notebook::Notebook::open(&path, &Value::Null)?;
+    let args: Value = serde_json::from_str(
+        book.messages[1]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap(),
+    )?;
+    assert_eq!(args["description"], description);
+    assert_eq!(args["request"], request);
     assert_eq!(book.messages[2]["content"], result["output"]);
     assert_eq!(book.messages[2]["failed"], false);
     Ok(())

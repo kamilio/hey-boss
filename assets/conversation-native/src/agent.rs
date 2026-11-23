@@ -99,8 +99,9 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                     };
                     anyhow::ensure!(matches!(provider, "t3" | "codex" | "claude"), "Unknown delegate provider");
                     let request = field(&args, "request")?;
-                    let mut item = json!({"provider":provider,"request":request,"description":format!("{} · {}", match provider {"t3"=>"T3","claude"=>"Claude",_=>"Codex"}, request.lines().next().unwrap_or(""))});
-                    emit(json!({"ToolStarted":{"id":id,"input":item}}))?;
+                    let description = field(&args, "description")?;
+                    let mut item =
+                        json!({"provider":provider,"request":request,"description":description});
                     let result = crate::delegate::run(tools, id, &mut item).await;
                     activity = Some(item);
                     return result.map(Value::String);

@@ -32,6 +32,8 @@ pub(super) async fn run(tools: &Plugins<'_>, id: &str, item: &mut Value) -> Resu
     input
         .write_all(format!("{}\n", json!({"turn":item["request"]})).as_bytes())
         .await?;
+    // Hand off the work before the UI queues its spoken description; no speech acknowledgement is needed.
+    emit(json!({"ToolStarted":{"id":id,"input":item}}))?;
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     while let Some(line) = lines.next_line().await? {
         let e: Value = serde_json::from_str(&line).context("Invalid subagent event")?;
