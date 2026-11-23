@@ -455,6 +455,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
             view.onPauseListening = { [weak self] paused in self?.controlConversation(paused ? "pause_listening" : "resume_listening") }
             view.onOpenTranscript = { [weak self] in
                 guard let self else { return }
+                if let desktop = NSRunningApplication.runningApplications(withBundleIdentifier: "local.hey-boss.desktop").first {
+                    NSApp.yieldActivation(to: desktop)
+                }
                 self.contextQueue.async {
                     let reply = try? self.chatRequest(["command": "conversation_control", "title": "show", "sync": false])
                     if reply?["status"] as? String != "ok" {
