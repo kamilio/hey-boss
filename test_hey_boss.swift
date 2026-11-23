@@ -3372,6 +3372,7 @@ func auditArtifactLibrary() {
     #!/bin/sh
     case "$*" in
       *projects*) echo '{"projects":[{"id":"named:Atlas","name":"Atlas"},{"id":"named:Studio","name":"Studio"}]}' ;;
+      *"--project global"*) exit 1 ;;
       *slow*) sleep 0.3; echo '{"artifacts":[{"id":"stale","title":"Stale response"}]}' ;;
       *"--offset 2"*) echo '{"artifacts":[{"id":"page-two","title":"An older document"}],"more":false}' ;;
       *missing*) echo '{"artifacts":[]}' ;;
@@ -3415,8 +3416,17 @@ func auditArtifactLibrary() {
     editor.search.stringValue = "failure"; editor.refreshLibrary()
     wait { !editor.libraryLoading }
     precondition(editor.gallery.message.stringValue == "Couldn’t load documents" && !editor.gallery.retry.isHidden, "Failures are visible and retryable")
+    precondition(editor.gallery.subtitle.stringValue == "Studio", "A failed request must not claim the project has zero documents")
     editor.search.stringValue = ""; editor.refreshLibrary()
     wait { editor.documents.count == 1 }
+    for file in [nil, cli.path] as [String?] {
+        let unscoped = NativeArtifactEditor(launch: ArtifactLaunch(project: "global", file: file), journalRoot: root, cli: cli.path, present: false)
+        wait { unscoped.documents.count == 2 && !unscoped.libraryLoading }
+        precondition(unscoped.libraryProject == "named:Atlas" && !unscoped.libraryFailed, "Local skill files and restored global windows browse a registered project")
+        precondition(!unscoped.projectPicker.itemTitles.contains("global") && unscoped.gallery.subtitle.stringValue == "Atlas · 2+ documents")
+        precondition(unscoped.session.launch.project == "global" && unscoped.session.launch.file == file, "Resolving the library must not retarget the open file")
+        unscoped.window.delegate = nil; unscoped.window.close()
+    }
     if let directory = ProcessInfo.processInfo.environment["HEY_BOSS_LIBRARY_SCREENSHOTS"] {
         try! FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
         editor.projectPicker.selectItem(at: 0); editor.selectProject()

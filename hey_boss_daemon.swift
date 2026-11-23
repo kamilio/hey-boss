@@ -6815,13 +6815,15 @@ final class ArtifactLibraryView: NSView {
     func update(_ documents: [ArtifactLibraryDocument], project: String, query: String, loading: Bool, failed: Bool, hasMore: Bool, open: @escaping (String) -> Void) {
         cards.forEach { $0.removeFromSuperview() }
         cards = documents.map { document in let card = ArtifactDocumentCard(document); card.open = { open(document.id) }; grid.addSubview(card); return card }
-        subtitle.stringValue = project + (loading ? " · Loading…" : " · \(documents.count)\(hasMore ? "+" : "") \(documents.count == 1 ? "document" : "documents")")
+        subtitle.stringValue = project + (loading ? " · Loading…" : failed || project.isEmpty ? "" : " · \(documents.count)\(hasMore ? "+" : "") \(documents.count == 1 ? "document" : "documents")")
+        create.isEnabled = !project.isEmpty
         let empty = documents.isEmpty
         message.isHidden = !empty; detail.isHidden = !empty; scroll.isHidden = empty; retry.isHidden = !failed || !empty
         more.isHidden = !hasMore || empty; more.isEnabled = !loading
         more.title = failed ? "Couldn’t load more · Try again" : loading ? "Loading…" : "Load more documents"
         message.stringValue = failed ? "Couldn’t load documents" : loading ? "Loading documents…" : !query.isEmpty ? "No matching documents" : "Make room for your next idea"
-        detail.stringValue = failed ? "Check your connection, then try again." : loading ? "Your workspace will be ready in a moment." : !query.isEmpty ? "Try a different title or a phrase from the document." : "Start a document, or open a Markdown file from your Mac."
+        detail.stringValue = failed ? "Try again, or choose another project." : loading ? "Your workspace will be ready in a moment." : !query.isEmpty ? "Try a different title or a phrase from the document." : "Start a document, or open a Markdown file from your Mac."
+        if project.isEmpty && !failed { message.stringValue = "Choose a project"; detail.stringValue = "Select a project in the sidebar to see its documents." }
         needsLayout = true
     }
     override func layout() {
@@ -10655,7 +10657,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         libraryTitle.font = .systemFont(ofSize: 12, weight: .semibold); libraryTitle.textColor = .secondaryLabelColor
         search.placeholderString = "Search notes"; search.delegate = self; search.controlSize = .regular
         search.toolTip = "Quick switch (⌘P)"
-        projectPicker.addItem(withTitle: libraryProject.components(separatedBy: "/").last?.replacingOccurrences(of: "named:", with: "") ?? libraryProject)
+        projectPicker.addItem(withTitle: libraryProject == "global" ? "Choose a project" : libraryProject.components(separatedBy: "/").last?.replacingOccurrences(of: "named:", with: "") ?? libraryProject)
         projectPicker.selectedItem?.representedObject = libraryProject
         projectPicker.target = self; projectPicker.action = #selector(selectProject)
         projectPicker.setAccessibilityLabel("Project"); projectPicker.toolTip = libraryProject
@@ -11395,6 +11397,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                 struct Projects: Decodable { let projects: [QuickIssueProject] }
                 let projects = try JSONDecoder().decode(Projects.self, from: result.get()).projects
                 let names = Dictionary(grouping: projects, by: \.name)
+                let resolveProject = self.libraryProject == "global"
+                if resolveProject, let project = projects.first { self.libraryProject = project.id }
                 self.projectPicker.removeAllItems()
                 for project in projects {
                     let duplicate = (names[project.name]?.count ?? 0) > 1
@@ -11402,14 +11406,15 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                     self.projectPicker.lastItem?.representedObject = project.id
                     self.projectPicker.lastItem?.toolTip = project.id
                 }
-                if !projects.contains(where: { $0.id == self.libraryProject }) {
+                if self.libraryProject != "global" && !projects.contains(where: { $0.id == self.libraryProject }) {
                     self.projectPicker.addItem(withTitle: self.libraryProject)
                     self.projectPicker.lastItem?.representedObject = self.libraryProject
                 }
                 self.projectPicker.select(self.projectPicker.itemArray.first { $0.representedObject as? String == self.libraryProject })
-                self.renderLibrary()
+                if resolveProject { self.refreshLibrary() } else { self.renderLibrary() }
             } catch {
                 self.projectPicker.toolTip = "Couldn’t load projects. Choose All documents to retry."
+                if self.libraryProject == "global" { self.libraryFailed = true; self.renderLibrary() }
             }
         }
     }
@@ -11434,9 +11439,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     @objc func returnToLibrary() { showLibrary(); retryLibrary() }
     @objc func moreDocuments() { if !libraryLoading && libraryMore { refreshLibrary(append: true) } }
     func renderLibrary() {
-        gallery.update(documents, project: projectPicker.titleOfSelectedItem ?? libraryProject, query: search.stringValue, loading: libraryLoading, failed: libraryFailed, hasMore: libraryMore) { [weak self] id in self?.openDocument(id) }
+        gallery.update(documents, project: libraryProject == "global" ? "" : projectPicker.titleOfSelectedItem ?? libraryProject, query: search.stringValue, loading: libraryLoading, failed: libraryFailed, hasMore: libraryMore) { [weak self] id in self?.openDocument(id) }
     }
     func refreshLibrary(append: Bool = false) {
+        guard libraryProject != "global" else { renderLibrary(); return }
         listGeneration += 1; let generation = listGeneration
         libraryLoading = true; libraryFailed = false
         if !append { documents = []; libraryMore = false; table.reloadData(); gallery.scroll.contentView.scroll(to: .zero) }
@@ -11491,7 +11497,10 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         if session.ready && gallery.isHidden { window.makeFirstResponder(previewing ? reader : text) }
         updateStatus()
     }
-    @objc func newDocument() { onOpen(ArtifactLaunch(project: libraryProject, host: session.launch.host, title: "Untitled artifact")) }
+    @objc func newDocument() {
+        guard libraryProject != "global" else { return }
+        onOpen(ArtifactLaunch(project: libraryProject, host: session.launch.host, title: "Untitled artifact"))
+    }
     @objc func openFile() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.plainText, .html]; panel.allowsOtherFileTypes = true; panel.allowsMultipleSelection = true
         panel.beginSheetModal(for: window) { [weak self] result in
@@ -11678,9 +11687,11 @@ final class ArtifactEditors: NSObject, NSApplicationDelegate {
         return state.appendingPathComponent("artifact-drafts")
     }
     func open(_ launch: ArtifactLaunch) {
-        lastContext = launch
-        UserDefaults.standard.set(launch.project, forKey: "artifact-last-project")
-        UserDefaults.standard.set(launch.host, forKey: "artifact-last-host")
+        if launch.file == nil && launch.project != "global" {
+            lastContext = launch
+            UserDefaults.standard.set(launch.project, forKey: "artifact-last-project")
+            UserDefaults.standard.set(launch.host, forKey: "artifact-last-host")
+        }
         if let existing = windows.first(where: { editor in
             let previous = editor.session.launch
             return launch.file != nil ? previous.file == launch.file : launch.id != nil && previous.id == launch.id && previous.project == launch.project && previous.host == launch.host
