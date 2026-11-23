@@ -6323,17 +6323,17 @@ func applicationIcon() -> NSImage {
         NSColor(srgbRed: 0.24, green: 0.29, blue: 0.72, alpha: 1).setFill()
         let tile = NSRect(x: 32, y: 32, width: 448, height: 448)
         NSBezierPath(roundedRect: tile, xRadius: 100, yRadius: 100).fill()
-        if let symbol = NSImage(systemSymbolName: "bubble.left.and.bubble.right.fill", accessibilityDescription: nil)?
+        if let symbol = NSImage(systemSymbolName: "doc.text.fill", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: 266, weight: .medium))?
             .withSymbolConfiguration(.init(paletteColors: [.white])) {
-            let width: CGFloat = 302
-            let height = width * symbol.size.height / symbol.size.width
+            let height: CGFloat = 302
+            let width = height * symbol.size.width / symbol.size.height
             symbol.draw(in: NSRect(x: (512 - width) / 2, y: (512 - height) / 2, width: width, height: height))
         }
         return true
     }
     image.isTemplate = false
-    image.accessibilityDescription = "hey-boss"
+    image.accessibilityDescription = "Markdown Editor"
     return image
 }
 
@@ -10626,7 +10626,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             self.htmlReader.clear(); self.readerScroll.isHidden = !self.previewing
             self.reader.string = self.session.body; self.status.stringValue = "Preview unavailable · showing source"
         }
-        window.title = "Artifacts"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
+        window.title = "Markdown Editor"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
         window.tabbingIdentifier = "hey-boss-documents"; window.tabbingMode = .preferred
         window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         window.isReleasedWhenClosed = false; window.minSize = NSSize(width: 720, height: 460)
@@ -11612,8 +11612,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func windowDidBecomeKey(_ notification: Notification) { Self.installMenu(for: self) }
     static func installMenu(for editor: NativeArtifactEditor? = nil) {
         let bar = NSMenu()
-        let appItem = NSMenuItem(); let appMenu = NSMenu(title: "Hey Boss")
-        appMenu.addItem(withTitle: "Quit Hey Boss", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        let appItem = NSMenuItem(); let appMenu = NSMenu(title: "Markdown Editor")
+        appMenu.addItem(withTitle: "Quit Markdown Editor", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu; bar.addItem(appItem)
         let groups: [(String, [(String, String, Bool)])] = [
             ("File", [("New note", "n", false), ("Open Markdown…", "o", false), ("Export Markdown…", "s", true), ("Close", "w", false)]),

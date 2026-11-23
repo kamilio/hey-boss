@@ -207,8 +207,8 @@ let manifest = try String(contentsOf: root.appendingPathComponent("Cargo.toml"),
 let version = manifest.components(separatedBy: .newlines).first { $0.hasPrefix("version = ") }!.components(separatedBy: "\"")[1]
 let info: [String: Any] = [
     "CFBundleIdentifier": "local.hey-boss.desktop",
-    "CFBundleName": "Hey Boss",
-    "CFBundleDisplayName": "Hey Boss",
+    "CFBundleName": "Markdown Editor",
+    "CFBundleDisplayName": "Markdown Editor",
     "CFBundleExecutable": "hey-boss-daemon",
     "CFBundlePackageType": "APPL",
     "CFBundleInfoDictionaryVersion": "6.0",
