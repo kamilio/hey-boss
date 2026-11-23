@@ -3774,8 +3774,8 @@ func auditArtifactEditor() {
     precondition(editor.imageFailure != nil && editor.text.string == "A native note 🦀\n", "Invalid images never insert broken Markdown")
     editor.imageFailure = nil
     wait { !editor.session.dirty && !editor.session.saving }
-    precondition(editor.focusMode && editor.sidebar.superview == nil)
-    precondition(editor.window.toolbar?.items.count == 6 && editor.titleField.isDescendant(of: editor.window.contentView!) == false, "Document controls belong to the native window toolbar")
+    precondition(editor.focusMode && editor.split.splitViewItems[0].isCollapsed)
+    precondition(editor.window.toolbar?.items.count == 7 && editor.titleField.isDescendant(of: editor.window.contentView!) == false, "Document controls belong to the native window toolbar")
     editor.window.makeFirstResponder(editor.text)
     editor.text.setSelectedRange(NSRange(location: 2, length: 6))
     precondition(editor.command("b", shift: false))
@@ -3786,7 +3786,7 @@ func auditArtifactEditor() {
     precondition(editor.text.string == "A **native** note 🦀\n")
     wait { !editor.session.dirty && !editor.session.saving }
     precondition(try! String(contentsOf: file, encoding: .utf8) == editor.text.string, "No manual save is required")
-    precondition(editor.command("p", shift: false) && !editor.focusMode && editor.sidebar.superview != nil)
+    precondition(editor.command("p", shift: false) && !editor.focusMode && !editor.split.splitViewItems[0].isCollapsed)
     precondition(editor.command("f", shift: true) && editor.focusMode)
     precondition(editor.command("f", shift: false) && editor.scroll.isFindBarVisible)
     editor.window.makeFirstResponder(editor.text)

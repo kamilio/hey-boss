@@ -6735,6 +6735,25 @@ final class ArtifactEditorWindow: NSWindow {
     }
 }
 
+final class LibraryRow: NSTableCellView {
+    let detail = NSTextField(labelWithString: "")
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        let title = NSTextField(labelWithString: "")
+        title.font = .systemFont(ofSize: 13, weight: .medium)
+        detail.font = .systemFont(ofSize: 11); detail.textColor = .secondaryLabelColor
+        for label in [title, detail] {
+            label.lineBreakMode = .byTruncatingTail; label.translatesAutoresizingMaskIntoConstraints = false; addSubview(label)
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 7).isActive = true
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -7).isActive = true
+        }
+        title.bottomAnchor.constraint(equalTo: centerYAnchor).isActive = true
+        detail.topAnchor.constraint(equalTo: centerYAnchor, constant: 2).isActive = true
+        textField = title
+    }
+    required init?(coder: NSCoder) { fatalError() }
+}
+
 struct ArtifactLibraryDocument: Decodable {
     let id: String
     let title: String
@@ -8132,7 +8151,8 @@ final class ConversationMediaView: NSView, WKNavigationDelegate {
 @available(macOS 26, *)
 final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate {
     enum Phase: String { case idle, starting, listening, recording, decoding, thinking, speaking }
-    let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 860, height: 610), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    let window = ConversationWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 740), styleMask: [.titled, .closable, .resizable, .miniaturizable, .fullSizeContentView], backing: .buffered, defer: false)
+    private let titleField = NSTextField(labelWithString: "New Conversation")
     private(set) var media = ConversationMediaView()
     private struct Visual: Codable, Equatable { let id: UUID; let afterMessage: Int; let title: String; let kind: String; var cardHeight: CGFloat? = nil }
     private var phoneRevision = Int.random(in: 0..<Int(Int32.max))
@@ -8419,7 +8439,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         for name in [NSWindow.didBecomeKeyNotification, NSWindow.didResignKeyNotification] {
             NotificationCenter.default.addObserver(self, selector: #selector(updateBackgroundEscape), name: name, object: nil)
         }
-        window.title = "Hey Boss"; window.toolbarStyle = .unified
+        window.title = "Hey Boss"; window.titleVisibility = .hidden; window.toolbarStyle = .unified
+        window.titlebarSeparatorStyle = .none; window.backgroundColor = .textBackgroundColor
         let toolbar = NSToolbar(identifier: "VoiceConversation")
         toolbar.delegate = self; toolbar.displayMode = .iconOnly; window.toolbar = toolbar
         window.isReleasedWhenClosed = false; window.delegate = self; window.minSize = NSSize(width: 410, height: 360)
@@ -8531,7 +8552,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         sheet.beginSheetModal(for: window)
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.init("conversation-sidebar"), .flexibleSpace, .init("new-conversation"), settings.itemIdentifier]
+        [.init("conversation-sidebar"), .sidebarTrackingSeparator, .init("conversation-title"), .flexibleSpace, settings.itemIdentifier]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -8540,28 +8561,38 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             item.image = NSImage(systemSymbolName: "sidebar.left", accessibilityDescription: item.label)
             item.target = split; item.action = #selector(NSSplitViewController.toggleSidebar(_:)); return item
         }
+        if id.rawValue == "conversation-title" {
+            titleField.font = .systemFont(ofSize: 13, weight: .semibold)
+            titleField.lineBreakMode = .byTruncatingTail; titleField.setAccessibilityLabel("Conversation title")
+            titleField.translatesAutoresizingMaskIntoConstraints = false
+            titleField.widthAnchor.constraint(equalToConstant: 280).isActive = true
+            let item = NSToolbarItem(itemIdentifier: id); item.label = "Conversation title"; item.view = titleField; item.visibilityPriority = .high
+            item.isBordered = false
+            return item
+        }
         if id == settings.itemIdentifier {
             settings.label = "Conversation settings"; settings.toolTip = settings.label
             settings.image = NSImage(systemSymbolName: "ellipsis", accessibilityDescription: settings.label)
             settings.showsIndicator = false; return settings
         }
-        let item = NSToolbarItem(itemIdentifier: id); item.label = "New Conversation"; item.toolTip = item.label
-        item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: item.label)
-        item.target = self; item.action = #selector(newConversation); return item
+        return nil
     }
     private func configureSidebar(detail: NSView) {
         let side = NSViewController(), main = NSViewController()
         side.view = NSView(); main.view = detail
         let sidebar = NSSplitViewItem(sidebarWithViewController: side)
-        sidebar.minimumThickness = 170; sidebar.maximumThickness = 300; sidebar.preferredThicknessFraction = 0.26
+        sidebar.minimumThickness = 200; sidebar.maximumThickness = 320; sidebar.preferredThicknessFraction = 0.25
         sidebar.canCollapse = true
         let content = NSSplitViewItem(viewController: main); content.minimumThickness = 360
         split.addSplitViewItem(sidebar); split.addSplitViewItem(content)
         let title = historyScope
         title.addItems(withTitles: ["Chats", "Archived"])
-        title.isBordered = false; title.font = .systemFont(ofSize: 16, weight: .semibold)
+        title.isBordered = false; title.font = .systemFont(ofSize: 12, weight: .semibold); title.contentTintColor = .secondaryLabelColor
         title.setAccessibilityLabel("Conversation list"); title.toolTip = "Show chats or archived chats"
         title.target = self; title.action = #selector(switchHistory)
+        let new = NSButton(image: NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "New Conversation")!, target: self, action: #selector(newConversation))
+        new.isBordered = false; new.toolTip = "New Conversation"
+        let header = NSStackView(views: [title, NSView(), new]); header.spacing = 8
         for (button, icon, help) in [(previousPage, "chevron.left", "Newer chats"), (nextPage, "chevron.right", "Older chats")] {
             button.image = NSImage(systemSymbolName: icon, accessibilityDescription: help)
             button.isBordered = false; button.contentTintColor = .secondaryLabelColor; button.toolTip = help
@@ -8581,18 +8612,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         historyList.delegate = self; historyList.dataSource = self; historyList.setAccessibilityLabel("Chat history")
         let list = NSScrollView(); list.drawsBackground = false; list.hasVerticalScroller = true; list.autohidesScrollers = true; list.scrollerStyle = .overlay
         list.verticalScroller?.controlSize = .small; list.documentView = historyList
-        for view in [title, list, emptyHistory, pager] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
+        for view in [header, list, emptyHistory, pager] { view.translatesAutoresizingMaskIntoConstraints = false; side.view.addSubview(view) }
         NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 18), title.topAnchor.constraint(equalTo: side.view.safeAreaLayoutGuide.topAnchor, constant: 14),
-            list.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8), list.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 4),
-            list.trailingAnchor.constraint(equalTo: side.view.trailingAnchor, constant: -4), list.bottomAnchor.constraint(equalTo: pager.topAnchor, constant: -4),
-            pager.centerXAnchor.constraint(equalTo: side.view.centerXAnchor), pager.bottomAnchor.constraint(equalTo: side.view.bottomAnchor, constant: -8),
+            header.leadingAnchor.constraint(equalTo: side.view.leadingAnchor, constant: 16), header.trailingAnchor.constraint(equalTo: side.view.trailingAnchor, constant: -16), header.topAnchor.constraint(equalTo: side.view.safeAreaLayoutGuide.topAnchor, constant: 16),
+            list.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 16), list.leadingAnchor.constraint(equalTo: header.leadingAnchor),
+            list.trailingAnchor.constraint(equalTo: header.trailingAnchor), list.bottomAnchor.constraint(equalTo: pager.topAnchor, constant: -16),
+            pager.centerXAnchor.constraint(equalTo: side.view.centerXAnchor), pager.bottomAnchor.constraint(equalTo: side.view.bottomAnchor, constant: -16),
             emptyHistory.topAnchor.constraint(equalTo: list.topAnchor, constant: 8), emptyHistory.leadingAnchor.constraint(equalTo: title.leadingAnchor),
             emptyHistory.trailingAnchor.constraint(lessThanOrEqualTo: side.view.trailingAnchor, constant: -12)
         ])
         window.contentViewController = split
-        window.setContentSize(NSSize(width: 860, height: 610))
-        sidebar.isCollapsed = false; split.view.layoutSubtreeIfNeeded(); split.splitView.setPosition(218, ofDividerAt: 0)
+        window.setContentSize(NSSize(width: 960, height: 740))
+        sidebar.isCollapsed = false; split.view.layoutSubtreeIfNeeded(); split.splitView.setPosition(240, ofDividerAt: 0)
     }
     func windowDidResize(_ notification: Notification) {
         if window.isVisible, window.frame.width < 580, let sidebar = split.splitViewItems.first, !sidebar.isCollapsed { sidebar.isCollapsed = true }
@@ -8600,24 +8631,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     func numberOfRows(in tableView: NSTableView) -> Int { pageChats.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let chat = pageChats[row], id = NSUserInterfaceItemIdentifier("chat-row")
-        let cell = tableView.makeView(withIdentifier: id, owner: self) as? NSTableCellView ?? NSTableCellView()
-        if cell.identifier == nil {
-            cell.identifier = id
-            let title = NSTextField(labelWithString: ""), subtitle = NSTextField(labelWithString: "")
-            title.font = .systemFont(ofSize: 13, weight: .medium); subtitle.font = .systemFont(ofSize: 11)
-            subtitle.textColor = .secondaryLabelColor; subtitle.tag = 2
-            for label in [title, subtitle] {
-                label.lineBreakMode = .byTruncatingTail; label.translatesAutoresizingMaskIntoConstraints = false; cell.addSubview(label)
-                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 7).isActive = true
-                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -7).isActive = true
-            }
-            title.bottomAnchor.constraint(equalTo: cell.centerYAnchor).isActive = true
-            subtitle.topAnchor.constraint(equalTo: cell.centerYAnchor, constant: 2).isActive = true
-            cell.textField = title
-        }
+        let cell = tableView.makeView(withIdentifier: id, owner: self) as? LibraryRow ?? LibraryRow(frame: .zero)
+        cell.identifier = id
         cell.textField?.stringValue = chat.title; cell.toolTip = chat.title
         let date = Calendar.current.isDateInToday(chat.updated) ? chat.updated.formatted(date: .omitted, time: .shortened) : chat.updated.formatted(date: .abbreviated, time: .omitted)
-        (cell.viewWithTag(2) as? NSTextField)?.stringValue = chat.workspace == "GPT-6.1 Sol" ? date : chat.workspace + "  ·  " + date
+        cell.detail.stringValue = chat.workspace == "GPT-6.1 Sol" ? date : chat.workspace + "  ·  " + date
         return cell
     }
     private func refreshHistory() {
@@ -8639,6 +8657,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         else { historyList.deselectAll(nil) }
         emptyHistory.stringValue = archived ? "No archived chats." : "Your conversations appear here."
         emptyHistory.isHidden = !pageChats.isEmpty
+        titleField.stringValue = library.chats.first { $0.id == library.selected }?.title ?? "New Conversation"
+        window.title = titleField.stringValue
     }
     private func rememberTurn() {
         guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
@@ -10556,13 +10576,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     var reviewHighlight: NSRange?
     var pendingSpoken: SpokenComment?
     var postingSpoken = false
-    let split = NSSplitView()
-    let sidebar = NSVisualEffectView(frame: .zero)
+    let split = NSSplitViewController()
+    let sidebar = NSView()
     let paper = NSView()
     let page = NSView()
     let reload = NSButton(title: "Reload", target: nil, action: nil)
     let libraryButton = NSToolbarItem(itemIdentifier: .init("library"))
-    var focusMode = false
+    var focusMode: Bool { split.splitViewItems.first?.isCollapsed ?? false }
     let titleField = NSTextField(string: "")
     let search = NSSearchField()
     let table = NSTableView()
@@ -10645,18 +10665,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         let toolbar = NSToolbar(identifier: "artifact-writing")
         toolbar.delegate = self; toolbar.displayMode = .iconOnly
         window.toolbar = toolbar
-        let content = window.contentView!
-        split.isVertical = true; split.dividerStyle = .thin; split.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(split)
-        NSLayoutConstraint.activate([
-            split.leadingAnchor.constraint(equalTo: content.leadingAnchor), split.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            split.topAnchor.constraint(equalTo: (window.contentLayoutGuide as! NSLayoutGuide).topAnchor), split.bottomAnchor.constraint(equalTo: content.bottomAnchor)
-        ])
-        split.addArrangedSubview(sidebar); split.addArrangedSubview(paper)
-        sidebar.material = .sidebar; sidebar.blendingMode = .behindWindow
-        sidebar.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        sidebar.widthAnchor.constraint(lessThanOrEqualToConstant: 320).isActive = true
-        paper.widthAnchor.constraint(greaterThanOrEqualToConstant: 460).isActive = true
+        let sideController = NSViewController(), main = NSViewController()
+        sideController.view = sidebar; main.view = paper
+        let library = NSSplitViewItem(sidebarWithViewController: sideController)
+        library.minimumThickness = 200; library.maximumThickness = 320; library.preferredThicknessFraction = 0.25
+        library.canCollapse = true
+        let content = NSSplitViewItem(viewController: main); content.minimumThickness = 460
+        split.addSplitViewItem(library); split.addSplitViewItem(content)
+        window.contentViewController = split
         let libraryTitle = NSTextField(labelWithString: "Library")
         libraryTitle.font = .systemFont(ofSize: 12, weight: .semibold); libraryTitle.textColor = .secondaryLabelColor
         search.placeholderString = "Search notes"; search.delegate = self; search.controlSize = .regular
@@ -10674,17 +10690,18 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         let open = NSButton(title: "Open Markdown…", target: self, action: #selector(openFile))
         open.bezelStyle = .accessoryBar; open.image = NSImage(systemSymbolName: "folder", accessibilityDescription: nil); open.imagePosition = .imageLeading
         open.toolTip = "Open Markdown (⌘O)"
-        let column = NSTableColumn(identifier: .init("title")); column.width = 208; table.addTableColumn(column)
-        table.headerView = nil; table.rowHeight = 36; table.style = .sourceList; table.backgroundColor = .clear
+        let column = NSTableColumn(identifier: .init("title")); column.resizingMask = .autoresizingMask; table.addTableColumn(column)
+        table.headerView = nil; table.rowHeight = 46; table.style = .sourceList; table.backgroundColor = .clear
         table.dataSource = self; table.delegate = self; table.target = self; table.doubleAction = #selector(openSelection)
         table.setAccessibilityLabel("Notes")
         libraryScroll.documentView = table; libraryScroll.hasVerticalScroller = true; libraryScroll.autohidesScrollers = true; libraryScroll.drawsBackground = false
+        libraryScroll.scrollerStyle = .overlay; libraryScroll.verticalScroller?.controlSize = .small
         let side = NSStackView(views: [projectPicker, search, home, header, libraryScroll, open])
         side.orientation = .vertical; side.alignment = .leading; side.spacing = 16; side.translatesAutoresizingMaskIntoConstraints = false
         sidebar.addSubview(side)
         NSLayoutConstraint.activate([
             side.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 16), side.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -16),
-            side.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 16), side.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -16),
+            side.topAnchor.constraint(equalTo: sidebar.safeAreaLayoutGuide.topAnchor, constant: 16), side.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -16),
             projectPicker.widthAnchor.constraint(equalTo: side.widthAnchor), search.widthAnchor.constraint(equalTo: side.widthAnchor), header.widthAnchor.constraint(equalTo: side.widthAnchor), libraryScroll.widthAnchor.constraint(equalTo: side.widthAnchor)
         ])
         recovery.target = self; recovery.action = #selector(exportCopy); recovery.toolTip = "Export your current text as Markdown (⌘⇧S)"
@@ -10713,13 +10730,13 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         status.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         page.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(page)
         NSLayoutConstraint.activate([
-            page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
+            page.centerXAnchor.constraint(equalTo: paper.centerXAnchor), page.topAnchor.constraint(equalTo: paper.safeAreaLayoutGuide.topAnchor), page.bottomAnchor.constraint(equalTo: paper.bottomAnchor),
             page.widthAnchor.constraint(equalTo: paper.widthAnchor)
         ])
         gallery.translatesAutoresizingMaskIntoConstraints = false; paper.addSubview(gallery); gallery.isHidden = true
         NSLayoutConstraint.activate([
             gallery.leadingAnchor.constraint(equalTo: paper.leadingAnchor), gallery.trailingAnchor.constraint(equalTo: paper.trailingAnchor),
-            gallery.topAnchor.constraint(equalTo: paper.topAnchor), gallery.bottomAnchor.constraint(equalTo: paper.bottomAnchor)
+            gallery.topAnchor.constraint(equalTo: paper.safeAreaLayoutGuide.topAnchor), gallery.bottomAnchor.constraint(equalTo: paper.bottomAnchor)
         ])
         gallery.create.target = self; gallery.create.action = #selector(newDocument)
         gallery.retry.target = self; gallery.retry.action = #selector(retryLibrary)
@@ -10757,13 +10774,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             readerTop, readerScroll.bottomAnchor.constraint(equalTo: scroll.bottomAnchor),
             footer.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 36), footer.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -36), footer.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12)
         ])
-        window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(250, ofDividerAt: 0)
+        window.setContentSize(NSSize(width: 960, height: 740))
+        window.contentView?.layoutSubtreeIfNeeded(); split.splitView.setPosition(240, ofDividerAt: 0)
         toggleFocus()
         scroll.contentView.postsBoundsChangedNotifications = true
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in self?.highlightVisible() }
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.init("library"), .init("document-title"), .flexibleSpace, .init("outline"), .init("format"), .init("reading")]
+        [.init("library"), .sidebarTrackingSeparator, .init("document-title"), .flexibleSpace, .init("outline"), .init("format"), .init("reading")]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -11473,9 +11491,12 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     func numberOfRows(in tableView: NSTableView) -> Int { documents.count }
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         let identifier = NSUserInterfaceItemIdentifier("artifact-row")
-        let label = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTextField ?? NSTextField(labelWithString: "")
-        label.identifier = identifier; label.stringValue = documents[row].title; label.lineBreakMode = .byTruncatingTail; label.font = .systemFont(ofSize: 13)
-        return label
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? LibraryRow ?? LibraryRow(frame: .zero)
+        cell.identifier = identifier; cell.textField?.stringValue = documents[row].title; cell.toolTip = documents[row].title
+        cell.detail.stringValue = documents[row].updatedDate.map { date in
+            Calendar.current.isDateInToday(date) ? date.formatted(date: .omitted, time: .shortened) : date.formatted(date: .abbreviated, time: .omitted)
+        } ?? ""
+        return cell
     }
     func tableViewSelectionDidChange(_ notification: Notification) { if table.selectedRow >= 0 { openSelection() } }
     @objc func openSelection() {
@@ -11500,12 +11521,8 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         return false
     }
     @objc func toggleFocus() {
-        focusMode.toggle()
-        if focusMode { split.removeArrangedSubview(sidebar); sidebar.removeFromSuperview() }
-        else {
-            split.insertArrangedSubview(sidebar, at: 0); window.contentView?.layoutSubtreeIfNeeded(); split.setPosition(240, ofDividerAt: 0)
-            if !libraryStarted { libraryStarted = true; refreshLibrary(); refreshProjects() }
-        }
+        split.splitViewItems[0].isCollapsed.toggle()
+        if !focusMode, !libraryStarted { libraryStarted = true; refreshLibrary(); refreshProjects() }
         if session.ready && gallery.isHidden { window.makeFirstResponder(previewing ? reader : text) }
         updateStatus()
     }
