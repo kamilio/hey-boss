@@ -10660,7 +10660,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         projectPicker.addItem(withTitle: libraryProject == "global" ? "Choose a project" : libraryProject.components(separatedBy: "/").last?.replacingOccurrences(of: "named:", with: "") ?? libraryProject)
         projectPicker.selectedItem?.representedObject = libraryProject
         projectPicker.target = self; projectPicker.action = #selector(selectProject)
-        projectPicker.setAccessibilityLabel("Project"); projectPicker.toolTip = libraryProject
+        projectPicker.setAccessibilityLabel("Project"); projectPicker.toolTip = libraryProject == "global" ? nil : libraryProject
         projectPicker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let home = NSButton(title: "All documents", target: self, action: #selector(returnToLibrary))
         home.bezelStyle = .accessoryBar; home.image = NSImage(systemSymbolName: "square.grid.2x2", accessibilityDescription: nil); home.imagePosition = .imageLeading
@@ -11411,6 +11411,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
                     self.projectPicker.lastItem?.representedObject = self.libraryProject
                 }
                 self.projectPicker.select(self.projectPicker.itemArray.first { $0.representedObject as? String == self.libraryProject })
+                self.projectPicker.toolTip = self.libraryProject == "global" ? nil : self.libraryProject
                 if resolveProject { self.refreshLibrary() } else { self.renderLibrary() }
             } catch {
                 self.projectPicker.toolTip = "Couldn’t load projects. Choose All documents to retry."
