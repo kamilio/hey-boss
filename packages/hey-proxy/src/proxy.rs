@@ -1124,7 +1124,14 @@ async fn forward(State(service): State<Arc<Service>>, mut request: Request) -> R
     match accounts::bind(&snapshot, &mut request).await {
         Ok(Some(selected)) => snapshot = selected,
         Ok(None) => {}
-        Err(_) => {
+        Err(failure) => {
+            if let Some(failure) = failure.downcast_ref::<crate::codex_auth::RefreshError>() {
+                return routes::failure(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    failure.code(),
+                    failure.message(),
+                );
+            }
             return error(
                 StatusCode::CONFLICT,
                 "Named account unavailable or binding changed; select an account from /providers/v1",

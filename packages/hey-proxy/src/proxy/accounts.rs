@@ -312,7 +312,12 @@ pub(super) async fn catalog(State(service): State<Arc<Service>>) -> Response {
         .map(|(name, implementation, auth)| {
             let proxy = &proxy;
             async move {
-                let selected = tokio::time::timeout(Duration::from_secs(20), proxy.select(&name))
+                let timeout = if implementation == "codex" {
+                    crate::codex_auth::CREDENTIAL_TIMEOUT
+                } else {
+                    Duration::from_secs(20)
+                };
+                let selected = tokio::time::timeout(timeout, proxy.select(&name))
                     .await
                     .ok()
                     .and_then(Result::ok);
@@ -343,10 +348,7 @@ pub(super) async fn bind(proxy: &Proxy, request: &mut Request) -> Result<Option<
     if proxy.config.mode == Mode::Client {
         return Ok(None);
     }
-    let selected = proxy
-        .select(name.to_str()?)
-        .await
-        .map_err(|_| anyhow::anyhow!("Named provider is unavailable"))?;
+    let selected = proxy.select(name.to_str()?).await?;
     let binding = selected.binding.as_ref().unwrap();
     anyhow::ensure!(
         expected.and_then(|v| v.to_str().ok()) == Some(binding.reference.as_str()),

@@ -72,10 +72,15 @@ impl Cache {
             });
         }
         match &entry.tokens {
-            Ok(tokens) if tokens.expires_at > now().saturating_add(60) => Some(Ok(Credentials {
-                access_token: tokens.access_token.clone(),
-                account_id: tokens.account_id.clone(),
-            })),
+            Ok(tokens)
+                if tokens.refresh_error.is_none()
+                    && tokens.expires_at > now().saturating_add(60) =>
+            {
+                Some(Ok(Credentials {
+                    access_token: tokens.access_token.clone(),
+                    account_id: tokens.account_id.clone(),
+                }))
+            }
             Ok(_) => None,
             Err(error) => Some(Err(anyhow::anyhow!(error.clone()))),
         }

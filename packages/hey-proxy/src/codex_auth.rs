@@ -1,5 +1,6 @@
 //! Proxy-owned Codex (ChatGPT) OAuth credentials. Never mutates Codex CLI's own auth.json.
 mod cache;
+mod refresh;
 use aes_gcm_siv::{
     Aes256GcmSiv, KeyInit, Nonce,
     aead::{Aead, Payload},
@@ -10,6 +11,8 @@ use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
 use rand::TryRngCore;
+pub(crate) use refresh::RefreshError;
+use refresh::exchange_refresh;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -30,6 +33,8 @@ const SCOPES: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
 const AAD: &[u8] = b"hey-proxy Codex OAuth v1";
 const MAX_BYTES: u64 = 1024 * 1024;
+// A selection can wait for the 40s store lock and then a 30s OAuth exchange.
+pub(crate) const CREDENTIAL_TIMEOUT: Duration = Duration::from_secs(75);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Tokens {
@@ -38,6 +43,8 @@ pub(crate) struct Tokens {
     pub expires_at: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_error: Option<RefreshError>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -291,6 +298,7 @@ fn parse_token_response(bytes: &[u8], previous: Option<&Tokens>) -> Result<Token
         refresh_token: refresh.into(),
         expires_at,
         account_id,
+        refresh_error: None,
     })
 }
 
@@ -349,29 +357,6 @@ async fn exchange_code(
         .map_err(|_| anyhow::anyhow!("Cannot reach Codex OAuth token endpoint"))?;
     let bytes = read_oauth_response(response).await?;
     parse_token_response(&bytes, None)
-}
-
-async fn exchange_refresh(
-    client: &reqwest::Client,
-    endpoint: &str,
-    previous: &Tokens,
-) -> Result<Tokens> {
-    let body = json!({
-        "client_id": CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": previous.refresh_token,
-        "scope": "openid profile email",
-    });
-    let response = client
-        .post(endpoint)
-        .timeout(Duration::from_secs(30))
-        .header("accept", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|_| anyhow::anyhow!("Cannot reach Codex OAuth token endpoint"))?;
-    let bytes = read_oauth_response(response).await?;
-    parse_token_response(&bytes, Some(previous))
 }
 
 #[derive(Default, Clone)]
@@ -438,7 +423,8 @@ impl TokenManager {
                 }
             };
             let usable = |t: &Tokens| {
-                t.expires_at > now().saturating_add(60)
+                t.refresh_error.is_none()
+                    && t.expires_at > now().saturating_add(60)
                     && rejected.as_ref().is_none_or(|r| r != &t.access_token)
             };
             if usable(&tokens) {
@@ -450,7 +436,7 @@ impl TokenManager {
             }
             let _lock = lock(&path).await?;
             let disk_path = path.clone();
-            let tokens = tokio::task::spawn_blocking(move || load(&disk_path)).await??;
+            let mut tokens = tokio::task::spawn_blocking(move || load(&disk_path)).await??;
             if usable(&tokens) {
                 cache.store(path, &tokens);
                 return Ok(Credentials {
@@ -458,17 +444,33 @@ impl TokenManager {
                     account_id: tokens.account_id,
                 });
             }
+            if let Some(error) = tokens.refresh_error {
+                return Err(error.into());
+            }
             if gate
                 .as_ref()
                 .is_some_and(|(p, until)| p == &path && *until > Instant::now())
             {
-                bail!("Codex OAuth refresh is cooling down; retry shortly or run hey-proxy codex-login");
+                return Err(RefreshError::Unavailable.into());
             }
+            // Record uncertainty before sending: a lost response or process exit
+            // must not cause the same rotating refresh token to be sent again.
+            tokens.refresh_error = Some(RefreshError::OutcomeUnknown);
+            let (save_path, save_tokens) = (path.clone(), tokens.clone());
+            tokio::task::spawn_blocking(move || save(&save_path, &save_tokens)).await??;
             let fresh = match exchange_refresh(&client, &endpoint, &tokens).await {
                 Ok(fresh) => fresh,
                 Err(error) => {
-                    *gate = Some((path, Instant::now() + Duration::from_secs(30)));
-                    return Err(error);
+                    tokens.refresh_error = if error == RefreshError::Unavailable {
+                        *gate = Some((path.clone(), Instant::now() + Duration::from_secs(30)));
+                        None
+                    } else {
+                        Some(error)
+                    };
+                    let (save_path, save_tokens) = (path.clone(), tokens.clone());
+                    tokio::task::spawn_blocking(move || save(&save_path, &save_tokens)).await??;
+                    cache.store(path, &tokens);
+                    return Err(error.into());
                 }
             };
             let (save_path, save_tokens) = (path.clone(), fresh.clone());
@@ -601,6 +603,7 @@ fn import_tokens_from_codex_home() -> Result<Tokens> {
         refresh_token: refresh_token.into(),
         expires_at,
         account_id,
+        refresh_error: None,
     })
 }
 

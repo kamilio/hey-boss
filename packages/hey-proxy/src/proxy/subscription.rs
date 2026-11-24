@@ -141,7 +141,14 @@ pub(crate) async fn account_usage(
                 "Unknown subscription account",
             ));
         }
-        selected = proxy.select(account).await.map_err(|_| {
+        selected = proxy.select(account).await.map_err(|error| {
+            if let Some(error) = error.downcast_ref::<crate::codex_auth::RefreshError>() {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    error.code(),
+                    error.message(),
+                );
+            }
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "account_unavailable",
