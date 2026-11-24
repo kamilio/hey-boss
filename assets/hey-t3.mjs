@@ -98,6 +98,55 @@ export function recapPage(items, replies) {
   return null;
 }
 
+// Only completed replies and pending questions can wake the voice companion.
+export function voiceSnapshot(projection) {
+  const run = projection.runs.findLast(r => r.status !== 'queued');
+  const pending = projection.runtimeRequests.filter(r => r.status === 'pending');
+  const items = projection.visibleTurnItems.map(row => row.item);
+  const complete = run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
+  return {
+    title: projection.thread.title,
+    run: complete ? { id: run.id, status: run.status } : null,
+    requests: pending.map(r => ({ id: r.id, kind: r.kind,
+      item: items.find(item => item.requestId === r.id || (r.nodeId && item.nodeId === r.nodeId)) })),
+    lastMessage: items.findLast(item => item.type === 'user_message' && (item.createdBy ?? 'user') === 'user')?.text ?? '',
+    replies: complete ? items.filter(item => item.runId === run.id && item.type === 'assistant_message' && !item.streaming).map(item => item.text).join('\n\n') : '',
+  };
+}
+
+async function voiceChange(base, headers, id, afterSequence) {
+  const ws = new WebSocket(new URL('/ws?orchestrationProtocol=2', base), { headers });
+  let sequence = afterSequence;
+  let timer;
+  try {
+    return await new Promise((resolve, reject) => {
+      timer = setTimeout(() => resolve({ sequence, changed: false }), 25000);
+      ws.onerror = ws.onclose = () => reject(Error('T3 voice connection closed.'));
+      ws.onopen = () => ws.send(JSON.stringify({ _tag: 'Request', id: 'voice', tag: 'orchestration.subscribeThread',
+        payload: { threadId: id, afterSequence, acceptBoundedSnapshot: true, acceptDeferredWork: true }, headers: [] }));
+      ws.onmessage = async ({ data }) => {
+        try {
+          const message = JSON.parse(typeof data === 'string' ? data : await data.text());
+          if (message._tag === 'Ping') ws.send('{"_tag":"Pong"}');
+          if (message.requestId !== 'voice') return;
+          if (message._tag === 'Chunk') {
+            for (const value of message.values) {
+              sequence = value.sequence ?? value.snapshotSequence ?? sequence;
+              const event = value.event;
+              if (value.kind === 'snapshot' || event?.type === 'runtime-request.updated' ||
+                  (event?.type === 'run.updated' && ['completed', 'failed', 'cancelled', 'interrupted'].includes(event.payload.status)) ||
+                  (event?.type === 'turn-item.updated' && event.payload.type === 'assistant_message' && !event.payload.streaming)) {
+                resolve({ sequence, changed: true }); return;
+              }
+            }
+            ws.send(JSON.stringify({ _tag: 'Ack', requestId: 'voice' }));
+          } else if (message.exit?._tag === 'Failure') reject(Error('T3 could not subscribe to this thread.'));
+        } catch (e) { reject(e); }
+      };
+    });
+  } finally { clearTimeout(timer); ws.onclose = null; ws.close(); }
+}
+
 export function desiredCommand(op, t, text) {
   const c = { commandId: randomUUID(), threadId: t.id };
   switch (op) {
@@ -338,6 +387,14 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
     if (page.projection?.thread?.id !== id) throw Error('T3 returned a different thread.');
     return page;
   };
+  if (op === 'voice-next') {
+    if (options.sequence !== undefined) {
+      const change = await voiceChange(base, headers, id, options.sequence);
+      if (!change.changed) return change;
+    }
+    const page = await bounded(false);
+    return { sequence: page.snapshotSequence, snapshot: voiceSnapshot(page.projection) };
+  }
   if (op === 'delegate-result' || op === 'delegate-stop') {
     const {projection} = await bounded(false);
     const run = projection.runs.find(r => r.userMessageId === arg);
@@ -561,6 +618,29 @@ async function conversation() {
 }
 
 async function main(args) {
+  if (args[0] === '--voice-watch') {
+    const { environment, id } = target(args[1]);
+    const host = (await connections()).find(host => host.environment === environment);
+    if (!host) throw Error('This thread’s machine is not connected.');
+    let sequence, previous, failed = false;
+    process.stdout.on('error', () => process.exit(0));
+    for (;;) {
+      try {
+        const result = await onConnection({ op: 'voice-next', environment, id, options: { sequence } }, host.socket);
+        sequence = result.sequence;
+        if (result.snapshot) {
+          // A new user message or a running turn alone is not spoken news.
+          const key = JSON.stringify([result.snapshot.run, result.snapshot.requests, result.snapshot.replies]);
+          if (key !== previous) { console.log(JSON.stringify({ snapshot: result.snapshot, key })); previous = key; }
+        }
+        if (failed) { console.log(JSON.stringify({ connected: true })); failed = false; }
+      } catch (e) {
+        if (!failed) console.log(JSON.stringify({ error: e.message }));
+        failed = true;
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
+    }
+  }
   if (args[0] === '--conversation') {
     try { await conversation(); } catch (e) { console.log(JSON.stringify({error:e.message})); }
     return;

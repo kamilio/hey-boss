@@ -5,7 +5,25 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { target, desiredCommand, recapPage, serverCLI, acrossHosts } from './hey-t3.mjs';
+import { target, desiredCommand, recapPage, serverCLI, acrossHosts, voiceSnapshot } from './hey-t3.mjs';
+
+test('voice ignores running progress and tool output, then includes the result and pending questions', () => {
+  const projection = { thread: { title: 'Fix' }, runs: [{id:'run',status:'running'}], runtimeRequests: [], visibleTurnItems: [
+    {item:{type:'user_message',text:'Fix the bug',createdBy:'user'}},
+    ...Array.from({length:20}, (_,i) => ({item:{type:'assistant_message',runId:'run',text:'Progress '+i,streaming:true}})),
+    {item:{type:'command_execution',runId:'run',text:'private tool log'}},
+  ] };
+  assert.equal(voiceSnapshot(projection).replies, '');
+  assert.equal(voiceSnapshot(projection).run, null);
+  projection.runs[0].status = 'completed';
+  projection.visibleTurnItems.push({item:{type:'assistant_message',runId:'run',text:'Fixed. Tests passed.',streaming:false}});
+  assert.equal(voiceSnapshot(projection).replies, 'Fixed. Tests passed.');
+  projection.runtimeRequests.push({id:'ask',nodeId:'node',status:'pending',kind:'user_input'});
+  projection.visibleTurnItems.push({item:{type:'user_input_request',requestId:'ask',question:'Which region?'}});
+  assert.equal(voiceSnapshot(projection).requests[0].item.question, 'Which region?');
+  projection.runtimeRequests[0].status='resolved';
+  assert.deepEqual(voiceSnapshot(projection).requests, []);
+});
 
 test('default projects, thread listing and search combine connected machines in stable order', async (t) => {
   const hosts = [{ environment: 'local' }, { environment: 'devbox', socket: 'connected' }, { environment: 'offline', socket: 'old' }];
