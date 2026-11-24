@@ -1,11 +1,11 @@
 'use strict';
-const cacheName = 'conversations-shell-v1';
+const cacheName = 'conversations-shell-v2';
 const assets = ['/', '/app.js', '/app.css', '/components.css', '/brand.png', '/icon.png', '/manifest.webmanifest', '/mic.js'];
 self.addEventListener('install', event => {
   event.waitUntil(caches.open(cacheName).then(cache => cache.addAll(assets)));
 });
 self.addEventListener('activate', event => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(caches.keys().then(names=>Promise.all(names.filter(name=>name.startsWith('conversations-shell-') && name!==cacheName).map(name=>caches.delete(name)))).then(()=>self.clients.claim()));
 });
 // Only cache the app shell. Pairing, transcripts and voice always go to the Mac.
 self.addEventListener('fetch', event => {

@@ -6323,19 +6323,59 @@ func auditPhoneQueue(_ path: String) throws {
     precondition(try! call("state")["canSend"] as? Bool == true)
     let accepted = try call("send", payload)
     precondition(accepted["accepted"] as? String == message && chat.phase == .thinking)
-    precondition(try! call("state")["canSend"] as? Bool == false)
+    precondition(try! call("state")["canSend"] as? Bool == true)
     for _ in 0..<5 { precondition(try! call("send", payload)["accepted"] as? String == message) }
     precondition(chat.conversationHistory.count == 1)
     var changed = payload; changed["text"] = "Different text"
     precondition((try? call("send", changed)) == nil)
+    let second = UUID().uuidString, third = UUID().uuidString
+    let next = ["chat":target, "text":"Second queued message", "message":second]
+    for _ in 0..<3 { precondition(try! call("send", next)["accepted"] as? String == second) }
+    _ = try call("send", ["chat":target, "text":"Third queued message", "message":third])
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 2)
+    precondition(chat.conversationHistory.count == 1)
+    chat.window.makeKeyAndOrderFront(nil); chat.window.contentView?.layoutSubtreeIfNeeded()
+    var captured = false
+    Task { @MainActor in
+        try! await Task.sleep(for: .milliseconds(300))
+        let windows = try! await SCShareableContent.currentProcess.windows
+        let filter = SCContentFilter(desktopIndependentWindow: windows.first { $0.windowID == UInt32(chat.window.windowNumber) }!)
+        let config = SCStreamConfiguration(); config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        config.width = Int(chat.window.frame.width); config.height = Int(chat.window.frame.height)
+        let image = try! await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        try! NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!.write(to: root.appendingPathComponent("queue.png"))
+        captured = true
+    }
+    while !captured { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03)) }
+    _ = try call("cancel_queued", ["chat":target, "message":third])
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
+    precondition(try! call("send", ["chat":target,"text":"Third queued message","message":third])["accepted"] as? String == third)
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
+    _ = try call("cancel", ["chat":target])
+    precondition(chat.phase == .idle && (try! call("state")["queuePaused"] as? Bool) == true)
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
     // Read the checkpoint before stop() can flush any unsaved state.
     let checkpoint = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
-    precondition(checkpoint.conversationHistory.count == 1 && checkpoint.historyList.numberOfRows == 1)
+    precondition(checkpoint.conversationHistory.count >= 1 && checkpoint.historyList.numberOfRows == 1)
     // Restore the durable receipt with a new native window, then retry from another chat.
     chat.stop("Done")
     chat = VoiceConversation(cli: "/usr/bin/false", saveURL: index)
     precondition(try! call("send", payload)["accepted"] as? String == message)
-    precondition(chat.conversationHistory.count == 1)
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
+    precondition(try! call("send", next)["accepted"] as? String == second)
+    precondition(try! call("send", ["chat":target,"text":"Third queued message","message":third])["accepted"] as? String == third)
+    precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
+    let resumed = Pipe(); chat.process = Process(); chat.writer = resumed.fileHandleForWriting
+    _ = try call("resume_queue", ["chat":target])
+    precondition((try! call("state")["queue"] as! [[String:Any]]).isEmpty)
+    precondition(chat.conversationHistory.last?["content"] == "Second queued message")
+    _ = try call("send", ["chat":target,"text":"After completion","message":UUID().uuidString])
+    chat.event(["TurnCompleted":["status":"Completed","output":"Finished"]])
+    let deadline = Date(timeIntervalSinceNow: 2)
+    while chat.conversationHistory.last?["content"] != "After completion", Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(chat.conversationHistory.last?["content"] == "After completion")
+    precondition((try! call("state")["queue"] as! [[String:Any]]).isEmpty)
+    chat.stop("Done")
     _ = try call("new", ["chat":target])
     precondition(try! call("state")["chat"] as? String != target)
     precondition(try! call("send", payload)["accepted"] as? String == message)

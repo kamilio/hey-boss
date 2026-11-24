@@ -23,12 +23,17 @@ const server=http.createServer((req,res)=>{
     r.chats=chats.slice(start,start+30);r.next=start+30<chats.length?r.chats.at(-1).id:null;
    }
    if(p.action==='state' && fixture.blockState){res.writeHead(503);res.end();return;}
-   if(p.action==='state')Object.assign(r,{chat,queuedSend:true,canSend:!fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
+   if(p.action==='state')Object.assign(r,{chat,queuedSend:true,serverQueue:!!fixture.serverQueue,queue:fixture.queue || [],queuePaused:!!fixture.queuePaused,canCancel:!!fixture.busy,canSend:fixture.serverQueue || !fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
+   if(p.action==='cancel'){fixture.busy=false;fixture.queuePaused=true;}
+   if(p.action==='cancel_queued')fixture.queue=fixture.queue.filter(item=>item.id!==p.message);
+   if(p.action==='resume_queue'){fixture.queuePaused=false;const next=fixture.queue.shift();if(next){fixture.messages.get(chat).push({speaker:'You',text:next.text});fixture.busy=true;fixture.revision++;}}
    if(p.action==='send'){
     fixture.attempts++;
     if(!fixture.accepted.has(p.message)){
-     if(p.chat!==chat||fixture.busy){res.end(JSON.stringify({status:'error',error:'Wrong chat or busy'}));return;}
-     fixture.accepted.set(p.message,p.text);fixture.messages.get(chat).push({speaker:'You',text:p.text});fixture.revision++;
+     if(p.chat!==chat||(!fixture.serverQueue&&fixture.busy)){res.end(JSON.stringify({status:'error',error:'Wrong chat or busy'}));return;}
+     fixture.accepted.set(p.message,p.text);
+     if(fixture.serverQueue&&fixture.busy)fixture.queue.push({id:p.message,text:p.text});
+     else fixture.messages.get(chat).push({speaker:'You',text:p.text});fixture.revision++;
     }
     r.accepted=p.message;
     if(fixture.loseReply){fixture.loseReply=false;fixture.offline=true;req.socket.destroy();return;}
@@ -51,7 +56,7 @@ const server=http.createServer((req,res)=>{
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;
  try {
   for(const [name,engine] of [['webkit',webkit],['chrome',chromium]]) {
-   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js','conversation_pairing_checks.js','conversation_sidebar_checks.js']) {
+   for(const file of ['conversation_safari_checks.js','conversation_recovery_checks.js','conversation_offline_checks.js','conversation_pairing_checks.js','conversation_sidebar_checks.js','conversation_queue_checks.js']) {
     const browser=await engine.launch(name==='chrome'?{channel:'chrome',headless:true}:{headless:true});
     try {
      for(const key of Object.keys(fixture))delete fixture[key];fixture.browser=name;

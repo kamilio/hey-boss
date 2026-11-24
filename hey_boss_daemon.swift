@@ -8246,6 +8246,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     let settings = NSMenuToolbarItem(itemIdentifier: .init("conversation-settings"))
     let input = ConversationComposer()
     let send = NSButton()
+    let stopReply = NSButton(title: "Stop", target: nil, action: nil)
+    let queueMenu = NSPopUpButton(frame: .zero, pullsDown: true)
     let scroll = NSScrollView()
     let turns = FlippedStack()
     private var firstRendered = 0
@@ -8359,6 +8361,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         sheet.accessoryView = detailView(selection.text); sheet.addButton(withTitle: "Done")
         sheet.beginSheetModal(for: window)
     }
+    private struct QueuedMessage: Codable, Equatable {
+        let id: UUID
+        let text: String
+        let capture: Capture?
+    }
+    private var queuedMessages: [QueuedMessage] = [] { didSet { phoneRevision += 1 } }
+    private var cancelledMessages: [QueuedMessage] = []
+    private var queuePaused = false
     private struct Saved: Codable, Equatable {
         var messages: [Message]
         var selections: [Selection]?
@@ -8371,6 +8381,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var interruptedAfter: PlaybackInterruption?
         var t3Thread: String?
         var t3LastUpdate: String?
+        var queuedMessages: [QueuedMessage]?
+        var queuePaused: Bool?
+        var cancelledMessages: [QueuedMessage]?
     }
     // Each line replaces only the changed suffixes; composer state travels with the
     // same record so an interrupted turn never restores mismatched text and tools.
@@ -8523,7 +8536,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         muteMic.imagePosition = .imageOnly; muteMic.target = self; muteMic.action = #selector(toggleMute)
         pauseReply.bezelStyle = .accessoryBarAction; pauseReply.controlSize = .small
         pauseReply.imagePosition = .imageOnly; pauseReply.target = self; pauseReply.action = #selector(togglePlayback)
-        let voiceStatus = NSStackView(views: [muteMic, pauseReply, status, listenNext])
+        stopReply.bezelStyle = .accessoryBarAction; stopReply.controlSize = .small
+        stopReply.target = self; stopReply.action = #selector(stopCurrentReply)
+        queueMenu.bezelStyle = .accessoryBar; queueMenu.controlSize = .small
+        let voiceStatus = NSStackView(views: [muteMic, pauseReply, status, queueMenu, stopReply, listenNext])
         voiceStatus.alignment = .centerY; voiceStatus.spacing = 8
         meter.target = self; meter.action = #selector(toggle)
         for view in [scroll,welcome,dock] { view.translatesAutoresizingMaskIntoConstraints = false; body.addSubview(view) }
@@ -8899,8 +8915,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             var result: [String:Any] = ["chat":library.selected.uuidString, "voice":voiceStatus, "mine":owns,
                 "passage":owns && reading ? playingPassage : "", "spoken":playingThrough,
                 "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end,
-                "queuedSend":true, "canSend":restoreError == nil && pauseID == nil && terminal == nil && approvalSheet == nil &&
-                    (owns || phase == .idle) && acceptsTypedMessage && input.stringValue.isEmpty && pendingCapture == nil && selections.isEmpty]
+                "queuedSend":true, "serverQueue":true, "queuePaused":queuePaused,
+                "queue":queuedMessages.map { ["id":$0.id.uuidString,"text":$0.text] },
+                "canCancel":restoreError == nil && pauseID == nil && terminal == nil && (owns || audio == nil) && (answering || approvalSheet != nil), "canSend":restoreError == nil && pauseID == nil && terminal == nil &&
+                    (owns || audio == nil) && (acceptsTypedMessage || answering) && input.stringValue.isEmpty && pendingCapture == nil && selections.isEmpty]
             if owns && canListenNext { result["interruptLabel"] = listenNext.title }
             if let alert = approvalSheet, let id = approvals.first?.0 {
                 let view = (alert.accessoryView as? NSScrollView)?.documentView as? NSTextView
@@ -8935,10 +8953,33 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         // A retry may arrive after the answer started, another chat opened, or a relaunch.
         // The receipt lives in the saved user message, so a lost HTTP reply cannot duplicate it.
         if p.action == "send", let id = p.message, let target = p.chat {
-            let saved = target == library.selected ? messages : (try? readChat(target).saved.messages) ?? []
+            let stored = target == library.selected ? nil : try? readChat(target).saved
+            let pending = target == library.selected ? queuedMessages + cancelledMessages : (stored?.queuedMessages ?? []) + (stored?.cancelledMessages ?? [])
+            if let accepted = pending.first(where: { $0.id == id }) {
+                guard accepted.text == p.text else { throw StorageError(description: "Message ID reused with different text.") }
+                if target == library.selected, !save() { throw StorageError(description: status.stringValue) }
+                return ["accepted":id.uuidString]
+            }
+            let saved = target == library.selected ? messages : stored?.messages ?? []
             if let accepted = saved.first(where: { $0.phoneID == id }) {
                 guard accepted.text == p.text else { throw StorageError(description: "Message ID reused with different text.") }
                 if target == library.selected, !save() { throw StorageError(description: status.stringValue) }
+                return ["accepted":id.uuidString]
+            }
+        }
+        if p.chat == library.selected, restoreError == nil, pauseID == nil, terminal == nil, owns || audio == nil {
+            if p.action == "cancel" { stopCurrentReply(); return ["chat":library.selected.uuidString] }
+            if p.action == "cancel_queued", let id = p.message { guard cancelQueued(id) else { throw StorageError(description: status.stringValue) }; return ["chat":library.selected.uuidString, "cancelled":!messages.contains(where: { $0.phoneID == id })] }
+            if p.action == "resume_queue" { resumeQueued(); return ["chat":library.selected.uuidString] }
+            if p.action == "send", answering && !turnDone || !queuedMessages.isEmpty {
+                guard input.stringValue.isEmpty, pendingCapture == nil, selections.isEmpty,
+                      let id = p.message, let text = p.text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw StorageError(description: "Finish the desktop draft first.")
+                }
+                queuedMessages.append(QueuedMessage(id: id, text: text, capture: nil))
+                guard save() else { queuedMessages.removeLast(); throw StorageError(description: status.stringValue) }
+                updateComposerActions()
+                if !answering || turnDone { resumeQueued() }
                 return ["accepted":id.uuidString]
             }
         }
@@ -9090,6 +9131,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
         selections = []; checkpoint = nil; visuals.removeAll(); pendingVisuals.removeAll(); media = ConversationMediaView()
+        queuedMessages.removeAll(); cancelledMessages.removeAll(); queuePaused = false
         rows.removeAll(); messages.removeAll(); details.removeAll(); tools.removeAll(); activities.removeAll(); pendingCapture = nil
     }
     func state(_ next: Phase, _ message: String) {
@@ -9219,8 +9261,19 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         let playbackAction = playbackPaused ? "Resume reply" : "Pause reply"
         pauseReply.image = NSImage(systemSymbolName: playbackPaused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
         pauseReply.toolTip = playbackAction; pauseReply.setAccessibilityLabel(playbackAction)
-        send.isEnabled = pauseID == nil && acceptsTypedMessage
-        send.toolTip = phase == .recording ? "Send typed message instead of recording" : "Send message"
+        send.isEnabled = pauseID == nil && restoreError == nil && terminal == nil && (acceptsTypedMessage || answering)
+        send.toolTip = answering && !turnDone ? "Queue message after this reply" : phase == .recording ? "Send typed message instead of recording" : "Send message"
+        stopReply.isHidden = !answering && !heldReply && approvalSheet == nil
+        queueMenu.isHidden = queuedMessages.isEmpty
+        queueMenu.removeAllItems(); queueMenu.addItem(withTitle: "\(queuedMessages.count) queued")
+        if queuePaused && !queuedMessages.isEmpty {
+            let item = NSMenuItem(title: "Resume queue", action: #selector(resumeQueued), keyEquivalent: "")
+            item.target = self; queueMenu.menu?.addItem(item)
+        }
+        for queued in queuedMessages {
+            let item = NSMenuItem(title: "Cancel: " + String(queued.text.prefix(80)), action: #selector(removeQueued(_:)), keyEquivalent: "")
+            item.target = self; item.representedObject = queued.id.uuidString; queueMenu.menu?.addItem(item)
+        }
         send.setAccessibilityLabel(send.toolTip)
         listenNext.isHidden = !canListenNext
         listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
@@ -9247,12 +9300,58 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(.listening, "Listening")
     }
     @objc func sendTyped() {
-        guard pauseID == nil, acceptsTypedMessage else { return }
+        guard pauseID == nil, restoreError == nil, terminal == nil, acceptsTypedMessage || answering else { return }
         let text = input.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else { return }
+        if answering && !turnDone || !queuedMessages.isEmpty {
+            let queued = QueuedMessage(id: UUID(), text: Self.referencedTranscript(text, ends: [], selections: selections), capture: pendingCapture)
+            queuedMessages.append(queued)
+            let oldCapture = pendingCapture, oldSelections = selections
+            input.stringValue = ""; pendingCapture = nil; selections = []
+            guard save() else { queuedMessages.removeLast(); input.stringValue = text; pendingCapture = oldCapture; selections = oldSelections; return }
+            updateComposerActions()
+            if !answering || turnDone { resumeQueued() }
+            return
+        }
         if phase == .recording { recording = nil }
         interruptPlayback()
         input.stringValue = ""; respond(text)
+    }
+    @objc func stopCurrentReply() {
+        queuePaused = true
+        interruptPlayback(); heldReply = false
+        cancelTurn()
+        turnDone = true
+        save(); state(audio == nil ? .idle : .listening, "Reply stopped")
+    }
+    @objc private func removeQueued(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String, let id = UUID(uuidString: raw) else { return }
+        cancelQueued(id)
+    }
+    @discardableResult private func cancelQueued(_ id: UUID) -> Bool {
+        guard let item = queuedMessages.first(where: { $0.id == id }) else { return true }
+        let previous = queuedMessages
+        queuedMessages.removeAll { $0.id == id }; cancelledMessages.append(item)
+        guard save() else { queuedMessages = previous; cancelledMessages.removeLast(); return false }
+        updateComposerActions(); return true
+    }
+    @objc private func resumeQueued() {
+        queuePaused = false
+        guard save() else { queuePaused = true; return }
+        drainQueue()
+    }
+    private func drainQueue() {
+        guard !queuePaused, pauseID == nil, restoreError == nil, terminal == nil, approvalSheet == nil,
+              acceptsTypedMessage, input.stringValue.isEmpty, pendingCapture == nil, selections.isEmpty,
+              let next = queuedMessages.first, beginSession() else { return }
+        interruptPlayback()
+        queuedMessages.removeFirst(); pendingCapture = next.capture
+        // respond saves the receipt and removal in the same chat checkpoint.
+        if !respond(next.text, phoneID: next.id) {
+            if !messages.contains(where: { $0.phoneID == next.id }) { queuedMessages.insert(next, at: 0) }
+            queuePaused = true; save()
+        }
+        updateComposerActions()
     }
     private func interruptPlayback() {
         if reading || heldReply || playbackPaused {
@@ -9748,6 +9847,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         dismissApprovals(); turnDone = true; updateComposerActions()
         if !save() { failTerminal(status.stringValue) }
         playNext(); generateTitle()
+        let chat = library.selected
+        DispatchQueue.main.async { [weak self] in guard let self, self.library.selected == chat else { return }; self.drainQueue() }
     }
     private func highlight(_ label: ConversationText, _ range: NSRange?) {
         let styled = NSMutableAttributedString(attributedString: label.attributedStringValue)
@@ -10187,6 +10288,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        queuePaused = true
         if failure != nil, let key = t3Processing, t3Pending?.key == key { t3Pending = nil }
         t3Processing = nil
         failTerminal(failure ?? "Reply stopped")
@@ -10281,13 +10383,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, selections: selections.isEmpty ? nil : selections, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter, t3Thread: t3Thread, t3LastUpdate: t3LastUpdate)
+                let saved = Saved(messages: rows, selections: selections.isEmpty ? nil : selections, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter, t3Thread: t3Thread, t3LastUpdate: t3LastUpdate, queuedMessages: queuedMessages.isEmpty ? nil : queuedMessages, queuePaused: queuePaused, cancelledMessages: cancelledMessages.isEmpty ? nil : cancelledMessages)
                 try recordChat(saved)
             }
             try writeLibrary(); return true
         } catch { status.isHidden = false; status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
     }
     private func apply(_ saved: Saved) {
+        cancelledMessages = saved.cancelledMessages ?? []
+        queuedMessages = saved.queuedMessages ?? []; queuePaused = !queuedMessages.isEmpty || (saved.queuePaused ?? false)
         t3Thread = saved.t3Thread; t3LastUpdate = saved.t3LastUpdate
         directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
         selections = saved.selections ?? []; pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""

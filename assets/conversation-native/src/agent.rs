@@ -8,6 +8,17 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'_>) -> Result<()> {
+    let (_tx, mut input) = tokio::sync::mpsc::unbounded_channel();
+    run_with_input(state, url, request, tools, &mut input).await
+}
+
+pub async fn run_with_input(
+    state: &Path,
+    url: &str,
+    request: &Value,
+    tools: &mut Plugins<'_>,
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+) -> Result<()> {
     let turn = field(request, "turn")?;
     std::fs::create_dir_all(tools.cwd)?;
     let mut prompt = context::prompt(tools.home, tools.cwd)?;
@@ -100,9 +111,14 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         if !text.is_empty() && (attached.is_none() || calls.is_empty()) {
             emit(json!({"Message":{"text":text}}))?;
         }
+        let mut follow_up = input.try_recv().ok();
         for call in &calls {
             let name = field(&call["function"], "name")?;
             let id = field(call, "id")?;
+            if follow_up.is_some() {
+                book.push(json!({"role":"tool","name":name,"toolCallId":id,"content":"Skipped because the user submitted a follow-up."}))?;
+                continue;
+            }
             let mut activity = None;
             let content: Result<Value> = async {
                 ensure!(
@@ -151,6 +167,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                 item["aggregatedOutput"] = content;
                 emit(json!({"ToolCompleted":{"id":id,"output":item,"failed":failed}}))?;
             }
+            follow_up = input.try_recv().ok();
         }
         if let Some(cut) = compact_at(&book.messages) {
             emit(json!({"AgentStatus":{"text":"Remembering the conversation…"}}))?;
@@ -174,6 +191,16 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                 &summary.encode_utf16().collect::<Vec<_>>(),
             );
             book.compact(cut,json!({"role":"system","name":"compaction","content":String::from_utf16(&formatted)?}))?;
+        }
+        follow_up = follow_up.or_else(|| input.try_recv().ok());
+        if follow_up.is_some() {
+            while let Some(request) = follow_up {
+                let text = field(&request, "turn")?;
+                book.push(json!({"role":"user","content":text}))?;
+                emit(json!({"InputAccepted":{"text":text,"message":request["message"]}}))?;
+                follow_up = input.try_recv().ok();
+            }
+            continue;
         }
         if calls.is_empty() {
             emit(json!({"TurnCompleted":{"status":"Completed","output":text,"usage":usage}}))?;

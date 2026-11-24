@@ -638,3 +638,57 @@ async fn background_turn_uses_checkout_and_no_desktop_context() -> Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn follow_up_skips_proposed_tools_and_is_saved_before_next_inference() -> Result<()> {
+    let tmp = scratch();
+    let root = tmp.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    let (url, server) = mock(vec![
+        tool(
+            "shell",
+            json!({"command":"touch should-not-run","description":"Checking."}),
+        ),
+        msg("Redirected."),
+    ])
+    .await?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let mut plugins = Plugins {
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let (input, mut pending) = mpsc::unbounded_channel();
+    input.send(json!({"turn":"Correction one"}))?;
+    input.send(json!({"turn":"Correction two"}))?;
+    let state = root.join("agent.json");
+    agent::run_with_input(
+        &state,
+        &url,
+        &json!({"turn":"First", "job":true}),
+        &mut plugins,
+        &mut pending,
+    )
+    .await?;
+    let requests = server.await??;
+    assert!(!root.join("should-not-run").exists());
+    let next = requests[1]["input"].to_string();
+    assert!(
+        next.contains("Skipped because")
+            && next.contains("Correction one")
+            && next.contains("Correction two")
+    );
+    let book = hey_boss_conversation::notebook::Notebook::open(&state, &Value::Null)?;
+    let users: Vec<_> = book
+        .messages
+        .iter()
+        .filter(|m| m["role"] == "user")
+        .map(|m| m["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(users, ["First", "Correction one", "Correction two"]);
+    Ok(())
+}

@@ -21,23 +21,40 @@ function connection() {
 }
 function outbox() {
   const list=$('outbox'), old=new Map(Array.from(list.children,el=>[el.key,el]));
-  const items=queued();
+  const local=queued(), remote=(snapshot?.queue || []).map(item=>({...item,id:item.id.toLowerCase(),chat,remote:true}));
+  const items=[...local.filter(item=>!remote.some(saved=>saved.id===item.id)),...remote];
   for(const item of items) {
     let row=old.get(item.id); old.delete(item.id);
     if(!row) {
       row=document.createElement('article'); row.key=item.id; row.className='user queued';
-      row.append(document.createElement('div'),document.createElement('small'),document.createElement('button'));
+      row.append(document.createElement('div'),document.createElement('small'),document.createElement('button'),document.createElement('button'));
+      row.children[2].className='button';
       row.lastChild.className='button'; list.append(row);
     }
     text(row.firstChild,item.text);
-    text(row.children[1],item.error || (item.chat!==chat ? 'Queued in another chat' : connected ? (snapshot?.canSend ? 'Queued · ready to send' : 'Queued · waiting for this turn to finish') : 'Queued · waiting for connection'));
-    const action=row.lastChild;
-    action.hidden=!item.error && item.chat===chat;
+    text(row.children[1],item.remote ? (snapshot.queuePaused ? 'Queued · paused' : 'Queued · waiting for this turn to finish') : item.error || (item.chat!==chat ? 'Queued in another chat' : connected ? (snapshot?.canSend ? 'Queued · ready to send' : 'Queued · waiting for this turn to finish') : 'Queued · waiting for connection'));
+    const action=row.children[2];
+    action.hidden=item.remote || (!item.error && item.chat===chat);
     text(action,item.chat!==chat ? 'Open chat' : 'Retry');
     action.onclick=async()=>{try{
       if(item.chat!==chat) { await api('open',{chat:item.chat}); before=null; rendered=null; await refresh(); }
       else { text($('notice'),''); delete item.error; localStorage.setItem(queuePrefix+item.id,JSON.stringify(item)); outbox(); await flushQueue(); }
     }catch(e){notice(e);}};
+    const cancel=row.lastChild; text(cancel,'Cancel'); cancel.disabled=item.chat!==chat;
+    cancel.setAttribute('aria-label','Cancel queued message');
+    cancel.onclick=async()=>{cancel.disabled=true;try{
+      await navigator.locks.request('conversation-send',async()=>{
+        // Wait for any in-flight send so cancelling cannot race its acknowledgement.
+        if(item.remote || !localStorage.getItem(queuePrefix+item.id)) {
+          const result=await api('cancel_queued',{chat:item.chat,message:item.id});
+          if(result.cancelled===false)text($('notice'),'This message has already been sent.');
+        } else {
+          if(connected && snapshot?.serverQueue) await api('cancel_queued',{chat:item.chat,message:item.id});
+        }
+        localStorage.removeItem(queuePrefix+item.id);
+      });
+      outbox(); if(connected)await refresh();
+    }catch(e){notice(e);}finally{cancel.disabled=false;}};
   }
   for(const row of old.values())row.remove();
 }
@@ -135,6 +152,8 @@ async function refresh() {
   button('pause', mine && v.phase === 'speaking', s.paused ? 'Resume reply' : 'Pause reply');
   button('interrupt', mine && v.interrupt, s.interruptLabel || 'Interrupt reply');
   button('end', recording);
+  button('cancel', !!s.canCancel);
+  button('resumeQueue', !!s.queuePaused && !!s.queue?.length);
   if (previous?.passage !== s.passage || previous?.spoken !== s.spoken) {
     $('caption').replaceChildren();
     if (s.passage) {
@@ -343,6 +362,8 @@ $('talk').onclick = () => {
   const action = snapshot.voice.phase==='recording' ? api('finish') : stop(voice);
   action.then(refresh).catch(notice);
 };
+act('cancel',async()=>{await api('cancel');await refresh();});
+act('resumeQueue',async()=>{await api('resume_queue');await refresh();});
 act('end',async()=>{if (voice) await stop(voice); await refresh();});
 for (const id of ['mute','pause','interrupt']) act(id,async()=>{await api(id); await refresh();});
 act('earlier',async()=>{before=snapshot.start;rendered=null;await refresh();});

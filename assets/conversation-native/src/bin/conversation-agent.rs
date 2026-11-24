@@ -36,7 +36,19 @@ async fn serve() -> Result<()> {
         Ok::<(), anyhow::Error>(())
     };
     let work = async {
-        while let Some(req) = turns.recv().await {
+        let mut queued = std::collections::VecDeque::new();
+        loop {
+            let req = match queued.pop_front() {
+                Some(req) => req,
+                None => match turns.recv().await {
+                    Some(req) => req,
+                    None => break,
+                },
+            };
+            if req["cancel"] == true {
+                queued.clear();
+                continue;
+            }
             let mut plugins = Plugins {
                 focus: None,
                 home: &home,
@@ -46,15 +58,56 @@ async fn serve() -> Result<()> {
                 http: &http,
                 acks: &mut acks,
             };
-            if let Err(e) = agent::run(
-                Path::new(&state),
-                "http://127.0.0.1:8080/v1/responses",
-                &req,
-                &mut plugins,
-            )
-            .await
-            {
-                emit(json!({"error":format!("{e:#}")}))?;
+            let (follow_tx, mut follow_rx) = mpsc::unbounded_channel();
+            let mut stop_queue = false;
+            let cancelled = {
+                let run = agent::run_with_input(
+                    Path::new(&state),
+                    "http://127.0.0.1:8080/v1/responses",
+                    &req,
+                    &mut plugins,
+                    &mut follow_rx,
+                );
+                tokio::pin!(run);
+                loop {
+                    tokio::select! {
+                        biased;
+                        next = turns.recv() => {
+                            let Some(next) = next else { return Ok(()); };
+                            if next["cancel"] == true { queued.clear(); stop_queue = true; break true; }
+                            match next["mode"].as_str().unwrap_or("queue") {
+                                "interrupt" => { queued.push_front(next); break true; }
+                                "follow-up" => { follow_tx.send(next)?; }
+                                "queue" => queued.push_back(next),
+                                _ => { emit(json!({"error":"Unknown input mode"}))?; }
+                            }
+                        }
+                        result = &mut run => {
+                            if let Err(e) = result { emit(json!({"error":format!("{e:#}")}))?; }
+                            break false;
+                        }
+                    }
+                }
+            };
+            // Inputs arriving at the terminal boundary become new turns, never disappear.
+            let remaining: Vec<_> = std::iter::from_fn(|| follow_rx.try_recv().ok()).collect();
+            if !stop_queue {
+                if cancelled {
+                    let replacement = queued.pop_front();
+                    for request in remaining.into_iter().rev() {
+                        queued.push_front(request);
+                    }
+                    if let Some(replacement) = replacement {
+                        queued.push_front(replacement);
+                    }
+                } else {
+                    for request in remaining.into_iter().rev() {
+                        queued.push_front(request);
+                    }
+                }
+            }
+            if cancelled {
+                emit(json!({"TurnCompleted":{"status":"Cancelled"}}))?;
             }
         }
         Ok(())
