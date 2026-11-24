@@ -1,5 +1,11 @@
 [
   {
+    "name": "Initial catch-up while busy",
+    "automatic": true,
+    "initial_catch_up": true,
+    "turn": "{\"status\":\"running\",\"lastMessage\":\"Fix the duplicate offline messages.\",\"recentReplies\":\"Found that retrying after reconnection assigns a fresh message ID. I am changing retries to retain the original ID.\",\"run\":null,\"requests\":[],\"replies\":\"\"}"
+  },
+  {
     "name": "Working silently",
     "automatic": true,
     "turn": "{\"run\":null,\"requests\":[],\"lastMessage\":\"Fix the duplicate offline messages.\",\"replies\":\"\"}",

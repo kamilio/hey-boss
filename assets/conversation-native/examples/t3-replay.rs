@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
             root.join("delivery.json"),
             json!({"uncertain":scenario["uncertain"] == true}).to_string(),
         )?;
-        let request = json!({"t3_thread":"t3code://threads/00000000-0000-0000-0000-000000000001/simulated","turn":scenario["turn"],"automatic":scenario["automatic"] == true});
+        let request = json!({"t3_thread":"t3code://threads/00000000-0000-0000-0000-000000000001/simulated","turn":scenario["turn"],"automatic":scenario["automatic"] == true,"initial_catch_up":scenario["initial_catch_up"] == true});
         agent::run(
             &state,
             "http://127.0.0.1:8080/v1/responses",

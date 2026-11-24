@@ -60,7 +60,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
         .and_then(|v| v.get("observed").cloned())
         .unwrap_or(json!("unavailable"));
     book.push(json!({"role":"user","content":if let Some(link) = attached {
-        json!({"attached_thread":link,"automatic_update":automatic,"text":turn}).to_string()
+        json!({"attached_thread":link,"automatic_update":automatic,"initial_catch_up":request["initial_catch_up"] == true,"text":turn}).to_string()
     } else if job { turn.to_owned() } else { format!("Observed pre-focus desktop context: {observed}\n\n{turn}") }}))?;
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
     let mut usage = Value::Null;

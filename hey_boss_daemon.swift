@@ -9585,7 +9585,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             do {
                 if process == nil { try startSol() }
                 var request: [String: Any] = ["turn": question]
-                if let t3Thread { request["t3_thread"] = t3Thread; request["automatic"] = automatic }
+                if let t3Thread {
+                    request["t3_thread"] = t3Thread; request["automatic"] = automatic
+                    request["initial_catch_up"] = automatic && t3LastUpdate == nil
+                }
                 if !FileManager.default.fileExists(atPath: agentStateURL.deletingPathExtension().appendingPathExtension("jsonl").path) {
                     request["history"] = Array(conversationHistory.dropLast())
                 }

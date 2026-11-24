@@ -107,6 +107,8 @@ export function voiceSnapshot(projection) {
   const complete = run && ['completed', 'failed', 'cancelled', 'interrupted'].includes(run.status);
   return {
     title: projection.thread.title,
+    status: run?.status ?? 'idle',
+    recentReplies: items.filter(item => item.type === 'assistant_message' && !item.streaming).slice(-3).map(item => item.text).join('\n\n'),
     run: complete ? { id: run.id, status: run.status } : null,
     requests: pending.map(r => ({ id: r.id, kind: r.kind,
       item: items.find(item => item.requestId === r.id || (r.nodeId && item.nodeId === r.nodeId)) })),
