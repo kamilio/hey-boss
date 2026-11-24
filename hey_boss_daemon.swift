@@ -8468,7 +8468,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         input.setAccessibilityLabel("Message")
         send.bezelStyle = .accessoryBarAction; send.isBordered = false
         send.image = NSImage(systemSymbolName: "arrow.up.circle.fill", accessibilityDescription: "Send message")?.withSymbolConfiguration(.init(pointSize: 23, weight: .medium))
-        send.contentTintColor = .controlAccentColor; send.target = self; send.action = #selector(sendTyped); send.toolTip = "Send message"
+        send.contentTintColor = .controlAccentColor; send.target = self; send.action = #selector(sendTyped)
         status.font = .systemFont(ofSize: 12, weight: .medium); status.textColor = .secondaryLabelColor
         listenNext.bezelStyle = .accessoryBarAction; listenNext.controlSize = .small
         listenNext.target = self; listenNext.action = #selector(listenForNextTurn)
@@ -9090,7 +9090,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var canListenNext: Bool {
         pauseID == nil && audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
     }
-    private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || (turnDone && answering) }
+    private var acceptsTypedMessage: Bool { phase == .idle || phase == .listening || phase == .recording || (turnDone && answering) }
     @objc private func updateBackgroundEscape() {
         // In the transcript, sendEvent lets sheets and input methods handle Escape first.
         guard phase != .idle, audio?.phoneSession == nil, pauseID == nil, !window.isKeyWindow, window.attachedSheet?.isKeyWindow != true else {
@@ -9117,6 +9117,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         pauseReply.image = NSImage(systemSymbolName: playbackPaused ? "play.fill" : "pause.fill", accessibilityDescription: nil)
         pauseReply.toolTip = playbackAction; pauseReply.setAccessibilityLabel(playbackAction)
         send.isEnabled = pauseID == nil && acceptsTypedMessage
+        send.toolTip = phase == .recording ? "Send typed message instead of recording" : "Send message"
+        send.setAccessibilityLabel(send.toolTip)
         listenNext.isHidden = !canListenNext
         listenNext.title = turnDone ? "Skip reading" : "Interrupt reply"
         listenNext.toolTip = turnDone ? "Skip the rest of this spoken answer" : "Stop this reply"
@@ -9145,6 +9147,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard pauseID == nil, acceptsTypedMessage else { return }
         let text = input.stringValue
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, beginSession() else { return }
+        if phase == .recording { recording = nil }
         interruptPlayback()
         input.stringValue = ""; respond(text)
     }

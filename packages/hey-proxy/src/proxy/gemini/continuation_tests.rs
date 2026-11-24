@@ -3,6 +3,88 @@ use super::*;
 use std::sync::Mutex;
 
 #[tokio::test]
+async fn native_stream_heartbeats_are_compatible_with_gemini_sdk() {
+    for continuation in [false, true] {
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let captured = requests.clone();
+        let (upstream_url, upstream_task) = serve(Router::new().fallback(move || {
+            let n = captured.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if continuation && n == 1 {
+                    tokio::time::sleep(HEARTBEAT_INTERVAL + Duration::from_millis(100)).await;
+                }
+                let body = Body::from_stream(async_stream::stream! {
+                    if !continuation || n == 0 {
+                        let mut candidate = json!({"content":{"parts":[{"text":"start"}]}});
+                        if continuation {
+                            candidate["finishReason"] = json!("CONTINUATION");
+                            candidate["continuationToken"] = json!("fixture-token");
+                        }
+                        yield Ok::<Bytes, std::io::Error>(Bytes::from(format!("data: {}\n\n", json!({"candidates":[candidate]}))));
+                    }
+                    if !continuation {
+                        tokio::time::sleep(HEARTBEAT_INTERVAL + Duration::from_millis(100)).await;
+                    }
+                    if !continuation || n == 1 {
+                        let event = json!({"candidates":[{"content":{"parts":[{"text":"end","thoughtSignature":"unchanged"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"totalTokenCount":12}});
+                        yield Ok(Bytes::from(format!("data: {event}\n\n")));
+                    }
+                });
+                ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
+            }
+        })).await;
+        let config = Config {
+            gemini: Some(provider(&upstream_url, "api_key")),
+            ..Config::test_fixture()
+        };
+        let (url, proxy_task) = serve(super::super::router(config).unwrap()).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{url}/v1beta/models/test:streamGenerateContent?alt=sse"
+            ))
+            .json(&json!({"contents":[{"role":"user","parts":[{"text":"fixture"}]}]}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let text = response.text().await.unwrap();
+        // The Google SDK accepts whitespace followed by data frames, but a
+        // comment heartbeat blocks its anchored parser until EOF.
+        let events: Vec<Value> = text
+            .split("\n\n")
+            .filter(|frame| !frame.trim().is_empty())
+            .map(|frame| {
+                serde_json::from_str(
+                    frame
+                        .trim_start()
+                        .strip_prefix("data: ")
+                        .expect("Gemini SDK cannot consume non-data SSE frames"),
+                )
+                .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            events.last().unwrap()["candidates"][0]["finishReason"],
+            "STOP"
+        );
+        assert_eq!(
+            events.last().unwrap()["candidates"][0]["content"]["parts"][0]["thoughtSignature"],
+            "unchanged"
+        );
+        assert_eq!(
+            events.last().unwrap()["usageMetadata"]["totalTokenCount"],
+            12
+        );
+        assert_eq!(
+            requests.load(std::sync::atomic::Ordering::SeqCst),
+            if continuation { 2 } else { 1 }
+        );
+        upstream_task.abort();
+        proxy_task.abort();
+    }
+}
+
+#[tokio::test]
 async fn continuation_resumes_one_response_in_all_client_shapes() {
     for path in [
         "/v1/responses",
@@ -427,5 +509,123 @@ async fn continuation_retains_structured_output_and_terminal_semantics() {
             task.abort();
             proxy.abort();
         }
+    }
+}
+
+#[tokio::test]
+async fn native_stream_resumes_empty_continuation_after_tool_result() {
+    for failure in ["none", "repeated", "http", "stop", "capacity", "native"] {
+        let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = requests.clone();
+        let (upstream_url, upstream_task) = serve(Router::new().fallback(
+            move |headers: HeaderMap, axum::Json(body): axum::Json<Value>| {
+                assert_eq!(headers["x-goog-api-key"], "synthetic-gemini");
+                assert_eq!(headers["x-goog-user-project"], "fixture-project");
+                let mut requests = captured.lock().unwrap();
+                let n = requests.len();
+                requests.push(body);
+                async move {
+                    if failure == "native" {
+                        return ([(header::CONTENT_TYPE,"text/event-stream")], "data: {\"error\":{\"code\":503,\"status\":\"UNAVAILABLE\",\"message\":\"Synthetic failure\"}}\n\n").into_response();
+                    }
+                    if n == 1 && failure == "http" {
+                        return (StatusCode::BAD_REQUEST, "invalid").into_response();
+                    }
+                    if n == 1 && failure == "capacity" {
+                        return (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response();
+                    }
+                    let candidate = if failure == "stop" {
+                        json!({"index":0,"content":{"role":"model","parts":[]},"finishReason":"STOP"})
+                    } else if n == 0 || failure == "repeated" {
+                        json!({"index":0,"content":{"role":"model","parts":[]},"finishReason":"CONTINUATION","continuationToken":"private-token"})
+                    } else {
+                        json!({"index":0,"content":{"role":"model","parts":[{"text":"done","thoughtSignature":"preserved"}]},"finishReason":"STOP"})
+                    };
+                    let native = json!({"candidates":[candidate]});
+                    let usage = json!({"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":if n == 0 {0} else {2},"totalTokenCount":if n == 0 {10} else {12}}});
+                    ([(header::CONTENT_TYPE,"text/event-stream")],format!("data: {native}\n\ndata: {usage}\n\n")).into_response()
+                }
+            },
+        )).await;
+        let mut config = Config {
+            gemini: Some(provider(&upstream_url, "api_key")),
+            ..Config::test_fixture()
+        };
+        config.retry.initial_delay_ms = 0;
+        config.retry.max_delay_ms = 0;
+        let (url, proxy_task) = serve(super::super::router(config).unwrap()).await;
+        let body = json!({"contents":[{"role":"user","parts":[{"functionResponse":{"name":"read_file","response":{"content":"test"}}}]}],"generationConfig":{"maxOutputTokens":100},"tools":[]});
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{url}/v1beta/models/test:streamGenerateContent?alt=sse"
+            ))
+            .header("x-goog-user-project", "fixture-project")
+            .json(&body)
+            .send()
+            .await;
+        let bytes = match response {
+            Ok(response) => {
+                assert_eq!(response.status(), 200);
+                response.bytes().await
+            }
+            Err(error) => Err(error),
+        };
+        if matches!(failure, "repeated" | "http" | "native") {
+            assert!(
+                bytes.is_err(),
+                "Incomplete native streams must fail transport; Gemini CLI ignores JSON error frames after a tool result"
+            );
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                if failure == "native" { 1 } else { 2 }
+            );
+            upstream_task.abort();
+            proxy_task.abort();
+            continue;
+        }
+        let bytes = bytes.unwrap();
+        let events = NativeSse::default().feed(&bytes, true).unwrap();
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            if failure == "stop" {
+                1
+            } else if failure == "capacity" {
+                3
+            } else {
+                2
+            },
+            "{failure}"
+        );
+        if failure != "stop" {
+            let mut next = body.clone();
+            next["continuationToken"] = json!("private-token");
+            for request in &requests[1..] {
+                assert_eq!(request, &next);
+            }
+        }
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-token"));
+        assert!(!String::from_utf8_lossy(&bytes).contains("CONTINUATION"));
+        if failure == "none" || failure == "capacity" {
+            assert!(events.iter().any(|event| {
+                event.pointer("/candidates/0/content/parts/0/thoughtSignature")
+                    == Some(&json!("preserved"))
+            }));
+            assert_eq!(
+                events.last().unwrap()["usageMetadata"]["totalTokenCount"],
+                22
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(
+                        |event| event.pointer("/candidates/0/finishReason") == Some(&json!("STOP"))
+                    )
+                    .count(),
+                1
+            );
+        }
+        upstream_task.abort();
+        proxy_task.abort();
     }
 }

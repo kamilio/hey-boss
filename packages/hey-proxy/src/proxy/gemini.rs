@@ -832,7 +832,119 @@ fn repair_native_tool_names(body: &mut Value) -> bool {
     changed
 }
 
-/// Native responses and non-generation requests remain byte-for-byte native.
+async fn send_native_request(
+    proxy: &Arc<Proxy>,
+    mut request: reqwest::RequestBuilder,
+) -> std::result::Result<reqwest::Response, Response> {
+    let mut recovery = Recovery::for_request(proxy);
+    loop {
+        // Only buffered generation bodies can be replayed.
+        let retry = request.try_clone();
+        let upstream = request.send().await.map_err(|_| {
+            error(
+                StatusCode::BAD_GATEWAY,
+                "Could not reach native Gemini upstream",
+            )
+        })?;
+        if matches!(
+            upstream.status(),
+            StatusCode::TOO_MANY_REQUESTS | StatusCode::SERVICE_UNAVAILABLE
+        ) && let Some(next) = retry
+            && recovery.retry(&proxy.config, upstream.headers()).await
+        {
+            proxy.service.logs.retries(proxy.log_id, recovery.retries);
+            request = next;
+            continue;
+        }
+        return Ok(upstream);
+    }
+}
+
+// Gemini CLI does not resume CONTINUATION markers, including empty ones after
+// a tool result. Join those HTTP chunks without changing native signed parts.
+fn native_generation_stream(
+    proxy: Arc<Proxy>,
+    request: reqwest::RequestBuilder,
+    body: Value,
+    mut upstream: reqwest::Response,
+) -> Body {
+    Body::from_stream(async_stream::stream! {
+        let budget = body.pointer("/generationConfig/maxOutputTokens").and_then(Value::as_u64);
+        let mut continuation = Continuation::new(body, budget);
+        let mut parser = NativeSse::default();
+        let mut finished = false;
+        let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+        let result: Result<()> = loop {
+            let chunk = loop {
+                tokio::select! {
+                    chunk = upstream.chunk() => break chunk,
+                    // Google's SDK consumes whitespace, but not SSE comments.
+                    _ = heartbeat.tick() => yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"\n")),
+                }
+            };
+            let (bytes, eof) = match chunk {
+                Ok(Some(bytes)) => (bytes, false),
+                Ok(None) => (Bytes::new(), true),
+                Err(_) => break Err(anyhow::anyhow!("Native Gemini stream interrupted")),
+            };
+            let events = (|| -> Result<Vec<Value>> {
+                let mut events = parser.feed(&bytes, eof)?;
+                for event in &mut events {
+                    anyhow::ensure!(event.get("error").is_none(), "Native Gemini stream returned an error");
+                    continuation.feed(event)?;
+                }
+                Ok(events)
+            })();
+            match events {
+                Ok(events) => for event in events {
+                    finished |= event.pointer("/candidates/0/finishReason").is_some();
+                    yield Ok(Bytes::from(format!("data: {event}\n\n")));
+                },
+                Err(error) => break Err(error),
+            }
+            if !eof { continue; }
+            match continuation.next() {
+                Ok(Some(body)) => {
+                    let next = request.try_clone().expect("buffered generation request").json(&body);
+                    let send = send_native_request(&proxy, next);
+                    tokio::pin!(send);
+                    let response = loop {
+                        tokio::select! {
+                            response = &mut send => break response,
+                            _ = heartbeat.tick() => yield Ok(Bytes::from_static(b"\n")),
+                        }
+                    };
+                    match response {
+                        Ok(response) if response.status().is_success()
+                            && response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("text/event-stream")) => {
+                            upstream = response;
+                            parser = NativeSse::default();
+                        }
+                        _ => break Err(anyhow::anyhow!("Native Gemini continuation request failed")),
+                    }
+                }
+                Ok(None) => {
+                    if !finished {
+                        let terminal = continuation.terminal();
+                        if terminal.pointer("/candidates/0/finishReason").is_some() {
+                            yield Ok(Bytes::from(format!("data: {terminal}\n\n")));
+                        }
+                    }
+                    break Ok(());
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        if result.is_err() {
+            proxy.service.logs.complete(proxy.log_id, "failed", "transport", Some("gemini_native_continuation_error"), 0);
+            // Gemini CLI ignores JSON error frames after tool results. Fail the
+            // HTTP body so an incomplete generation cannot look successful.
+            yield Err(std::io::Error::other("Native Gemini generation could not be completed"));
+        }
+    })
+}
+
+/// Non-streaming responses and non-generation requests remain byte-for-byte native.
 pub(super) async fn forward_native(
     proxy: Arc<Proxy>,
     parts: axum::http::request::Parts,
@@ -850,6 +962,7 @@ pub(super) async fn forward_native(
     };
     proxy.record_accounting_route("gemini", "default");
     let incoming = parts.uri.path();
+    let mut generation_body = None;
     let body = if parts.method == axum::http::Method::POST
         && [":generateContent", ":streamGenerateContent"]
             .iter()
@@ -864,29 +977,33 @@ pub(super) async fn forward_native(
                 );
             }
         };
-        if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes)
-            && {
-                let mut changed = repair_native_tool_names(&mut value);
-                // -1 delegates the budget to Gemini. Level-based models express the
-                // same choice by leaving the level unset and reject a numeric budget.
-                if matches!(config.thinking, hey_proxy::gemini::Thinking::Level)
-                    && let Some(thinking) = value
-                        .pointer_mut("/generationConfig/thinkingConfig")
-                        .and_then(Value::as_object_mut)
-                    && thinking.get("thinkingBudget").and_then(Value::as_i64) == Some(-1)
-                {
-                    thinking.remove("thinkingBudget");
-                    changed = true;
-                }
-                changed
+        if let Ok(mut value) = serde_json::from_slice::<Value>(&bytes) {
+            let mut repaired = repair_native_tool_names(&mut value);
+            // -1 delegates the budget to Gemini. Level-based models express the
+            // same choice by leaving the level unset and reject a numeric budget.
+            if matches!(config.thinking, hey_proxy::gemini::Thinking::Level)
+                && let Some(thinking) = value
+                    .pointer_mut("/generationConfig/thinkingConfig")
+                    .and_then(Value::as_object_mut)
+                && thinking.get("thinkingBudget").and_then(Value::as_i64) == Some(-1)
+            {
+                thinking.remove("thinkingBudget");
+                repaired = true;
             }
-        {
-            Body::from(value.to_string())
+            let body = if repaired {
+                reqwest::Body::from(value.to_string())
+            } else {
+                reqwest::Body::from(bytes)
+            };
+            if incoming.ends_with(":streamGenerateContent") {
+                generation_body = Some(value);
+            }
+            body
         } else {
-            Body::from(bytes)
+            reqwest::Body::from(bytes)
         }
     } else {
-        body
+        reqwest::Body::wrap_stream(body.into_data_stream())
     };
     // Config can name either the Developer API version root or a complete
     // Vertex publisher root. Incoming full Vertex resource paths remain valid.
@@ -978,32 +1095,80 @@ pub(super) async fn forward_native(
         headers.remove(name);
     }
     headers.extend(credentials);
-    let upstream = match proxy
+    let request = proxy
         .client
         .request(parts.method, &url)
         .headers(headers)
-        .body(reqwest::Body::wrap_stream(body.into_data_stream()))
-        .send()
-        .await
-    {
-        Ok(v) => v,
-        Err(_) => {
-            return error(
-                StatusCode::BAD_GATEWAY,
-                "Could not reach native Gemini upstream",
-            );
+        .body(body);
+    let continuation_request = generation_body.as_ref().and_then(|_| request.try_clone());
+    let keep_alive = generation_body.is_some()
+        && parts.uri.query().is_some_and(|query| {
+            url::form_urlencoded::parse(query.as_bytes()).any(|(k, v)| k == "alt" && v == "sse")
+        });
+    let adc = config.auth == Auth::Adc;
+    let response_proxy = proxy.clone();
+    let mut response = Box::pin(async move {
+        let proxy = response_proxy;
+        let upstream = match send_native_request(&proxy, request).await {
+            Ok(upstream) => upstream,
+            Err(response) => return response,
+        };
+        let status = upstream.status();
+        if status == StatusCode::UNAUTHORIZED && adc {
+            proxy.service.credentials.invalidate_adc().await;
         }
-    };
-    let status = upstream.status();
-    if status == StatusCode::UNAUTHORIZED && config.auth == Auth::Adc {
-        proxy.service.credentials.invalidate_adc().await;
+        let mut headers = upstream.headers().clone();
+        clean_headers(&mut headers);
+        let body = if status.is_success()
+            && headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.contains("text/event-stream"))
+            && let (Some(body), Some(request)) = (generation_body, continuation_request)
+        {
+            headers.remove(header::CONTENT_LENGTH);
+            native_generation_stream(proxy, request, body, upstream)
+        } else {
+            Body::from_stream(upstream.bytes_stream())
+        };
+        let mut response = Response::new(body);
+        *response.status_mut() = status;
+        *response.headers_mut() = headers;
+        response
+    });
+    if !keep_alive {
+        return response.await;
     }
-    let mut headers = upstream.headers().clone();
-    clean_headers(&mut headers);
-    let mut response = Response::new(Body::from_stream(upstream.bytes_stream()));
-    *response.status_mut() = status;
-    *response.headers_mut() = headers;
-    response
+    tokio::select! {
+        response = &mut response => return response,
+        _ = tokio::time::sleep(HEARTBEAT_INTERVAL) => {},
+    }
+    // Gemini CLI times out after 60 seconds without headers. Keep the same
+    // upstream request alive; dropping this body also cancels that request.
+    let body = Body::from_stream(async_stream::stream! {
+        yield Ok::<Bytes, std::io::Error>(Bytes::from_static(b"\n"));
+        let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + HEARTBEAT_INTERVAL, HEARTBEAT_INTERVAL);
+        let response = loop {
+            tokio::select! {
+                response = &mut response => break response,
+                _ = heartbeat.tick() => yield Ok(Bytes::from_static(b"\n")),
+            }
+        };
+        if !response.status().is_success()
+            || !response.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.contains("text/event-stream"))
+        {
+            proxy.service.logs.complete(proxy.log_id, "failed", "transport", Some("gemini_native_headers_error"), 0);
+            // Headers are already sent. An I/O error keeps late rejections
+            // from becoming empty successful generations in Gemini CLI.
+            yield Err(std::io::Error::other("Native Gemini generation request failed"));
+            return;
+        }
+        let mut stream = response.into_body().into_data_stream();
+        while let Some(chunk) = stream.next().await {
+            yield chunk.map_err(std::io::Error::other);
+        }
+    });
+    ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
 }
 
 #[cfg(test)]
@@ -1396,6 +1561,73 @@ mod tests {
         }
         upstream.abort();
         proxy.abort();
+    }
+
+    #[tokio::test]
+    async fn native_gemini_retries_capacity_errors_before_forwarding_preserving_wire_bytes() {
+        for (operation, status, recover, expected_calls) in [
+            ("generateContent", 429, true, 2),
+            ("streamGenerateContent", 503, true, 2),
+            ("generateContent", 400, true, 1),
+            ("generateContent", 429, false, 3),
+            ("countTokens", 429, true, 1),
+            ("streamGenerateContent", 200, false, 1),
+        ] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let state = (calls.clone(), status, recover);
+            async fn upstream(
+                State((calls, status, recover)): State<(Arc<AtomicUsize>, u16, bool)>,
+                request: Request,
+            ) -> Response {
+                let body = axum::body::to_bytes(request.into_body(), 1024)
+                    .await
+                    .unwrap();
+                assert_eq!(body.as_ref(), b"{ \"contents\": [] }");
+                let attempt = calls.fetch_add(1, Ordering::SeqCst);
+                let status = if recover && attempt > 0 { 200 } else { status };
+                (
+                    StatusCode::from_u16(status).unwrap(),
+                    [(header::RETRY_AFTER, "0")],
+                    "{ \"error\": { \"status\": \"RESOURCE_EXHAUSTED\" } }",
+                )
+                    .into_response()
+            }
+            let (upstream_url, task) =
+                serve(Router::new().fallback(upstream).with_state(state)).await;
+            let mut config = Config {
+                gemini: Some(provider(&upstream_url, "api_key")),
+                ..Config::test_fixture()
+            };
+            config.retry.max_retries = 2;
+            config.retry.recovery_timeout_ms = 0;
+            config.retry.initial_delay_ms = 0;
+            config.retry.max_delay_ms = 0;
+            let (url, proxy) = serve(super::super::router(config).unwrap()).await;
+            let response = reqwest::Client::new()
+                .post(format!("{url}/v1beta/models/gemini-test:{operation}"))
+                .body("{ \"contents\": [] }")
+                .send()
+                .await
+                .unwrap();
+            let expected_status = if recover && expected_calls > 1 {
+                200
+            } else {
+                status
+            };
+            assert_eq!(
+                response.status().as_u16(),
+                expected_status,
+                "{operation}/{status}"
+            );
+            assert_eq!(response.headers()[header::RETRY_AFTER], "0");
+            assert_eq!(
+                response.text().await.unwrap(),
+                "{ \"error\": { \"status\": \"RESOURCE_EXHAUSTED\" } }"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), expected_calls);
+            task.abort();
+            proxy.abort();
+        }
     }
 
     #[tokio::test]
