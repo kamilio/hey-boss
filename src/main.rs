@@ -441,6 +441,10 @@ enum BrowserAction {
     Open {
         url: String,
     },
+    /// Open an OAuth authorization URL and forward its loopback redirect_uri.
+    Authorize {
+        url: String,
+    },
     Request {
         session: String,
         #[arg(long, default_value = "/")]
@@ -767,6 +771,9 @@ fn run() -> std::io::Result<()> {
             return match action {
                 BrowserAction::Open { url } => {
                     desktop_action("browser.open", serde_json::json!({"url":url}), None)
+                }
+                BrowserAction::Authorize { url } => {
+                    desktop_action("browser.authorize", serde_json::json!({"url":url}), None)
                 }
                 BrowserAction::Close { session } => desktop_action(
                     "browser.close",

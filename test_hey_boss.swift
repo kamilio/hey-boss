@@ -2698,11 +2698,13 @@ func auditDesktopActions() {
     actions.pasteboard = { precondition(Thread.isMainThread); return pasteboard }
     var opened: [URL] = []; var cancelled = 0
     actions.openWebsite = { url, completion in opened.append(url); completion(true) }
-    actions.forward = { host, remote in precondition(host == "devbox" && remote == 4123); return port }
+    actions.forward = { host, remote, local in precondition(host == "devbox" && remote == 4123 && local == nil); return port }
     actions.cancel = { host, local, remote in precondition(host == "devbox" && local == port && remote == 4123); cancelled += 1 }
-    func invoke(_ id: String, _ method: String, _ params: Any, owner: String = "devbox", version: Int = 1, generation: String = "first") -> [String: Any] {
+    func invoke(_ id: String, _ method: String, _ params: Any, owner: String = "devbox", version: Int = 1, generation: String = "first", remote: Bool = true) -> [String: Any] {
         let payload = try! JSONSerialization.data(withJSONObject: ["version":version,"id":id,"method":method,"params":params], options: [.sortedKeys])
-        let requestData = try! JSONSerialization.data(withJSONObject: ["command":"action","sync":false,"bridge_host":owner,"bridge_generation":generation,"question":String(decoding:payload,as:UTF8.self)])
+        var fields: [String: Any] = ["command":"action","sync":false,"question":String(decoding:payload,as:UTF8.self)]
+        if remote { fields["bridge_host"] = owner; fields["bridge_generation"] = generation }
+        let requestData = try! JSONSerialization.data(withJSONObject: fields)
         let request = try! JSONDecoder().decode(Request.self, from: requestData)
         let lock = NSLock(); var response: [String: Any]?
         actions.handle(request) { value in lock.lock(); response = value; lock.unlock() }
@@ -2757,6 +2759,49 @@ func auditDesktopActions() {
     let fresh = invoke("generation-open", "browser.open", params, generation:"second")["result"] as! [String: Any]
     precondition(fresh["session"] as! String != old["session"] as! String)
     precondition(invoke("generation-close", "browser.close", ["session":fresh["session"]!], generation:"second")["result"] != nil)
+
+    // OAuth must keep the authorization URL and redirect port unchanged.
+    var callbackForwards = 0; var callbackCancels = 0
+    actions.forward = { host, remote, local in
+        precondition(host == "devbox" && remote == port && local == port)
+        callbackForwards += 1; return port
+    }
+    actions.cancel = { host, local, remote in
+        precondition(host == "devbox" && local == port && remote == port); callbackCancels += 1
+    }
+    let authorization = "https://signin.example.com/authorize?state=fixture%2Bstate&redirect_uri=http%3A%2F%2F127.0.0.1%3A\(port)%2Foauth%2Fcallback&code_challenge=fixture"
+    let authorized = invoke("authorize", "browser.authorize", ["url":authorization])["result"] as! [String: Any]
+    let authSession = authorized["session"] as! String
+    precondition(opened.last!.absoluteString == authorization && callbackForwards == 1)
+    precondition(invoke("authorize", "browser.authorize", ["url":authorization])["result"] != nil && callbackForwards == 1)
+    precondition(invoke("authorize-conflict", "browser.authorize", ["url":authorization])["error"] != nil)
+    let callbackResponse = invoke("callback", "browser.request", ["session":authSession,"path":"/echo?code=synthetic&state=fixture","method":"POST","body":"callback"])["result"] as! [String: Any]
+    precondition(callbackResponse["status"] as! Int == 201 && callbackResponse["body"] as! String == "callback")
+    precondition(invoke("callback-owner", "browser.close", ["session":authSession], owner:"other")["error"] != nil)
+    precondition(invoke("callback-close", "browser.close", ["session":authSession])["result"] != nil && callbackCancels == 1)
+    for redirect in ["https://127.0.0.1:1234/cb", "http://example.com:1234/cb", "http://127.0.0.1/cb", "http://user@127.0.0.1:1234/cb", "http://127.0.0.1:1234/cb#fragment", "http://[::1]:1234/cb"] {
+        var url = URLComponents(string: "https://example.com/authorize")!
+        url.queryItems = [URLQueryItem(name:"redirect_uri", value:redirect)]
+        precondition(invoke("invalid-callback", "browser.authorize", ["url":url.string!])["error"] != nil)
+    }
+    precondition(invoke("duplicate-callback", "browser.authorize", ["url":authorization + "&redirect_uri=http%3A%2F%2F127.0.0.1%3A1234"])["error"] != nil)
+    precondition(invoke("insecure-authorization", "browser.authorize", ["url":authorization.replacingOccurrences(of:"https://", with:"http://")])["error"] != nil)
+    precondition(callbackForwards == 1)
+    actions.openWebsite = { _, completion in completion(false) }
+    precondition(invoke("browser-failed", "browser.authorize", ["url":authorization])["error"] != nil && callbackCancels == 2)
+    actions.openWebsite = { url, completion in opened.append(url); completion(true) }
+    actions.forward = { _, _, _ in throw StorageError(description:"Port occupied") }
+    let opensBeforeFailure = opened.count
+    precondition(invoke("tunnel-failed", "browser.authorize", ["url":authorization])["error"] != nil && opened.count == opensBeforeFailure)
+    actions.forward = { _, _, _ in port }
+    let expiring = invoke("expiring", "browser.authorize", ["url":authorization])["result"] as! [String: Any]
+    actions.queue.sync { actions.release(expiring["session"] as! String) }
+    precondition(invoke("expired", "browser.request", ["session":expiring["session"]!])["error"] != nil && callbackCancels == 3)
+    actions.forward = { _, _, _ in preconditionFailure("Local authorization must not forward") }
+    let localAuth = invoke("local-authorize", "browser.authorize", ["url":authorization], remote:false)["result"] as! [String: Any]
+    precondition(opened.last!.absoluteString == authorization)
+    precondition(invoke("local-close", "browser.close", ["session":localAuth["session"]!], remote:false)["result"] != nil && callbackCancels == 3)
+    print("Passed: OAuth URL preservation, exact callback port, callback HTTP, port conflicts, ownership, validation, failed browser/tunnel cleanup, expiry release")
 
     let cachedBeforeClipboard = actions.queue.sync { actions.completionOrder }
     func copy(_ text: String) {

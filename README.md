@@ -974,6 +974,25 @@ VS Code. Explicit legacy VS Code modes remain available for compatibility.
 See [the action protocol](docs/browser-actions.md) for envelopes, limits and
 connection lifecycle.
 
+For CLI OAuth login, `hey-boss browser authorize AUTHORIZATION_URL` opens the
+authorization page on the connected Mac and forwards its loopback `redirect_uri`
+back to the caller without changing the URL. Close the returned session when
+login finishes; it also expires after five minutes.
+
+The independent Rust utility in `utilities/aws-login` uses this action for AWS:
+
+```sh
+cargo install --locked --path utilities/aws-login --root ~/.local
+# Add under utils in ~/.hey-boss/fleet.yaml:
+# aws-login: {command: '~/.local/bin/hey-aws-login'}
+hey-boss utils aws-login work
+```
+
+Install the utility on each machine that runs AWS CLI. It uses the supplied
+profile, `AWS_PROFILE`, or `default`, declines changes to an existing profile's
+identity, and verifies the resulting identity before reporting success. AWS CLI
+owns credential storage and refresh. The global `aws` skill documents this flow.
+
 ## VPN-aware automatic connection
 
 On the Mac, import the hey-proxy host inventory once and enable the login manager:

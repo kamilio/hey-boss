@@ -6,7 +6,12 @@ use std::process::{Command, Stdio};
 #[derive(Subcommand)]
 pub enum Action {
     #[command(hide = true)]
-    Forward { host: String, remote_port: u16 },
+    Forward {
+        host: String,
+        remote_port: u16,
+        #[arg(long)]
+        local_port: Option<u16>,
+    },
     #[command(hide = true)]
     CancelForward {
         host: String,
@@ -131,8 +136,12 @@ fn quote(value: &str) -> String {
 
 pub fn run(action: &Action) -> Result<(), String> {
     match action {
-        Action::Forward { host, remote_port } => {
-            println!("{}", forward_port(host, *remote_port)?);
+        Action::Forward {
+            host,
+            remote_port,
+            local_port,
+        } => {
+            println!("{}", forward_port(host, *remote_port, *local_port)?);
             return Ok(());
         }
         Action::CancelForward {
@@ -381,9 +390,13 @@ fn multiplex(host: &str, operation: &str, local: u16, remote: u16) -> Result<(),
     }
     Ok(())
 }
-fn forward_port(host: &str, remote: u16) -> Result<u16, String> {
-    if remote == 0 {
-        return Err("remote port must be nonzero".into());
+fn forward_port(host: &str, remote: u16, local: Option<u16>) -> Result<u16, String> {
+    if remote == 0 || local == Some(0) {
+        return Err("forwarding ports must be nonzero".into());
+    }
+    if let Some(local) = local {
+        multiplex(host, "forward", local, remote)?;
+        return Ok(local);
     }
     // Reserve an ephemeral loopback port; SSH reports a bind race rather than
     // attaching to someone else's listener. Retry locally, with no new login.

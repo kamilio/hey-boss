@@ -25,6 +25,15 @@ JSON envelope with the same version/id and either `result` or `error`.
   the browser-facing `url`, original `source_url`, and `opened`. Remote loopback
   URLs forward to remote IPv4 loopback using the authenticated SSH master;
   paths and query strings are preserved.
+- `browser.authorize`: HTTPS OAuth authorization URL with one `redirect_uri`
+  pointing to HTTP `127.0.0.1` or `localhost` with an explicit port. Opens the
+  authorization URL unchanged and forwards that exact callback port to the
+  originating machine over its existing SSH connection. An occupied port fails
+  before the browser opens. The caller retains responsibility for OAuth state
+  and PKCE validation. Returns the same session envelope as `browser.open`;
+  close it when login finishes. Authorization sessions expire after five minutes.
+  Local calls open the browser without forwarding. Session HTTP requests target
+  the callback origin, not the authorization server.
 - `browser.request`: session plus origin-relative `path` (default `/`), HTTP
   `method` (default GET), optional string `body` and string-valued `headers`.
   Supports GET, POST, PUT, PATCH, DELETE, HEAD and OPTIONS. Returns HTTP status,

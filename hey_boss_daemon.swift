@@ -6204,12 +6204,14 @@ final class DesktopActions {
     var requests: [String: ActionHTTP] = [:]
     var pasteboard: () -> NSPasteboard = { .general }
     var openWebsite: (URL, @escaping (Bool) -> Void) -> Void = { url, completion in onMain { completion(NSWorkspace.shared.open(url)) } }
-    var forward: (String, Int) throws -> Int
+    var forward: (String, Int, Int?) throws -> Int
     var cancel: (String, Int, Int) -> Void
     init(cli: String?) {
-        forward = { host, port in
+        forward = { host, port, local in
             guard let cli else { throw StorageError(description: "Companion CLI unavailable") }
-            let value = try DesktopActions.command(cli, ["companion", "forward", host, String(port)])
+            var arguments = ["companion", "forward", host, String(port)]
+            if let local { arguments += ["--local-port", String(local)] }
+            let value = try DesktopActions.command(cli, arguments)
             guard let number = Int(value.trimmingCharacters(in: .whitespacesAndNewlines)), number > 0, number <= 65535 else { throw StorageError(description: "Invalid browser forward") }
             return number
         }
@@ -6246,7 +6248,7 @@ final class DesktopActions {
         let isClipboard = method == "clipboard.copy" || method == "clipboard.paste"
         if request.bridge_host != nil {
             let stale = sites.filter { $0.value.owner == owner && $0.value.generation != request.bridge_generation }.map { $0.key }
-            for id in stale { sites.removeValue(forKey: id) }
+            for id in stale { release(id) }
         }
         func emit(_ result: Result<[String: Any], Error>) {
             self.queue.async {
@@ -6275,7 +6277,7 @@ final class DesktopActions {
         inFlight.insert(key)
         do {
             switch method {
-            case "capabilities": emit(.success(["methods":["capabilities","browser.open","browser.request","browser.close","clipboard.copy","clipboard.paste"],"protocol":1,"http_response_limit":131072,"clipboard_byte_limit":Self.clipboardByteLimit,"browser":"system default","requests":"HTTP to selected website origin"] ))
+            case "capabilities": emit(.success(["methods":["capabilities","browser.open","browser.authorize","browser.request","browser.close","clipboard.copy","clipboard.paste"],"protocol":1,"http_response_limit":131072,"clipboard_byte_limit":Self.clipboardByteLimit,"browser":"system default","requests":"HTTP to selected website origin"] ))
             case "clipboard.copy":
                 guard params.count == 1, let base64 = params["base64"] as? String,
                       base64.utf8.count <= ((Self.clipboardByteLimit + 2) / 3) * 4,
@@ -6300,31 +6302,56 @@ final class DesktopActions {
                     }
                     emit(.success(["base64":Data(text.utf8).base64EncodedString()]))
                 }
-            case "browser.open":
+            case "browser.open", "browser.authorize":
                 guard sites.count < 32, let raw = params["url"] as? String, raw.utf8.count <= 8192,
                       var url = URLComponents(string: raw), ["http","https"].contains(url.scheme?.lowercased() ?? ""),
                       let hostname = url.host, !hostname.isEmpty, url.user == nil, url.password == nil, url.url != nil else { throw StorageError(description: "Expected an HTTP(S) website URL; 32 sessions maximum") }
                 var port: Int?; var local: Int?; var host: String?
-                if ["localhost","127.0.0.1","::1"].contains(hostname.lowercased()), let bridge = request.bridge_host {
+                var callback: URL?
+                if method == "browser.authorize" {
+                    let redirects = url.queryItems?.filter { $0.name == "redirect_uri" } ?? []
+                    guard url.scheme?.lowercased() == "https", redirects.count == 1,
+                          let value = redirects.first?.value, let redirect = URLComponents(string: value),
+                          redirect.scheme == "http", let hostname = redirect.host,
+                          ["localhost", "127.0.0.1"].contains(hostname.lowercased()),
+                          redirect.user == nil, redirect.password == nil, redirect.fragment == nil,
+                          let remote = redirect.port, remote > 0, remote <= 65535, let target = redirect.url else {
+                        throw StorageError(description: "Expected an HTTPS authorization URL with one HTTP loopback redirect_uri and an explicit port")
+                    }
+                    callback = target
+                    if let bridge = request.bridge_host {
+                        guard !sites.values.contains(where: { $0.localPort == remote }) else {
+                            throw StorageError(description: "Callback port is already forwarded; finish the existing login first")
+                        }
+                        let forwarded = try forward(bridge, remote, remote)
+                        guard forwarded == remote else {
+                            cancel(bridge, forwarded, remote)
+                            throw StorageError(description: "Callback forwarding must preserve the redirect port")
+                        }
+                        host = bridge; port = remote; local = forwarded
+                    }
+                } else if ["localhost","127.0.0.1","::1"].contains(hostname.lowercased()), let bridge = request.bridge_host {
                     let remote = url.port ?? (url.scheme == "https" ? 443 : 80)
                     guard remote > 0, remote <= 65535 else { throw StorageError(description: "Invalid website port") }
-                    let forwarded = try forward(bridge, remote)
+                    let forwarded = try forward(bridge, remote, nil)
                     host = bridge; port = remote; local = forwarded; url.host = "127.0.0.1"; url.port = forwarded
                 }
                 guard let target = url.url else { throw StorageError(description: "Invalid website URL") }
                 let session = UUID().uuidString.lowercased()
-                let site = Site(generation: request.bridge_generation, owner: owner, url: target, host: host, remotePort: port, localPort: local)
+                let site = Site(generation: request.bridge_generation, owner: owner, url: callback ?? target, host: host, remotePort: port, localPort: local)
                 sites[session] = site // Reserve capacity while the browser opens.
+                if callback != nil {
+                    queue.asyncAfter(deadline: .now() + 300) { [weak self] in self?.release(session) }
+                }
                 openWebsite(target) { opened in self.queue.async {
                     guard self.sites[session] != nil else { emit(.failure(StorageError(description: "Connection changed while opening website; open again"))); return }
                     if opened { self.sites[session] = site; emit(.success(["session":session,"url":target.absoluteString,"source_url":raw,"opened":true])) }
-                    else { self.sites.removeValue(forKey: session); if let h = host, let p = port, let l = local { self.cancel(h,l,p) }; emit(.failure(StorageError(description: "Default browser could not open website"))) }
+                    else { self.release(session); emit(.failure(StorageError(description: "Default browser could not open website"))) }
                 } }
             case "browser.request", "browser.close":
                 guard let session = params["session"] as? String, let site = sites[session], site.owner == owner, site.generation == request.bridge_generation else { throw StorageError(description: "Unknown website session for this connection; reopen after app restart") }
                 if method == "browser.close" {
-                    sites.removeValue(forKey: session)
-                    if let h = site.host, let p = site.remotePort, let l = site.localPort { cancel(h,l,p) }
+                    release(session)
                     emit(.success(["released":true,"session":session])); return
                 }
                 for field in ["path", "method", "body"] { if let value = params[field], !(value is NSNull), !(value is String) { throw StorageError(description: field + " must be a string") } }
@@ -6348,6 +6375,13 @@ final class DesktopActions {
             default: throw StorageError(description: "Unsupported desktop action: " + method)
             }
         } catch { emit(.failure(error)) }
+    }
+    func release(_ session: String) {
+        guard let site = sites.removeValue(forKey: session) else { return }
+        if let host = site.host, let local = site.localPort, let remote = site.remotePort { cancel(host, local, remote) }
+        let keys = completed.filter { ($0.value.1["result"] as? [String: Any])?["session"] as? String == session }.map { $0.key }
+        for key in keys { completed.removeValue(forKey: key) }
+        completionOrder.removeAll { keys.contains($0) }
     }
     func send(_ body: [String: Any], id: String, success: Bool, reply: ([String: Any]) -> Void) {
         do { let data = try JSONSerialization.data(withJSONObject: body, options: [.sortedKeys]); reply(["task_id":id,"status":success ? "ok" : "error","result":String(decoding:data,as:UTF8.self)]) }
