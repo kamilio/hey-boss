@@ -59,18 +59,44 @@ final class CycleTests: XCTestCase {
         history.finishWrites()
         XCTAssertEqual(try History(directory: directory).clips, history.clips)
     }
-    func testReleasingEitherModifierEndsCycleOnlyOnce() {
+    func testReleasingBothModifiersEndsCycleOnlyOnce() {
         // Empty history exercises release without touching the real clipboard.
-        for remaining: NSEvent.ModifierFlags in [.command, .shift, []] {
+        for remaining: NSEvent.ModifierFlags in [.command, .shift] {
             model.cycle()
             XCTAssertTrue(model.cycling)
             model.flagsChanged(remaining)
+            XCTAssertTrue(model.cycling)
+            model.flagsChanged([])
             XCTAssertFalse(model.cycling)
             model.message = "already handled"
             model.flagsChanged([])
             XCTAssertEqual(model.message, "already handled")
             model.dismiss()
         }
+    }
+    func testVKeyMovesDownWithEitherOrBothModifiersHeld() throws {
+        for text in ["oldest", "middle", "newest"] { history.add(text, app: "Test") }
+        model.cycle()
+        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
+        for (flags, expected): (NSEvent.ModifierFlags, String) in [([.command, .shift], "middle"), (.command, "oldest"), (.shift, "newest")] {
+            model.flagsChanged(flags)
+            panel.sendEvent(try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero,
+                modifierFlags: flags, timestamp: 0, windowNumber: panel.windowNumber,
+                context: nil, characters: "v", charactersIgnoringModifiers: "v", isARepeat: false, keyCode: 9)))
+            XCTAssertEqual(model.selection?.text, expected)
+            XCTAssertTrue(model.cycling)
+        }
+    }
+    func testImagesParticipateInTheSameCycle() throws {
+        history.add("older text", app: "Test")
+        let image = try XCTUnwrap(history.add(Data([1, 2, 3]), type: .png, app: "Image source"))
+        history.add("newest text", app: "Test")
+        model.cycle()
+        XCTAssertEqual(model.selection?.text, "newest text")
+        model.cycle()
+        XCTAssertEqual(model.selection?.id, image.id)
+        model.cycle()
+        XCTAssertEqual(model.selection?.text, "older text")
     }
     func testEscapeCancelsWhileModifiersRemainHeld() throws {
         model.cycle()

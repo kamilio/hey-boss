@@ -1,8 +1,8 @@
 # Hey Clipboard
 
-A native Liquid Glass clipboard picker, using the same teal accents and rounded typography as Hey Talk. Keeps the last 40 text clips on this Mac; pinned clips stay until deleted. Search matches full text and the source app. Repeated copies move to the top without duplicates.
+A native Liquid Glass clipboard picker, using the same teal accents and rounded typography as Hey Talk. Keeps the last 40 text and image clips on this Mac; pinned clips stay until deleted. Search matches full text and the source app. Repeated copies move to the top without duplicates.
 
-**Hold ⌘⇧ and press V** to open the picker. Keep holding ⌘⇧ and tap V to cycle through clips; release either modifier to paste the selected clip. Escape cancels without pasting. Click the menu-bar icon for search, or use ↑/↓ and Enter. Double-click also pastes. Escape dismisses; Command+Delete removes the selected entry. The menu-bar icon opens the picker; right-click it to pause capture or quit. **Hyper+V** still recovers the last Hey Talk dictation.
+**Press ⌘⇧V and release** to paste the newest entry. Keep holding the modifiers and tap only V to move down through older entries, including images; release both Command and Shift to paste the selection. Releasing just one modifier keeps the picker open, and V still advances. Escape cancels without pasting. Click the menu-bar icon for search, or use ↑/↓ and Enter. Double-click also pastes. Escape dismisses; Command+Delete removes the selected entry. The menu-bar icon opens the picker; right-click it to pause capture or quit. **Hyper+V** still recovers the last Hey Talk dictation.
 
 ```sh
 packages/hey-clipboard/install.sh
@@ -19,7 +19,7 @@ It stays out of the Dock and Command-Tab. Arrow keys, Enter, and Escape also wor
 
 ## CLI
 
-Commands return JSON with `ok`; errors exit 1. `list` and `search` return stable IDs, previews, source apps, dates, and pinned state. `get` returns the full text; `get ID --raw` emits only the text.
+Commands return JSON with `ok`; errors exit 1. `list` and `search` return stable IDs, previews, pasteboard types, source apps, dates, and pinned state. `get` returns the full text or a local `image_path`; `get ID --raw` emits the text or original image bytes.
 
 ```sh
 hey-clipboard status
@@ -36,7 +36,7 @@ hey-clipboard resume
 
 `paste` requires an explicit running destination app, activates it, and sends Command-V without Enter. A focus or clipboard change cancels the keypress. `clear` deletes all history including pins. `import-flycut` can repeat safely without duplicating entries. `show` opens the picker.
 
-History and the same-user control socket live in `~/Library/Application Support/hey-clipboard/`, with directory mode 700 and file/socket mode 600. Entries are plain text, at most 1 MiB each; images and files are not stored. No cloud sync. Capture skips transient, concealed, auto-generated, and password-manager pasteboard markers. Restoring the clipboard after Hey Talk dictation does not create another history entry. Explicit Copy from dictation History is a normal copy and is recorded.
+History and the same-user control socket live in `~/Library/Application Support/hey-clipboard/`, with directory mode 700 and file/socket mode 600. Text entries are at most 1 MiB each. PNG and TIFF images are kept as separate files, at most 32 MiB each, with thumbnails in both pickers; deleting or aging out an entry removes its image file. File references are not stored. No cloud sync. Capture skips transient, concealed, auto-generated, and password-manager pasteboard markers. Restoring the clipboard after Hey Talk dictation does not create another history entry. Explicit Copy from dictation History is a normal copy and is recorded.
 
 ```sh
 swift test --package-path packages/hey-clipboard

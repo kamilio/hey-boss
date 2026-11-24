@@ -46,6 +46,7 @@ final class PickerPanel: NSPanel, NSWindowDelegate {
             // Navigation, confirmation, and cancellation also work while the
             // shortcut's Command and Shift modifiers remain held.
             switch event.keyCode {
+            case 9 where model.cycling: model.move(1); return
             case 53: model.dismiss(); return
             case 125: model.move(1); return
             case 126: model.move(-1); return
@@ -87,6 +88,10 @@ private struct QuickPickerView: View {
                             ForEach(history.clips) { clip in
                                 let selected = selectedID == clip.id
                                 HStack(spacing: 12) {
+                                    if let image = history.thumbnail(clip) {
+                                        Image(nsImage: image).resizable().scaledToFit().frame(width: 54, height: 42)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    }
                                     VStack(alignment: .leading, spacing: 5) {
                                         Text(clip.preview).font(.system(size: 13, weight: selected ? .medium : .regular))
                                             .lineLimit(selected ? 2 : 1)
@@ -181,8 +186,13 @@ private struct HistoryView: View {
                         LazyVStack(spacing: 3) {
                             ForEach(model.visible) { clip in
                                 HStack(alignment: .top, spacing: 12) {
-                                    Image(systemName: clip.pinned ? "pin.fill" : "doc.on.clipboard")
-                                        .font(.system(size: 13)).foregroundStyle(.teal).frame(width: 20).padding(.top, 3)
+                                    if let image = history.thumbnail(clip) {
+                                        Image(nsImage: image).resizable().scaledToFit().frame(width: 54, height: 42)
+                                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                                    } else {
+                                        Image(systemName: clip.pinned ? "pin.fill" : "doc.on.clipboard")
+                                            .font(.system(size: 13)).foregroundStyle(.teal).frame(width: 20).padding(.top, 3)
+                                    }
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(clip.preview).font(.system(size: 13)).lineLimit(2).frame(maxWidth: .infinity, alignment: .leading)
                                         HStack(spacing: 6) {
@@ -215,8 +225,12 @@ private struct HistoryView: View {
                 Divider().padding(.horizontal, 24).padding(.top, 8)
                 if let clip = selection {
                     ScrollView {
-                        Text(clip.text).font(.system(size: 12)).textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 12)
+                        if let image = history.thumbnail(clip) {
+                            Image(nsImage: image).resizable().scaledToFit().frame(maxWidth: .infinity, maxHeight: 100).padding(5)
+                        } else {
+                            Text(clip.text).font(.system(size: 12)).textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 24).padding(.vertical, 12)
+                        }
                     }.frame(height: 110)
                 }
             }

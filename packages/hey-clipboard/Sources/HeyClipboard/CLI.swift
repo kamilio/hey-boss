@@ -7,7 +7,7 @@ hey-clipboard — local clipboard history
   status                       Counts, pause state, shortcut, and persistence status
   list [--pinned]               Recent entries with stable IDs and previews
   search QUERY                 Search full text and source app
-  get ID [--raw]                Read one complete entry (raw prints just its text)
+  get ID [--raw]                Read an entry (raw writes text or image bytes)
   copy ID                      Put an entry on the clipboard; move it to the top
   copy --stdin                 Copy UTF-8 input and save it in history
   paste ID --app BUNDLE_ID      Activate that app and paste; never send Enter
@@ -21,10 +21,11 @@ hey-clipboard — local clipboard history
   quit                         Save and stop the app
 
 All commands return JSON, except get --raw. Errors return {ok:false,error:...}
-and exit 1. Use IDs from list/search. Text is local to this Mac; temporary,
+and exit 1. Use IDs from list/search. Text and images stay on this Mac; temporary,
 concealed, and generated clipboard entries are excluded. Paste uses Hey Talk's
 existing Accessibility permission. Hyper+V remains Hey Talk's dictation recovery.
-Hold Command+Shift, tap V to cycle, then release to paste. Escape cancels.
+Press Command+Shift+V and release both modifiers to paste the newest entry.
+Keep holding the modifiers and tap V to cycle. Escape cancels.
 """
 
 func runCLI(_ arguments: [String]) throws -> Int32 {
@@ -57,8 +58,12 @@ func runCLI(_ arguments: [String]) throws -> Int32 {
     default: throw TalkError("Unknown command. Run hey-clipboard --help.")
     }
     let result = try Server.request(request)
-    if raw, result["ok"] as? Bool == true, let entry = result["entry"] as? [String: Any], let text = entry["text"] as? String {
-        FileHandle.standardOutput.write(Data(text.utf8))
+    if raw, result["ok"] as? Bool == true, let entry = result["entry"] as? [String: Any] {
+        if let path = entry["image_path"] as? String {
+            FileHandle.standardOutput.write(try Data(contentsOf: URL(fileURLWithPath: path)))
+        } else if let text = entry["text"] as? String {
+            FileHandle.standardOutput.write(Data(text.utf8))
+        }
     } else { FileHandle.standardOutput.write(try Wire.json(result)) }
     return result["ok"] as? Bool == true ? 0 : 1
 }

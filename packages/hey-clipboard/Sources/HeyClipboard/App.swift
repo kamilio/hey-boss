@@ -98,7 +98,7 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
         RunLoop.main.add(timer, forMode: .common); cycleTimer = timer
     }
     func flagsChanged(_ flags: NSEvent.ModifierFlags) {
-        if cycling, !flags.contains([.command, .shift]) { pasteSelection() }
+        if cycling, flags.intersection([.command, .shift]).isEmpty { pasteSelection() }
     }
     private func showPicker(browsing: Bool) {
         let sameMode = self.browsing == browsing
@@ -225,7 +225,11 @@ final class ClipboardApp: NSObject, NSApplicationDelegate, ObservableObject {
                 reply(["ok": false, "error": "Entry not found"]); return
             }
             switch command {
-            case "get": success(["entry": clip.summary.merging(["text": clip.text]) { _, new in new }])
+            case "get":
+                var entry = clip.summary
+                if clip.imageType != nil { entry["image_path"] = history.imageURL(clip).path }
+                else { entry["text"] = clip.text }
+                success(["entry": entry])
             case "copy":
                 if monitor.copy(clip) { success(["entry": clip.summary]) } else { reply(["ok": false, "error": "Copy failed"]) }
             case "delete": history.delete(id); success()
