@@ -5,6 +5,7 @@ pub mod media;
 pub mod notebook;
 pub mod plugins;
 pub mod provider;
+pub mod t3;
 
 use anyhow::{Context, Result};
 use serde_json::Value;

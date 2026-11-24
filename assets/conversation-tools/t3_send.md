@@ -1,0 +1,1 @@
+Send the user's direction to the attached T3 thread. Set queue only when the user asks to wait until its current turn finishes. Replies arrive automatically; do not poll. Do not resend after an uncertain delivery.

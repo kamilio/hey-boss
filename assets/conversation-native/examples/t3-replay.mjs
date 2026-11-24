@@ -1,0 +1,10 @@
+#!/usr/bin/env node
+import {readFileSync, appendFileSync} from 'node:fs';
+const file = name => new URL(name, import.meta.url);
+const [op, link] = process.argv.slice(2);
+if (link !== 't3code://threads/00000000-0000-0000-0000-000000000001/simulated') throw Error('Wrong attached thread');
+if (op === 'show') console.log(readFileSync(file('thread.json'), 'utf8'));
+else if (['send','queue'].includes(op)) {
+  appendFileSync(file('sent.jsonl'), JSON.stringify({op, text:readFileSync(0, 'utf8')})+'\n');
+  console.log(JSON.stringify({delivery:op === 'queue' ? 'queued' : 'steered',messageId:'simulated-message'}));
+} else throw Error('Unexpected T3 operation');

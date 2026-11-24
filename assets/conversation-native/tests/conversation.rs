@@ -70,6 +70,81 @@ async fn mock(items: Vec<Value>) -> Result<(String, tokio::task::JoinHandle<Resu
         }),
     ))
 }
+#[tokio::test]
+async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> Result<()> {
+    let tmp = scratch();
+    let root = tmp.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    fs::write(
+        root.join("hey-t3.mjs"),
+        include_str!("../examples/t3-replay.mjs"),
+    )?;
+    fs::set_permissions(root.join("hey-t3.mjs"), fs::Permissions::from_mode(0o700))?;
+    fs::write(root.join("sent.jsonl"), "")?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let mut plugins = Plugins {
+        cwd: root,
+        focus: None,
+        home: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let link = "t3code://threads/00000000-0000-0000-0000-000000000001/simulated";
+    let state = root.join("session.json");
+    // Even a misbehaving model cannot send during an incoming update.
+    let (url, server) = mock(vec![
+        tool("t3_send", json!({"text":"unrequested work"})),
+        msg(""),
+    ])
+    .await?;
+    agent::run(
+        &state,
+        &url,
+        &json!({"turn":"progress","t3_thread":link,"automatic":true}),
+        &mut plugins,
+    )
+    .await?;
+    let requests = server.await??;
+    assert!(requests[0]["tools"].as_array().unwrap().is_empty());
+    assert!(
+        requests[1]["input"]
+            .to_string()
+            .contains("Tools unavailable during automatic updates")
+    );
+    assert_eq!(fs::read_to_string(root.join("sent.jsonl"))?, "");
+    let (url, server) = mock(vec![
+        tool(
+            "t3_send",
+            json!({"text":"Keep the smaller fix.\nNo deployment.","queue":true}),
+        ),
+        msg("Queued."),
+    ])
+    .await?;
+    agent::run(
+        &state,
+        &url,
+        &json!({"turn":"Queue my direction","t3_thread":link}),
+        &mut plugins,
+    )
+    .await?;
+    let requests = server.await??;
+    assert!(
+        requests[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "t3_send")
+    );
+    let sent: Value = serde_json::from_str(&fs::read_to_string(root.join("sent.jsonl"))?)?;
+    assert_eq!(
+        sent,
+        json!({"op":"queue","text":"Keep the smaller fix.\nNo deployment."})
+    );
+    assert!(requests[1]["input"].to_string().contains("queued"));
+    Ok(())
+}
 #[test]
 fn agent_requires_a_configured_root_before_opening_chat_history() -> Result<()> {
     let tmp = scratch();
