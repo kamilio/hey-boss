@@ -22,8 +22,8 @@ function connection() {
 function outbox() {
   const list=$('outbox'), old=new Map(Array.from(list.children,el=>[el.key,el]));
   const local=queued(), remote=(snapshot?.queue || []).map(item=>({...item,id:item.id.toLowerCase(),chat,remote:true}));
-  const items=[...local.filter(item=>!remote.some(saved=>saved.id===item.id)),...remote];
-  for(const item of items) {
+  const items=[...remote,...local.filter(item=>!remote.some(saved=>saved.id===item.id))];
+  for(const [index,item] of items.entries()) {
     let row=old.get(item.id); old.delete(item.id);
     if(!row) {
       row=document.createElement('article'); row.key=item.id; row.className='user queued';
@@ -31,6 +31,7 @@ function outbox() {
       row.children[2].className='button';
       row.lastChild.className='button'; list.append(row);
     }
+    if(list.children[index]!==row)list.insertBefore(row,list.children[index] || null);
     text(row.firstChild,item.text);
     text(row.children[1],item.remote ? (snapshot.queuePaused ? 'Queued · paused' : 'Queued · waiting for this turn to finish') : item.error || (item.chat!==chat ? 'Queued in another chat' : connected ? (snapshot?.canSend ? 'Queued · ready to send' : 'Queued · waiting for this turn to finish') : 'Queued · waiting for connection'));
     const action=row.children[2];

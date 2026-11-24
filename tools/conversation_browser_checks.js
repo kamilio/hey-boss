@@ -61,7 +61,7 @@ const server=http.createServer((req,res)=>{
     try {
      for(const key of Object.keys(fixture))delete fixture[key];fixture.browser=name;
      if(file.includes('pairing')) Object.assign(fixture,{pairing:true,failWorker:true});
-     const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:/offline|pairing/.test(file)?'allow':'block'});
+     const context=await browser.newContext({viewport:{width:390,height:844},serviceWorkers:/offline|pairing|queue/.test(file)?'allow':'block'});
      const page=await context.newPage();await page.goto(origin);
      console.log(name+': '+await vm.runInThisContext(fs.readFileSync(path.join(root,'tools',file),'utf8'))(page,fixture));
     } finally {await browser.close();}

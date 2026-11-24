@@ -10,6 +10,16 @@ async (page, fixture) => {
   if(await page.evaluate(()=>queued().length)!==0)throw Error('Acknowledged queue item remained in the offline outbox');
   await send('Second saved message');
   await page.waitForFunction(()=>snapshot?.queue?.length===2);
+  fixture.offline=true;
+  await page.waitForFunction(()=>connected===false);
+  await send('Third offline message');
+  await page.reload({waitUntil:'domcontentloaded'});
+  fixture.offline=false;
+  await page.waitForFunction(()=>connected===true && [...document.querySelectorAll('#outbox article > div')].map(node=>node.textContent).join('|')==='First saved message|Second saved message|Third offline message');
+  const texts=await page.locator('#outbox article > div').allTextContents();
+  if(texts.join('|')!=='First saved message|Second saved message|Third offline message')throw Error('Offline outbox appeared ahead of the already saved queue: '+JSON.stringify(texts));
+  await page.locator('#outbox article').filter({hasText:'Third offline message'}).getByRole('button',{name:'Cancel queued message'}).click();
+  await page.waitForFunction(()=>queued().length===0 && snapshot?.queue?.length===2);
   await page.reload();
   await page.waitForFunction(()=>document.querySelector('#outbox').children.length===2);
   await page.locator('#outbox article').filter({hasText:'First saved message'}).getByRole('button',{name:'Cancel queued message'}).click();
