@@ -6,15 +6,15 @@ description = "Local OpenAI, Gemini, and Claude subscription proxy with model ro
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/kamilio/hey-boss"
-include = ["/Cargo.toml", "/Cargo.lock", "/build.rs", "/README.md", "/LICENSE", "/src/**/*.rs", "/src/**/*.py", "/src/**/*.sh", "/src/**/*.js", "/src/**/*.html", "/src/**/*.json", "/tests/*.rs", "/tests/*.py", "/examples/*.yaml", "/docs/*.md", "/scripts/*.py"]
+include = ["/Cargo.toml", "/Cargo.lock", "/build.rs", "/README.md", "/LICENSE", "/src/**/*.rs", "/src/**/*.py", "/src/**/*.sh", "/src/**/*.js", "/src/**/*.html", "/src/**/*.json", "/src/credentials/google/test-key.pem", "/tests/*.rs", "/tests/*.py", "/examples/*.yaml", "/docs/*.md", "/scripts/*.py"]
 
 [dependencies]
 aes-gcm-siv = "0.11"
 base64 = "0.22"
 sha2 = "0.10"
 url = "2"
-google-cloud-auth = { version = "1.16", default-features = false }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ring = "0.17"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 fs2 = "0.4"
 libc = "0.2"
 toml_edit = "0.23"
@@ -40,9 +40,6 @@ percent-encoding = "2.3.2"
 tokio-tungstenite = "0.30.0"
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"] }
 http-body = "1"
-aws-config = { version = "1.13.0", default-features = false, features = ["default-https-client", "rt-tokio", "credentials-process"] }
-aws-sigv4 = "1.6.4"
-aws-credential-types = "1.3.1"
 
 [dev-dependencies]
 tempfile = "3"

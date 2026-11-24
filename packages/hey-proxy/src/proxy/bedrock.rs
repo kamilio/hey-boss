@@ -2,8 +2,6 @@
 pub(super) mod catalog;
 use super::*;
 use anyhow::{Context, ensure};
-use aws_credential_types::provider::ProvideCredentials;
-use aws_sigv4::http_request::{SignableBody, SignableRequest, SigningSettings, sign};
 use axum::http::Method;
 use serde::{Deserialize, Serialize};
 
@@ -38,52 +36,16 @@ async fn signed(
     region: &str,
     method: Method,
     url: &str,
-    mut headers: HeaderMap,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Result<reqwest::Response> {
-    static PROVIDER: tokio::sync::OnceCell<
-        aws_config::default_provider::credentials::DefaultCredentialsChain,
-    > = tokio::sync::OnceCell::const_new();
-    let provider = PROVIDER
-        .get_or_init(|| {
-            aws_config::default_provider::credentials::DefaultCredentialsChain::builder().build()
-        })
-        .await;
-    let identity = provider
-        .provide_credentials()
-        .await
-        .context("AWS credentials unavailable")?
-        .into();
-    let params = aws_sigv4::sign::v4::SigningParams::builder()
-        .identity(&identity)
-        .region(region)
-        .name("bedrock")
-        .time(SystemTime::now())
-        .settings(SigningSettings::default())
-        .build()?
-        .into();
-    let request = SignableRequest::new(
-        method.as_str(),
-        url,
-        headers
-            .iter()
-            .map(|(k, v)| Ok((k.as_str(), v.to_str()?)))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter(),
-        SignableBody::Bytes(&body),
-    )?;
-    let (instructions, _) = sign(request, &params)?.into_parts();
-    for h in instructions.into_parts().0 {
-        let mut value = header::HeaderValue::from_str(h.value())?;
-        value.set_sensitive(h.sensitive());
-        headers.insert(h.name(), value);
-    }
-    Ok(client
+    let mut request = client
         .request(method, url)
         .headers(headers)
         .body(body)
-        .send()
-        .await?)
+        .build()?;
+    hey_proxy::credentials::aws::sign(&mut request, region, "bedrock").await?;
+    Ok(client.execute(request).await?)
 }
 
 fn family(id: &str) -> Option<&str> {

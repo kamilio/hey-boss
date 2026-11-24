@@ -21,7 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 parser = argparse.ArgumentParser()
 parser.add_argument('--mock', action='store_true')
 parser.add_argument('--config', type=pathlib.Path)
-parser.add_argument('--adc', action='store_true', help='Use the official ADC resolver for this isolated run')
+parser.add_argument('--adc', action='store_true', help='Use the native ADC resolver for this isolated run')
 parser.add_argument('--model', default='gemini-test')
 parser.add_argument('--reasoning-effort', choices=['minimal', 'low', 'medium', 'high', 'xhigh'], default='high')
 parser.add_argument('--task', choices=['sorting', 'repo-tests'], default='sorting')

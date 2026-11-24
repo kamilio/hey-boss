@@ -9,7 +9,8 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, sync::Mutex, time::Instant};
 
-const ADC_MAX_WALL_AGE: Duration = Duration::from_secs(2400);
+pub mod aws;
+mod google;
 
 // Each trusted shell command owns a process group. Cancellation/timeout must
 // also terminate helpers that inherited its stdout, not only /bin/sh itself.
@@ -34,7 +35,7 @@ type ShellCell = Arc<Mutex<ShellState>>;
 #[derive(Default)]
 pub struct CredentialResolver {
     shell: Mutex<HashMap<String, ShellCell>>,
-    adc: Mutex<Option<(SystemTime, google_cloud_auth::credentials::Credentials)>>,
+    adc: Mutex<Option<google::Token>>,
     op_cli: Option<std::path::PathBuf>,
 }
 pub fn validate_source(source: &str) -> Result<()> {
@@ -191,7 +192,7 @@ impl CredentialResolver {
             return Err(anyhow!(message.clone()));
         }
         let execute = async {
-            let mut process = if let Some(command) = shell {
+            let process = if let Some(command) = shell {
                 let mut process = tokio::process::Command::new("/bin/sh");
                 process.args(["-c", command]);
                 process
@@ -200,35 +201,7 @@ impl CredentialResolver {
                 process.args(["read", "--no-newline", "--", source]);
                 process
             };
-            #[cfg(unix)]
-            process.process_group(0);
-            let mut child = process
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|_| anyhow!("Could not start credential command"))?;
-            #[cfg(unix)]
-            let _group = CommandGroup(
-                child
-                    .id()
-                    .ok_or_else(|| anyhow!("Credential command unavailable"))?,
-            );
-            let mut bytes = Vec::new();
-            child
-                .stdout
-                .take()
-                .ok_or_else(|| anyhow!("Credential command stdout unavailable"))?
-                .take(16 * 1024 + 1)
-                .read_to_end(&mut bytes)
-                .await?;
-            if bytes.len() > 16 * 1024 {
-                bail!("Credential command output exceeds 16 KiB");
-            }
-            if !child.wait().await?.success() {
-                bail!("Credential command failed");
-            }
+            let bytes = command_output(process).await?;
             let text = std::str::from_utf8(&bytes)
                 .map_err(|_| anyhow!("Credential command output must be UTF-8"))?
                 .trim();
@@ -258,68 +231,54 @@ impl CredentialResolver {
     pub async fn invalidate_adc(&self) {
         *self.adc.lock().await = None;
     }
-    /// The official Google Rust SDK handles ADC discovery, federation,
-    /// impersonation, refresh and token caching. No gcloud subprocess per request.
-    /// Rebuild cached credentials on a wall-clock TTL so system sleep (which pauses
-    /// `Instant` on macOS) cannot leave an expired 1-hour OAuth2 token in cache.
+    /// Refresh once for concurrent callers, using wall time so sleep cannot
+    /// leave an expired access token in the cache.
     pub async fn adc_headers(&self) -> Result<HeaderMap> {
-        use google_cloud_auth::credentials::{Builder, CacheableResource};
-        let credentials = {
-            let mut guard = self.adc.lock().await;
-            let cached = guard.as_ref().and_then(|(created_at, credentials)| {
-                SystemTime::now()
-                    .duration_since(*created_at)
-                    .ok()
-                    .filter(|age| *age < ADC_MAX_WALL_AGE)
-                    .map(|_| credentials.clone())
-            });
-            if let Some(credentials) = cached {
-                credentials
-            } else {
-                // The Google SDK uses reqwest's rustls-no-provider transport.
-                // Keep an existing process provider, or install our ring provider
-                // before the SDK constructs its HTTPS client.
-                let _ = rustls::crypto::ring::default_provider().install_default();
-                let built = tokio::task::spawn_blocking(|| {
-                    Builder::default()
-                        .with_scopes(["https://www.googleapis.com/auth/cloud-platform"])
-                        .build()
-                })
-                .await
-                .map_err(|_| anyhow!("ADC initialization failed"))?
-                .map_err(|_| {
-                    anyhow!(
-                        "ADC credentials unavailable; configure Application Default Credentials"
-                    )
-                })?;
-                *guard = Some((SystemTime::now(), built.clone()));
-                built
-            }
-        };
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            credentials.headers(Default::default()),
-        )
-        .await
-        .map_err(|_| anyhow!("ADC token acquisition timed out"))
-        .and_then(|result| result.map_err(|_| anyhow!("ADC token acquisition failed")))
-        {
-            Ok(CacheableResource::New { mut data, .. }) => {
-                for (_, value) in data.iter_mut() {
-                    value.set_sensitive(true);
-                }
-                Ok(data)
-            }
-            Ok(CacheableResource::NotModified) => {
-                self.invalidate_adc().await;
-                bail!("ADC returned no credential headers")
-            }
-            Err(error) => {
-                self.invalidate_adc().await;
-                Err(error)
-            }
+        let mut cached = self.adc.lock().await;
+        if let Some(token) = cached.as_ref().filter(|token| token.valid()) {
+            return Ok(token.headers.clone());
         }
+        *cached = None;
+        let token = tokio::time::timeout(Duration::from_secs(30), google::load())
+            .await
+            .map_err(|_| anyhow!("ADC token acquisition timed out"))??;
+        let headers = token.headers.clone();
+        *cached = Some(token);
+        Ok(headers)
     }
+}
+
+async fn command_output(mut process: tokio::process::Command) -> Result<Vec<u8>> {
+    #[cfg(unix)]
+    process.process_group(0);
+    let mut child = process
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|_| anyhow!("Could not start credential command"))?;
+    #[cfg(unix)]
+    let _group = CommandGroup(
+        child
+            .id()
+            .ok_or_else(|| anyhow!("Credential command unavailable"))?,
+    );
+    let mut bytes = Vec::new();
+    child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("Credential command stdout unavailable"))?
+        .take(16 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() > 16 * 1024 {
+        bail!("Credential command output exceeds 16 KiB");
+    }
+    if !child.wait().await?.success() {
+        bail!("Credential command failed");
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]

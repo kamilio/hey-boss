@@ -251,7 +251,7 @@ Use ADC to connect with your Google Cloud identity instead of managing an API ke
    hey-proxy check-credentials
    ```
 
-ADC uses the Google Rust SDK to discover, cache, and refresh credentials. No `api_key` field or per-request `gcloud` command is needed. In a cloud environment, ADC can use the attached service identity. See [Google's ADC setup guide](https://cloud.google.com/docs/authentication/provide-credentials-adc) and the complete [Vertex AI example](examples/gemini-adc.config.yaml).
+ADC discovers, caches, and refreshes credentials directly through Google’s OAuth and metadata endpoints. No `api_key` field or per-request `gcloud` command is needed. In a cloud environment, ADC can use the attached service identity. See [Google's ADC setup guide](https://cloud.google.com/docs/authentication/provide-credentials-adc) and the complete [Vertex AI example](examples/gemini-adc.config.yaml).
 
 ### Use Gemini's native API
 
