@@ -14,6 +14,7 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGES"] == "1" { auditNotificationAges(); return }
     if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_SIDEBAR"] {
         app.finishLaunching()
         let root = URL(fileURLWithPath: path), index = root.appendingPathComponent("current.json")
@@ -1177,7 +1178,28 @@ func auditCloseAll(root: URL) {
 }
 
 
+func auditNotificationAges() {
+    for (elapsed, expected): (Double, String) in [(-1, "now"), (0, "now"), (59, "now"), (60, "1m ago"), (3599, "59m ago"), (3600, "1h ago"), (86399, "23h ago"), (86400, "1d ago"), (604800, "1w ago"), (2592000, "1mo ago"), (31536000, "1y ago")] {
+        precondition(relativeTime(0, now: elapsed) == expected)
+    }
+    precondition(relativeTime(.nan).isEmpty && relativeTime(.infinity).isEmpty)
+    let row = Record(taskID: "age", kind: "alert", question: "Notification age", project: "Age audit", title: "Age", description: "", options: [], autoclose: nil, linkURL: nil, linkLabel: nil, createdAt: Date().timeIntervalSince1970 - 60, status: "pending", sourceHost: "build-server-with-a-long-hostname.staging.example.com")
+    let ui = Interface(present: true)
+    ui.add(row); ui.layout()
+    defer { ui.stack.orderOut(nil) }
+    let card = ui.cards[0]
+    precondition(card.age.stringValue == "1m ago")
+    card.refreshAge(now: row.createdAt + 86400)
+    precondition(card.age.stringValue == "1d ago")
+    precondition(card.age.frame.minY == card.source.frame.minY && card.age.frame.maxX == 328)
+    precondition(card.source.frame.maxX + 8 <= card.age.frame.minX)
+    ui.ageTimer!.fire()
+    precondition(card.age.stringValue == "1m ago", "The shared timer must refresh existing cards")
+    print("Passed: relative age boundaries, footer alignment, long source truncation and timer refresh")
+}
+
 func auditAppearance(root: URL, sample: Record) {
+    auditNotificationAges()
     let legacy = try! JSONDecoder().decode(Record.self, from: JSONEncoder().encode(sample))
     precondition(legacy.visualSeverity == .neutral && legacy.iconData == nil)
     for name in iconSymbols.values { precondition(NSImage(systemSymbolName: name, accessibilityDescription: nil) != nil, "Unavailable symbol: \(name)") }

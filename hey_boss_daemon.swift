@@ -2616,6 +2616,16 @@ final class NotificationClick: NSObject, NSGestureRecognizerDelegate {
     }
 }
 
+func relativeTime(_ timestamp: Double, now: Double = Date().timeIntervalSince1970) -> String {
+    let elapsed = now - timestamp
+    guard elapsed.isFinite else { return "" }
+    let units: [(Double, String)] = [(31_536_000, "y"), (2_592_000, "mo"), (604_800, "w"), (86_400, "d"), (3_600, "h"), (60, "m")]
+    for (seconds, unit) in units where elapsed >= seconds {
+        return String(format: "%.0f", floor(elapsed / seconds)) + unit + " ago"
+    }
+    return "now"
+}
+
 final class Card {
     let row: Record
     let view: Surface
@@ -2624,6 +2634,8 @@ final class Card {
     let header: DragHeader
     let headerRight: CGFloat
     let body: NSTextField
+    let source = NSTextField(labelWithString: "")
+    let age = NSTextField(labelWithString: "")
     var link: ActionButton?
     var imagePreview: NSImageView?
     var timer: Timer?
@@ -2679,7 +2691,7 @@ final class Card {
                 }
             }
         }
-        let source = NSTextField(labelWithString: row.origin?.agent.map { "\($0.model ?? $0.kind) · \($0.id.suffix(8)) · \(row.sourceLabel)" } ?? row.sourceLabel)
+        source.stringValue = row.origin?.agent.map { "\($0.model ?? $0.kind) · \($0.id.suffix(8)) · \(row.sourceLabel)" } ?? row.sourceLabel
         source.font = .systemFont(ofSize: 10, weight: .medium)
         source.textColor = .tertiaryLabelColor
         source.lineBreakMode = .byTruncatingTail
@@ -2687,6 +2699,10 @@ final class Card {
         source.toolTip = row.origin?.agent.map { "\($0.id) · \($0.model ?? "Model not recorded") · \(row.sourceLabel)" } ?? (row.isLocalSource || row.sourceHost == nil ? row.sourceLabel : "Sent from server: \(row.sourceLabel)")
         source.setAccessibilityLabel(source.toolTip!)
         view.content.addSubview(source)
+        age.font = .monospacedDigitSystemFont(ofSize: 10, weight: .medium)
+        age.textColor = .tertiaryLabelColor
+        age.alignment = .right
+        view.content.addSubview(age)
         let sourceIcon = NSImageView(frame: NSRect(x: 16, y: 13 + actionSpace, width: 10, height: 10))
         sourceIcon.image = NSImage(systemSymbolName: row.isLocalSource ? "laptopcomputer" : (row.sourceHost == nil ? "questionmark.circle" : "server.rack"), accessibilityDescription: nil)
         sourceIcon.contentTintColor = .tertiaryLabelColor
@@ -2735,6 +2751,15 @@ final class Card {
             view.content.addSubview(button)
             link = button
         }
+        refreshAge()
+    }
+    func refreshAge(now: Double = Date().timeIntervalSince1970) {
+        let text = relativeTime(row.createdAt, now: now)
+        guard age.stringValue != text else { return }
+        age.stringValue = text
+        let width = ceil(age.intrinsicContentSize.width)
+        age.frame = NSRect(x: 328 - width, y: source.frame.minY, width: width, height: 14)
+        source.frame.size.width = max(0, age.frame.minX - 8 - source.frame.minX)
     }
     func configure(grouped: Bool) {
         if self.grouped == grouped { return }
@@ -2878,6 +2903,7 @@ final class Interface {
     var onDismissMany: ([String]) -> Void = { _ in }
     var onPresented: (String, Double) -> Void = { _, _ in }
     var observer: NSObjectProtocol?
+    var ageTimer: Timer?
     var saveComment: (String, String, String?, String?, DocumentSelection?, @escaping (Result<Record, Error>) -> Void) -> Void = { _, _, _, _, _, completion in completion(.failure(StorageError(description: "Review storage unavailable"))) }
     var finishReview: (String, @escaping (Result<Record, Error>) -> Void) -> Void = { _, completion in completion(.failure(StorageError(description: "Review storage unavailable"))) }
     var previews: [String: Preview] = [:]
@@ -2924,6 +2950,20 @@ final class Interface {
         stackToolbar.content.addSubview(hideStack)
         stack.hasShadow = false
         observer = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.layout() }
+        if present {
+            let timer = Timer(timeInterval: 30, repeats: true) { [weak self] _ in
+                guard let self, self.stack.isVisible else { return }
+                let now = Date().timeIntervalSince1970
+                for card in self.cards { card.refreshAge(now: now) }
+            }
+            timer.tolerance = 1
+            RunLoop.main.add(timer, forMode: .common)
+            ageTimer = timer
+        }
+    }
+    deinit {
+        ageTimer?.invalidate()
+        if let observer { NotificationCenter.default.removeObserver(observer) }
     }
     // Use the regular card and reader, without writing debug selections to Inbox.
     private var selectionNoticeID: String?
@@ -3079,7 +3119,7 @@ final class Interface {
             return $0.cards[0].row.createdAt > $1.cards[0].row.createdAt
         }
         for group in groups {
-            for card in group.cards { card.configure(grouped: group.cards.count >= 3) }
+            for card in group.cards { card.refreshAge(); card.configure(grouped: group.cards.count >= 3) }
             if group.cards.count < 3 { expandedProjects.remove(group.project) }
         }
         let total = groups.reduce(CGFloat(0)) { total, group in
