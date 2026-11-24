@@ -5606,7 +5606,7 @@ func auditConversation(_ root: String) {
         preparing.listenNext.performClick(nil)
         precondition(preparing.phase == .listening && preparing.audio === voice && preparing.rows.last?.stringValue.contains("pineapple") == true)
         preparing.respond("Hello"); preparing.input.stringValue = "Follow-up draft"
-        precondition(!preparing.listenNext.isHidden && preparing.listenNext.title == "Interrupt reply" && !preparing.send.isEnabled)
+        precondition(!preparing.listenNext.isHidden && preparing.listenNext.title == "Interrupt reply" && preparing.send.isEnabled && preparing.send.toolTip == "Queue message after this reply")
         preparing.receive(.began); preparing.receive(.pcm(preRoll))
         precondition(preparing.phase == .recording && preparing.recording == preRoll && preparing.audio === voice && !voice.stopped && preparing.reply == nil)
         precondition(preparing.input.stringValue == "Follow-up draft" && preparing.rows.last?.stringValue == "Hello")
