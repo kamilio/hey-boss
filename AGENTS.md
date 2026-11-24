@@ -2,7 +2,7 @@
 - Run `tools/conversation_checks.sh <cli> <audit-daemon>` for desktop. For the phone UI, open the Conversations URL with `playwright-cli -s=chats open <url> --browser webkit`. Run each of `tools/conversation_safari_checks.js` and `tools/conversation_recovery_checks.js` with `playwright-cli -s=chats run-code --filename <file>`, then close the session.
 - Keep the chat sidebar visible on desktop and available as a drawer on phones. Offline text queues must survive reloads, remain tied to their chat, and retry without duplicate messages. Run `PLAYWRIGHT_CORE=<playwright-core path> node tools/conversation_browser_checks.js` for WebKit/Chrome voice, recovery, offline, pairing, and sidebar checks.
 - No PRs, straight to main
-- Commit small changes
+- Commit after every change.
 - Run GitHub Actions only when the user explicitly asks. Run tests locally on demand; use your judgment about what each change needs.
 - Attention to performance
 - Keep the design slick and polished.
