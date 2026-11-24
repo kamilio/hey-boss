@@ -5665,7 +5665,7 @@ func auditConversation(_ root: String) {
     wait("first streamed word") { ui.phase == .speaking && highlighted() != nil }
     precondition(ui.caption.isVisible && !ui.caption.isKeyWindow && ui.caption.line.stringValue.contains(highlighted()!))
     precondition(!ui.listenNext.isHidden && ui.listenNext.title == "Interrupt reply")
-    precondition(!ui.send.isEnabled, "Keep the current model turn together while new words are still arriving")
+    precondition(ui.send.isEnabled && ui.send.toolTip == "Queue message after this reply", "Typed input queues while the current model turn is still arriving")
     precondition(ui.meter.phase == .speaking && audio.readerVoice != nil && ui.rows.last!.stringValue == opening)
     ui.event(["TextDelta": ["text": "**early words** can play while the rest is still arriving.\n\nAnother paragraph"]])
     precondition(ui.rows.last!.stringValue.contains("The early words"))
