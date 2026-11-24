@@ -363,7 +363,7 @@ $('talk').onclick = () => {
   const action = snapshot.voice.phase==='recording' ? api('finish') : stop(voice);
   action.then(refresh).catch(notice);
 };
-act('cancel',async()=>{await api('cancel');await refresh();});
+act('cancel',async()=>{await api('cancel',{message:snapshot.turn});await refresh();});
 act('resumeQueue',async()=>{await api('resume_queue');await refresh();});
 act('end',async()=>{if (voice) await stop(voice); await refresh();});
 for (const id of ['mute','pause','interrupt']) act(id,async()=>{await api(id); await refresh();});

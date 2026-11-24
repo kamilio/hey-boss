@@ -8915,7 +8915,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             var result: [String:Any] = ["chat":library.selected.uuidString, "voice":voiceStatus, "mine":owns,
                 "passage":owns && reading ? playingPassage : "", "spoken":playingThrough,
                 "paused":playbackPaused, "muted":micMuted, "revision":phoneRevision, "start":start, "end":end,
-                "queuedSend":true, "serverQueue":true, "queuePaused":queuePaused,
+                "queuedSend":true, "serverQueue":true, "queuePaused":queuePaused, "turn":activeTurn?.uuidString ?? NSNull(),
                 "queue":queuedMessages.map { ["id":$0.id.uuidString,"text":$0.text] },
                 "canCancel":restoreError == nil && pauseID == nil && terminal == nil && (owns || audio == nil) && (answering || approvalSheet != nil), "canSend":restoreError == nil && pauseID == nil && terminal == nil &&
                     (owns || audio == nil) && (acceptsTypedMessage || answering) && input.stringValue.isEmpty && pendingCapture == nil && selections.isEmpty]
@@ -8968,7 +8968,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             }
         }
         if p.chat == library.selected, restoreError == nil, pauseID == nil, terminal == nil, owns || audio == nil {
-            if p.action == "cancel" { stopCurrentReply(); return ["chat":library.selected.uuidString] }
+            if p.action == "cancel" {
+                guard let id = p.message, id == activeTurn else { return ["chat":library.selected.uuidString, "stale":true] }
+                stopCurrentReply(); return ["chat":library.selected.uuidString]
+            }
             if p.action == "cancel_queued", let id = p.message { guard cancelQueued(id) else { throw StorageError(description: status.stringValue) }; return ["chat":library.selected.uuidString, "cancelled":!messages.contains(where: { $0.phoneID == id })] }
             if p.action == "resume_queue" { resumeQueued(); return ["chat":library.selected.uuidString] }
             if p.action == "send", answering && !turnDone || !queuedMessages.isEmpty {
@@ -9231,6 +9234,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         } catch { state(.idle, error.localizedDescription); return false }
     }
     private var answering: Bool { phase == .thinking || phase == .speaking }
+    private var activeTurn: UUID?
     private var turnAccepted = false
     private var canListenNext: Bool {
         pauseID == nil && audio != nil && answering && (turnDone || directory == nil || turnAccepted || messageLabel != nil || lastMessage?.isEmpty == false)
@@ -9659,7 +9663,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         selections = []
         append(automatic ? "Thread update" : text, from: automatic ? "T3" : "You", capture: automatic ? Capture(source: "T3", text: text) : capture)
         messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
-        messages[messages.count - 1].phoneID = phoneID
+        activeTurn = phoneID ?? UUID()
+        messages[messages.count - 1].phoneID = activeTurn
         rememberTurn()
         guard save() else { state(.idle, status.stringValue); return false }
         state(.thinking, "Thinking…")
@@ -10288,6 +10293,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        activeTurn = nil
         queuePaused = true
         if failure != nil, let key = t3Processing, t3Pending?.key == key { t3Pending = nil }
         t3Processing = nil

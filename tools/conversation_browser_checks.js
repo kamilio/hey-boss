@@ -23,10 +23,10 @@ const server=http.createServer((req,res)=>{
     r.chats=chats.slice(start,start+30);r.next=start+30<chats.length?r.chats.at(-1).id:null;
    }
    if(p.action==='state' && fixture.blockState){res.writeHead(503);res.end();return;}
-   if(p.action==='state')Object.assign(r,{chat,queuedSend:true,serverQueue:!!fixture.serverQueue,queue:fixture.queue || [],queuePaused:!!fixture.queuePaused,canCancel:!!fixture.busy,canSend:fixture.serverQueue || !fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
-   if(p.action==='cancel'){fixture.busy=false;fixture.queuePaused=true;}
+   if(p.action==='state')Object.assign(r,{chat,queuedSend:true,serverQueue:!!fixture.serverQueue,queue:fixture.queue || [],queuePaused:!!fixture.queuePaused,canCancel:!!fixture.busy,turn:fixture.turn || chat,canSend:fixture.serverQueue || !fixture.busy,voice:{phase:fixture.busy?'thinking':'idle',detail:'Voice off'},start:0,end:fixture.messages.get(chat).length,revision:fixture.revision,messages:fixture.messages.get(chat),tools:[],visuals:[],heading:'Start a conversation'});
+   if(p.action==='cancel'){if(p.message!==(fixture.turn || chat))r.stale=true;else{fixture.busy=false;fixture.queuePaused=true;}}
    if(p.action==='cancel_queued')fixture.queue=fixture.queue.filter(item=>item.id!==p.message);
-   if(p.action==='resume_queue'){fixture.queuePaused=false;const next=fixture.queue.shift();if(next){fixture.messages.get(chat).push({speaker:'You',text:next.text});fixture.busy=true;fixture.revision++;}}
+   if(p.action==='resume_queue'){fixture.queuePaused=false;const next=fixture.queue.shift();if(next){fixture.messages.get(chat).push({speaker:'You',text:next.text});fixture.busy=true;fixture.turn=next.id;fixture.revision++;}}
    if(p.action==='send'){
     fixture.attempts++;
     if(!fixture.accepted.has(p.message)){

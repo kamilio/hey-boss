@@ -6351,7 +6351,7 @@ func auditPhoneQueue(_ path: String) throws {
     precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
     precondition(try! call("send", ["chat":target,"text":"Third queued message","message":third])["accepted"] as? String == third)
     precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
-    _ = try call("cancel", ["chat":target])
+    _ = try call("cancel", ["chat":target,"message":message])
     precondition(chat.phase == .idle && (try! call("state")["queuePaused"] as? Bool) == true)
     precondition((try! call("state")["queue"] as! [[String:Any]]).count == 1)
     // Read the checkpoint before stop() can flush any unsaved state.
@@ -6369,6 +6369,8 @@ func auditPhoneQueue(_ path: String) throws {
     _ = try call("resume_queue", ["chat":target])
     precondition((try! call("state")["queue"] as! [[String:Any]]).isEmpty)
     precondition(chat.conversationHistory.last?["content"] == "Second queued message")
+    precondition(try! call("cancel", ["chat":target,"message":message])["stale"] as? Bool == true)
+    precondition(chat.phase == .thinking)
     _ = try call("send", ["chat":target,"text":"After completion","message":UUID().uuidString])
     chat.event(["TurnCompleted":["status":"Completed","output":"Finished"]])
     let deadline = Date(timeIntervalSinceNow: 2)
