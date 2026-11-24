@@ -54,6 +54,14 @@ async fn main() -> Result<()> {
             .unwrap_or("");
         let sent = fs::read_to_string(root.join("sent.jsonl"))?;
         let words = spoken.split_whitespace().count();
+        if scenario["name"] == "Structured question" {
+            ensure!(
+                !["can't submit", "can’t submit", "cannot submit"]
+                    .iter()
+                    .any(|claim| spoken.contains(claim)),
+                "Voice can answer this question on the next turn: {spoken}"
+            );
+        }
         report.push(json!({"scenario":scenario["name"],"spoken":spoken,"words":words,"sent":sent}));
         fs::write(
             out.join("t3-replay.json"),
