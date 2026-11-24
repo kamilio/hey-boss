@@ -3,6 +3,71 @@ use super::*;
 use axum::{extract::State, routing::post};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+#[tokio::test]
+async fn native_delayed_headers_keep_cli_connected_and_preserve_usage() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let expected = json!({"candidates":[{"content":{"role":"model","parts":[{"text":"ready","thoughtSignature":"unchanged"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":11,"candidatesTokenCount":3,"totalTokenCount":14}});
+    let result = expected.clone();
+    let gate = release.clone();
+    let (upstream_url, upstream) = serve(Router::new().route(
+        "/models/test:streamGenerateContent",
+        post(move || {
+            let gate = gate.clone();
+            let result = result.clone();
+            async move {
+                gate.notified().await;
+                ([(header::CONTENT_TYPE, "text/event-stream")], format!("data: {result}\n\n"))
+            }
+        }),
+    )).await;
+    let (url, proxy) = serve(super::super::router(Config {
+        gemini: Some(provider(&upstream_url, "bearer")),
+        ..Config::default()
+    }).unwrap()).await;
+    let response = tokio::time::timeout(
+        HEARTBEAT_INTERVAL + Duration::from_secs(5),
+        reqwest::Client::new().post(format!("{url}/v1beta/models/test:streamGenerateContent?alt=sse"))
+            .json(&json!({"contents":[]})).send(),
+    ).await;
+    assert!(response.is_ok(), "native headers must arrive before the CLI's 60-second deadline");
+    let mut response = response.unwrap().unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "\n");
+    release.notify_one();
+    let body = response.bytes().await.unwrap();
+    assert_eq!(NativeSse::default().feed(&body, true).unwrap(), vec![expected]);
+    proxy.abort(); upstream.abort();
+}
+
+#[tokio::test]
+async fn native_delayed_headers_fail_closed_on_upstream_rejection() {
+    let release = Arc::new(tokio::sync::Notify::new());
+    let gate = release.clone();
+    let (upstream_url, upstream) = serve(Router::new().route(
+        "/models/test:streamGenerateContent",
+        post(move || {
+            let gate = gate.clone();
+            async move {
+                gate.notified().await;
+                (StatusCode::BAD_REQUEST, axum::Json(json!({"error":{"code":400,"status":"INVALID_ARGUMENT"}})))
+            }
+        }),
+    )).await;
+    let (url, proxy) = serve(super::super::router(Config {
+        gemini: Some(provider(&upstream_url, "bearer")),
+        ..Config::default()
+    }).unwrap()).await;
+    let mut response = tokio::time::timeout(
+        HEARTBEAT_INTERVAL + Duration::from_secs(5),
+        reqwest::Client::new().post(format!("{url}/v1beta/models/test:streamGenerateContent?alt=sse"))
+            .json(&json!({"contents":[]})).send(),
+    ).await.expect("native headers must arrive while upstream is pending").unwrap();
+    assert_eq!(response.chunk().await.unwrap().unwrap(), "\n");
+    release.notify_one();
+    assert!(response.bytes().await.is_err(), "a rejected generation must not become an empty successful stream");
+    proxy.abort(); upstream.abort();
+}
+
 #[test]
 fn concurrent_key_publication_uses_one_complete_private_key() {
     let dir = tempfile::tempdir().unwrap();

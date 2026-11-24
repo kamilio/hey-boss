@@ -5539,6 +5539,17 @@ func auditConversation(_ root: String) {
         precondition(check(), "\(step): \(ui.status.stringValue)")
     }
     do {
+        let chat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("typed-while-recording/current.json"))
+        let mic = ReviewAudio(); chat.connect(mic); chat.receive(.began); chat.receive(.pcm(preRoll))
+        chat.input.stringValue = " "; chat.sendTyped()
+        precondition(chat.phase == .recording && chat.recording == preRoll && chat.rows.isEmpty)
+        chat.input.stringValue = "Guys, this is interstellar."
+        chat.send.performClick(nil); chat.receive(.ended)
+        precondition(chat.rows.first?.stringValue == "Guys, this is interstellar." && chat.phase == .thinking && chat.recording == nil, "Send the typed correction instead of the unfinished recording")
+        precondition(chat.audio === mic && !mic.stopped && chat.input.stringValue.isEmpty)
+        chat.window.close()
+    }
+    do {
         let chat = VoiceConversation(cli: cli, saveURL: saved.deletingLastPathComponent().appendingPathComponent("lost-mic/current.json"))
         let mic = ReviewAudio(), reason = "Speech detector disconnected."
         chat.connect(mic); chat.state(.thinking, "Thinking…")
