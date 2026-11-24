@@ -72,7 +72,7 @@ keeps Hey Talk and its shortcuts running. Hover over the status-bar icon to see
 whether the pill is visible or hidden.
 
 **AI Correction** in the waveform menu or the pill's right-click menu toggles
-punctuation and typo correction and filler removal with OpenAI GPT-6 Luna. It starts on
+punctuation and typo correction and filler removal with the configured AI model. It starts on
 and remembers your choice. A tiny red brain beside the waveform means AI is off;
 there is no indicator when it is on. `hey-talk correction on|off|toggle` controls the same setting.
 A matching red Return symbol means Auto Submit is off. While idle it follows the
@@ -82,8 +82,9 @@ Hyper+R and Auto Dictation cannot override an exception.
 When enabled, the transcript, existing vocabulary, visible conversation text,
 and the current input
 from the dictation's target window go to the existing
-Hey Proxy at `127.0.0.1:8080` with reasoning disabled and storage off. By default, correction requests `gpt-6-luna` with priority service.
+Hey Proxy at `127.0.0.1:8080` with storage off. By default, correction requests `gpt-6-luna` with priority service and reasoning disabled.
 To use Bedrock, choose an OpenAI profile ID from `/bedrock/v1/models` and run `defaults write local.hey-talk correctionBedrockProfile -string 'PROFILE_ID'`. Correction then uses `/bedrock/v1/responses` on the default tier. Delete that preference to restore ordinary proxy routing.
+Set `correctionReasoningEffort` with `defaults write local.hey-talk correctionReasoningEffort -string low` for models that require reasoning. For Bedrock GPT-6.2 Sol, use `us.openai.gpt-6.2-sol` and `low`. Model and reasoning changes apply to the next correction request without restarting; `hey-talk correction --json` shows the active settings.
 Audio stays local. Correction applies before History, copy, paste, or submission,
 including file transcription. Each correction request has 30 seconds to finish, including pauses between updates.
 If correction fails or times out, Hey Talk pastes the raw transcript without submitting, keeps it in History, and shows a failure notice. The usual destination checks still apply, and completed actions stay completed. Dictation restores the previous clipboard after pasting. Escape discards pending correction too.

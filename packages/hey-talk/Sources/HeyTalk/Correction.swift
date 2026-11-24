@@ -7,7 +7,8 @@ struct CorrectionSettings {
     var enabled: Bool { defaults.object(forKey: "correctionEnabled") as? Bool ?? true }
     var bedrockProfile: String? { defaults.string(forKey: "correctionBedrockProfile") }
     var model: String { bedrockProfile ?? "gpt-6-luna" }
-    var json: [String: Any] { ["enabled": enabled, "model": model] }
+    var reasoningEffort: String { defaults.string(forKey: "correctionReasoningEffort") ?? "none" }
+    var json: [String: Any] { ["enabled": enabled, "model": model, "reasoning_effort": reasoningEffort] }
     static func validate(_ args: [String]) throws {
         guard args.isEmpty || (args.count == 1 && ["on", "off", "toggle"].contains(args[0])) else {
             throw TalkError("Use correction [on|off|toggle]")
@@ -90,7 +91,7 @@ final class Correction {
         let message = String(decoding: input, as: UTF8.self)
         let conversation: Any = history.isEmpty ? message as Any : [["role": "user", "content": message]] + history
         var body: [String: Any] = [
-            "model": settings.model, "reasoning": ["effort": "none"], "store": false, "stream": true,
+            "model": settings.model, "reasoning": ["effort": settings.reasoningEffort], "store": false, "stream": true,
             "instructions": try prompt("correction"), "tools": tools, "tool_choice": history.isEmpty ? "required" : "auto", "parallel_tool_calls": false,
             "include": ["reasoning.encrypted_content"], "input": conversation
         ]

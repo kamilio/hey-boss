@@ -448,18 +448,30 @@ final class CorrectionTests: XCTestCase {
         XCTAssertFalse(settings.enabled)
     }
 
-    func testConfiguredBedrockProfileUsesExplicitRouteWithoutPriority() throws {
+    func testCorrectionReloadsExternalModelAndReasoningChangesWithoutRestarting() throws {
         let suite = "hey-talk-correction-\(UUID())"
         let defaults = UserDefaults(suiteName: suite)!
         defer { defaults.removePersistentDomain(forName: suite) }
-        defaults.set("global.openai.example", forKey: "correctionBedrockProfile")
         let settings = CorrectionSettings(defaults: defaults)
-        let request = try Correction.request(text: "hello", vocabulary: [], settings: settings)
-        XCTAssertEqual(request.url?.path, "/bedrock/v1/responses")
-        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
-        XCTAssertEqual(body["model"] as? String, "global.openai.example")
-        XCTAssertEqual(settings.json["model"] as? String, body["model"] as? String)
-        XCTAssertNil(body["service_tier"])
+        XCTAssertEqual(settings.model, "gpt-6-luna")
+        XCTAssertEqual(settings.reasoningEffort, "none")
+        for (model, effort) in [("us.openai.gpt-6.2-sol", "low"), ("global.openai.gpt-6.2-sol", "low"), ("us.openai.gpt-6-luna", "none")] {
+            for (key, value) in [("correctionBedrockProfile", model), ("correctionReasoningEffort", effort)] {
+                let writer = Process()
+                writer.executableURL = URL(fileURLWithPath: "/usr/bin/defaults")
+                writer.arguments = ["write", suite, key, "-string", value]
+                try writer.run(); writer.waitUntilExit()
+                XCTAssertEqual(writer.terminationStatus, 0)
+            }
+            let request = try Correction.request(text: "hello", vocabulary: [], settings: settings)
+            XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8080/bedrock/v1/responses")
+            let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+            XCTAssertEqual(body["model"] as? String, model)
+            XCTAssertEqual((body["reasoning"] as? [String: String])?["effort"], effort)
+            XCTAssertEqual(settings.json["model"] as? String, model)
+            XCTAssertEqual(settings.json["reasoning_effort"] as? String, effort)
+            XCTAssertNil(body["service_tier"])
+        }
     }
 
     func testRequestUsesLunaWithoutReasoningAndKeepsVocabularySeparateFromTranscript() throws {

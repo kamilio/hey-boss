@@ -24,7 +24,7 @@ enum CLI {
     hey-talk devices                           List microphone names and UIDs
     hey-talk input UID|default                  Select microphone
     hey-talk auto [on|off|toggle|add BUNDLE_ID|remove BUNDLE_ID]  Hands-free dictation
-    hey-talk correction [on|off|toggle]         Fix punctuation and typos with Luna
+    hey-talk correction [on|off|toggle]         Fix punctuation and typos with AI
     hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
     hey-talk speech catch-up [THREAD_LINK]    Talk with T3, or hear a Slack/Obsidian recap
