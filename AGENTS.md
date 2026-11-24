@@ -6,6 +6,7 @@
 - Run GitHub Actions only when the user explicitly asks. Run tests locally on demand; use your judgment about what each change needs.
 - Attention to performance
 - Keep the design slick and polished.
+- CLI-first, not UI-first: configure and link through config and CLI; keep UI actions simple.
 - No useless params and config, it's easier to change code. 
 - Install changed components only on machines that use them. For Hey Talk–only changes, use `packages/hey-talk/install.sh` on Macs with Hey Talk; skip `hey-boss upgrade`.
 - Use Rust if possible, NO PYTHON
