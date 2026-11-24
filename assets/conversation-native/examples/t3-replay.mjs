@@ -6,7 +6,7 @@ if (link !== 't3code://threads/00000000-0000-0000-0000-000000000001/simulated') 
 if (op === 'show') console.log(readFileSync(file('thread.json'), 'utf8'));
 else if (op === 'answer') {
   const answers = JSON.parse(readFileSync(0, 'utf8'));
-  if (process.argv[4] !== 'scope-request' || answers.scope !== 'Reconnect retries only') throw Error('Wrong question or answer');
+  if (process.argv[4] !== 'browser-request' || answers.browser !== 'Safari') throw Error('Wrong question or answer');
   appendFileSync(file('sent.jsonl'), JSON.stringify({op,answers})+'\n');
   console.log(JSON.stringify({delivery:'answered'}));
 } else if (['send','queue'].includes(op)) {

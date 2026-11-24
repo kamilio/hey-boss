@@ -45,11 +45,11 @@
   {
     "name": "Structured question",
     "automatic": true,
-    "turn": "{\"run\":null,\"requests\":[{\"id\":\"scope-request\",\"kind\":\"user_input\",\"item\":{\"type\":\"user_input_request\",\"requestId\":\"scope-request\",\"questions\":[{\"id\":\"scope\",\"question\":\"Confirm scope for the next test run\",\"options\":[{\"label\":\"Reconnect retries only\"},{\"label\":\"Include cross-tab coordination\"}]}]}}],\"replies\":\"\"}"
+    "turn": "{\"run\":null,\"requests\":[{\"id\":\"browser-request\",\"kind\":\"user_input\",\"item\":{\"type\":\"user_input_request\",\"requestId\":\"browser-request\",\"questions\":[{\"id\":\"browser\",\"question\":\"Which browser should I test first?\",\"options\":[{\"label\":\"Safari\"},{\"label\":\"Chrome\"}]}]}}],\"replies\":\"\"}"
   },
   {
     "name": "Answer structured question",
-    "turn": "Reconnect retries only.",
+    "turn": "Safari.",
     "sends": 1
   },
   {
