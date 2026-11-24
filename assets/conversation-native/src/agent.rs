@@ -111,7 +111,7 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
                 );
                 ensure!(!automatic, "Tools unavailable during automatic updates");
                 let args: Value = serde_json::from_str(field(&call["function"], "arguments")?)?;
-                if matches!(name, "t3_read" | "t3_send") {
+                if matches!(name, "t3_read" | "t3_send" | "t3_answer") {
                     return crate::t3::call(
                         tools,
                         attached.context("No attached T3 thread")?,

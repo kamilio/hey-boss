@@ -5,7 +5,20 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { target, desiredCommand, recapPage, serverCLI, acrossHosts, voiceSnapshot } from './hey-t3.mjs';
+import { target, desiredCommand, recapPage, serverCLI, acrossHosts, voiceSnapshot, answerCommand } from './hey-t3.mjs';
+
+test('voice answers the exact pending question and cannot approve tools or answer stale forms', () => {
+  const projection = {thread:{id:'attached'},runtimeRequests:[{id:'request',kind:'user_input',status:'pending'}],visibleTurnItems:[{item:{type:'user_input_request',requestId:'request',questions:[{id:'scope'}]}}]};
+  const command = answerCommand(projection, 'request', {scope:'Keep it small'});
+  assert.equal(command.type, 'runtime-request.respond');
+  assert.equal(command.threadId, 'attached');
+  assert.deepEqual(command.answers, {scope:'Keep it small'});
+  assert.throws(() => answerCommand(projection, 'request', {wrong:'Answer'}));
+  projection.runtimeRequests[0].kind='command';
+  assert.throws(() => answerCommand(projection, 'request', {scope:'Approve'}), /Approvals/);
+  projection.runtimeRequests[0].kind='user_input'; projection.runtimeRequests[0].status='resolved';
+  assert.throws(() => answerCommand(projection, 'request', {scope:'Again'}), /not a pending/);
+});
 
 test('voice ignores running progress and tool output, then includes the result and pending questions', () => {
   const projection = { thread: { title: 'Fix' }, runs: [{id:'run',status:'running'}], runtimeRequests: [], visibleTurnItems: [

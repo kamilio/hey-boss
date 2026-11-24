@@ -1,0 +1,1 @@
+Answer a pending user question in the attached thread using its request ID and question IDs from t3_read or the latest update. Relay only the user's answer. Approvals remain in T3. Do not retry an uncertain answer automatically.

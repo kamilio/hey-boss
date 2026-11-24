@@ -22,6 +22,7 @@ hey-t3 stop THREAD_LINK
 hey-t3 show|pull|catch-up|pin|unpin|settle THREAD_LINK
 hey-t3 rename THREAD_LINK TITLE
 hey-t3 send|queue THREAD_LINK MESSAGE (use - to read stdin)
+hey-t3 answer THREAD_LINK REQUEST_ID ANSWERS_JSON (use - to read stdin)
 
 PROJECT is an ID, workspace root, or exact title. Omit MESSAGE to start idle.
 Start uses the project or environment model, otherwise codex/gpt-6.1-sol;
@@ -112,6 +113,18 @@ export function voiceSnapshot(projection) {
     lastMessage: items.findLast(item => item.type === 'user_message' && (item.createdBy ?? 'user') === 'user')?.text ?? '',
     replies: complete ? items.filter(item => item.runId === run.id && item.type === 'assistant_message' && !item.streaming).map(item => item.text).join('\n\n') : '',
   };
+}
+
+export function answerCommand(projection, requestId, answers) {
+  const request = projection.runtimeRequests.find(r => r.id === requestId && r.status === 'pending');
+  if (request?.kind !== 'user_input') throw Error('This is not a pending user question. Approvals must be answered in T3.');
+  const item = projection.visibleTurnItems.find(({item}) => item.type === 'user_input_request' && item.requestId === requestId)?.item;
+  if (!item) throw Error('Read the current question before answering.');
+  if (!answers || typeof answers !== 'object' || Array.isArray(answers) || !Object.keys(answers).length ||
+      Object.entries(answers).some(([id, value]) => !item.questions.some(q => q.id === id) ||
+        !(typeof value === 'string' || (Array.isArray(value) && value.every(v => typeof v === 'string')))))
+    throw Error('Expected answers keyed by the current question IDs.');
+  return {type:'runtime-request.respond',commandId:randomUUID(),threadId:projection.thread.id,requestId,answers};
 }
 
 async function voiceChange(base, headers, id, afterSequence) {
@@ -254,6 +267,7 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
     'rename',
     'send',
     'queue',
+    'answer',
     'start',
     'schedule',
     'promote',
@@ -409,6 +423,11 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
       return delegateResult(projection, arg);
     return delegateResult((await get(path,headers)).projection, arg);
   }
+  if (op === 'answer') {
+    const {projection} = await bounded(false);
+    await rpc('orchestration.dispatchCommand', answerCommand(projection, arg, JSON.parse(text)));
+    return {requestId:arg, delivery:'answered'};
+  }
   if (op === 'pull') {
     const transcript = await get(path + '/transcript', headers);
     if (transcript.threadId !== id) throw Error('T3 returned a different thread.');
@@ -420,6 +439,7 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
   if (op === 'show')
     return {
       ...thread,
+      requests: voiceSnapshot(page.projection).requests,
       messages: page.projection.visibleTurnItems
         .map((row) => row.item)
         .filter(
@@ -688,6 +708,7 @@ async function main(args) {
     rename: [2],
     send: [2],
     queue: [2],
+    answer: [3],
   };
   if (
     !Object.hasOwn(counts, op) ||
@@ -702,7 +723,7 @@ async function main(args) {
     : target(arg);
   if (environment !== undefined && !uuid.test(environment)) throw Error('Invalid environment ID.');
   let text =
-    op === 'schedule' ? third : ['start', 'send', 'queue', 'rename'].includes(op) ? value : undefined;
+    ['schedule', 'answer'].includes(op) ? third : ['start', 'send', 'queue', 'rename'].includes(op) ? value : undefined;
   if (text === '-' && op !== 'rename') text = readFileSync(0, 'utf8');
   if (text !== undefined && !text.trim()) throw Error('Message or title cannot be empty.');
   const input = {
@@ -712,7 +733,7 @@ async function main(args) {
     text,
     guarded,
     options,
-    arg: ['schedule', 'promote'].includes(op) ? value : arg,
+    arg: ['schedule', 'promote', 'answer'].includes(op) ? value : arg,
   };
 
   if (environment === undefined) {

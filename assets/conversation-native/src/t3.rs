@@ -8,6 +8,7 @@ pub fn schemas() -> Vec<Value> {
     vec![
         json!({"type":"function","name":"t3_read","description":include_str!("../../conversation-tools/t3_read.md"),"parameters":{"type":"object","properties":{},"additionalProperties":false}}),
         json!({"type":"function","name":"t3_send","description":include_str!("../../conversation-tools/t3_send.md"),"parameters":{"type":"object","properties":{"text":{"type":"string"},"queue":{"type":"boolean"}},"required":["text"],"additionalProperties":false}}),
+        json!({"type":"function","name":"t3_answer","description":include_str!("../../conversation-tools/t3_answer.md"),"parameters":{"type":"object","properties":{"request_id":{"type":"string"},"answers":{"type":"object","additionalProperties":{"anyOf":[{"type":"string"},{"type":"array","items":{"type":"string"}}]}}},"required":["request_id","answers"],"additionalProperties":false}}),
     ]
 }
 
@@ -22,10 +23,13 @@ pub async fn call(tools: &Plugins<'_>, link: &str, name: &str, args: &Value) -> 
     } else {
         tools.home.join(".local/bin/hey-t3")
     };
-    let sending = name == "t3_send";
+    let answering = name == "t3_answer";
+    let sending = name == "t3_send" || answering;
     let mut command = Command::new(script);
     command
-        .arg(if sending {
+        .arg(if answering {
+            "answer"
+        } else if sending {
             if args["queue"] == true {
                 "queue"
             } else {
@@ -35,6 +39,9 @@ pub async fn call(tools: &Plugins<'_>, link: &str, name: &str, args: &Value) -> 
             "show"
         })
         .arg(link);
+    if answering {
+        command.arg(field(args, "request_id")?);
+    }
     if sending {
         command.arg("-");
     }
@@ -45,7 +52,12 @@ pub async fn call(tools: &Plugins<'_>, link: &str, name: &str, args: &Value) -> 
         .kill_on_drop(true)
         .spawn()?;
     if sending {
-        let text = field(args, "text")?;
+        let answers = args["answers"].to_string();
+        let text = if answering {
+            &answers
+        } else {
+            field(args, "text")?
+        };
         ensure!(!text.trim().is_empty(), "Message cannot be empty");
         child
             .stdin
