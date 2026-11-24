@@ -9620,6 +9620,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     private var agentStateURL: URL { chatURL(library.selected).deletingPathExtension().appendingPathExtension("agent.json") }
     func generationFailed(_ error: Error) {
+        if let key = t3Processing, t3Pending?.key == key { t3Pending = nil }
+        t3Processing = nil
         failTerminal(error.localizedDescription)
         reply = nil
         if !stream.isEmpty { finishMessage(stream) }
@@ -10185,6 +10187,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        if failure != nil, let key = t3Processing, t3Pending?.key == key { t3Pending = nil }
         t3Processing = nil
         failTerminal(failure ?? "Reply stopped")
         for index in activities.indices where activities[index].state == "Running" {
