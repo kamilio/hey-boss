@@ -62,5 +62,11 @@
     "automatic": true,
     "turn": "{\"run\":null,\"requests\":[{\"id\":\"approval\",\"kind\":\"command\",\"item\":{\"text\":\"Approval required in T3 to deploy to production.\"}}],\"replies\":\"\"}",
     "sends": 0
+  },
+  {
+    "name": "Uncertain send is not repeated",
+    "turn": "Tell it to stop after the tests, without deploying.",
+    "sends": 1,
+    "uncertain": true
   }
 ]

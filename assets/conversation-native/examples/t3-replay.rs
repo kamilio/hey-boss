@@ -36,6 +36,10 @@ async fn main() -> Result<()> {
     let mut report = vec![];
     for scenario in scenarios {
         fs::write(root.join("sent.jsonl"), "")?;
+        fs::write(
+            root.join("delivery.json"),
+            json!({"uncertain":scenario["uncertain"] == true}).to_string(),
+        )?;
         let request = json!({"t3_thread":"t3code://threads/00000000-0000-0000-0000-000000000001/simulated","turn":scenario["turn"],"automatic":scenario["automatic"] == true});
         agent::run(
             &state,

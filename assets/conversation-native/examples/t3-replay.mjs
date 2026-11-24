@@ -11,5 +11,9 @@ else if (op === 'answer') {
   console.log(JSON.stringify({delivery:'answered'}));
 } else if (['send','queue'].includes(op)) {
   appendFileSync(file('sent.jsonl'), JSON.stringify({op, text:readFileSync(0, 'utf8')})+'\n');
+  if (JSON.parse(readFileSync(file('delivery.json'), 'utf8')).uncertain) {
+    console.error('T3 did not confirm the command. Delivery is uncertain; check the thread before sending again.');
+    process.exit(1);
+  }
   console.log(JSON.stringify({delivery:op === 'queue' ? 'queued' : 'steered',messageId:'simulated-message'}));
 } else throw Error('Unexpected T3 operation');

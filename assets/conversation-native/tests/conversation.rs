@@ -81,6 +81,7 @@ async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> R
     )?;
     fs::set_permissions(root.join("hey-t3.mjs"), fs::Permissions::from_mode(0o700))?;
     fs::write(root.join("sent.jsonl"), "")?;
+    fs::write(root.join("delivery.json"), "{}")?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut plugins = Plugins {
         cwd: root,
