@@ -9,10 +9,21 @@ use std::os::unix::ffi::OsStrExt;
 pub struct Provider {
     pub command: String,
     pub audience: String,
-    create: Vec<String>,
-    read: Vec<String>,
-    update: Vec<String>,
+    #[serde(default)]
+    pub content: Content,
+    #[serde(default)]
+    pub auto_sync: Option<bool>,
+    pub(crate) create: Vec<String>,
+    pub(crate) read: Vec<String>,
+    pub(crate) update: Vec<String>,
     fields: Fields,
+}
+#[derive(Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Content {
+    #[default]
+    Page,
+    Artifact,
 }
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +55,10 @@ pub fn providers() -> Result<BTreeMap<String, Provider>> {
     Ok(providers)
 }
 impl Provider {
-    fn validate(&self) -> Result<()> {
+    pub fn automatic(&self) -> bool {
+        self.auto_sync.unwrap_or(self.content == Content::Page)
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
         if self.command.trim().is_empty()
             || !matches!(
                 self.audience.as_str(),
@@ -63,7 +77,7 @@ impl Provider {
         }
         Ok(())
     }
-    fn run(
+    pub(crate) fn run(
         &self,
         args: &[String],
         source: &Path,
@@ -141,10 +155,10 @@ impl Provider {
         Ok(remote)
     }
 }
-struct Remote {
-    id: String,
-    url: String,
-    version: String,
+pub(crate) struct Remote {
+    pub id: String,
+    pub url: String,
+    pub version: String,
 }
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
@@ -187,7 +201,7 @@ pub fn share(
     name: &str,
     provider: &str,
     link: Option<&str>,
-    auto_sync: bool,
+    auto_sync: Option<bool>,
 ) -> Result<Page> {
     let providers = providers()?;
     let definition = providers.get(provider).ok_or_else(|| {
@@ -198,7 +212,16 @@ pub fn share(
                 .unwrap_or_default()
         ))
     })?;
-    share_with(database, name, provider, definition, link, auto_sync)?;
+    let saved = view(database, name)?;
+    let automatic = auto_sync.unwrap_or_else(|| {
+        saved
+            .publications
+            .iter()
+            .find(|p| p.provider == provider)
+            .map(|p| p.auto_sync)
+            .unwrap_or_else(|| definition.automatic())
+    });
+    share_with(database, name, provider, definition, link, automatic)?;
     view(database, name)
 }
 
@@ -213,6 +236,11 @@ fn share_with(
     valid_name(name)?;
     valid_name(provider)?;
     definition.validate()?;
+    if definition.content != Content::Page {
+        return Err(Error::invalid(
+            "This provider publishes Markdown artifacts; use artifact share",
+        ));
+    }
     let db = Store::open(database)?.into_database();
     private_dir(&root(database))?;
     // Serialize this target locally without holding the content/database writer during network I/O.

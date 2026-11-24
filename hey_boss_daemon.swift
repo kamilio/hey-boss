@@ -10904,7 +10904,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         scrollObserver = NotificationCenter.default.addObserver(forName: NSView.boundsDidChangeNotification, object: scroll.contentView, queue: .main) { [weak self] _ in self?.highlightVisible() }
     }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.init("library"), .sidebarTrackingSeparator, .init("document-title"), .flexibleSpace, .init("outline"), .init("format"), .init("reading")]
+        [.init("library"), .sidebarTrackingSeparator, .init("document-title"), .flexibleSpace, .init("outline"), .init("format"), .init("sharing"), .init("reading")]
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
@@ -10927,6 +10927,11 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             outline.label = "Outline"; outline.image = NSImage(systemSymbolName: "list.bullet", accessibilityDescription: "Document outline")
             outline.showsIndicator = false; outline.toolTip = "Jump to a heading"; outline.menu = NSMenu(title: "Outline")
             return outline
+        case "sharing":
+            let item = NSToolbarItem(itemIdentifier: identifier); item.label = "Share"
+            item.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share artifact")
+            item.target = self; item.action = #selector(shareArtifact); item.toolTip = "Publish saved Markdown and manage external links"
+            return item
         case "format":
             let item = NSMenuToolbarItem(itemIdentifier: identifier); item.label = "Format"
             item.image = NSImage(systemSymbolName: "textformat", accessibilityDescription: "Format"); item.showsIndicator = false
@@ -10949,6 +10954,14 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             return modes
         default: return nil
         }
+    }
+    @objc func shareArtifact() {
+        guard gallery.isHidden, session.ready, session.launch.file == nil, let id = session.launch.id, !id.isEmpty else { return }
+        guard !session.dirty else { session.flush(); status.stringValue = "Saving changes… Choose Share once saved."; return }
+        var parameters = URLComponents()
+        parameters.queryItems = [URLQueryItem(name: "project", value: session.launch.project), URLQueryItem(name: "artifact", value: id), URLQueryItem(name: "share", value: "1")]
+        if let host = session.launch.host { parameters.queryItems?.append(URLQueryItem(name: "host", value: host)) }
+        if let url = URL(string: "http://hey-boss.test/artifacts#" + (parameters.percentEncodedQuery ?? "")) { NSWorkspace.shared.open(url) }
     }
     @objc func formatCommand(_ sender: NSMenuItem) {
         guard gallery.isHidden && session.ready else { return }
@@ -11168,6 +11181,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         commentsButton.title = selectedBodyRange.length > 0 && htmlReader.document == nil ? "Comment on selection" : "Comments"
     }
     func updateStatus() {
+        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = gallery.isHidden && session.ready && session.launch.file == nil && session.launch.id != nil
         updateReviewControls()
         window.title = session.title
         window.tab.toolTip = session.launch.file ?? session.title
@@ -11576,6 +11590,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     func setDocumentControls(_ enabled: Bool) {
         modeControl.isEnabled = enabled; outline.isEnabled = enabled
+        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = enabled && session.launch.file == nil && session.launch.id != nil
         window.toolbar?.items.first { $0.itemIdentifier.rawValue == "format" }?.isEnabled = enabled
     }
     @objc func showLibrary() {

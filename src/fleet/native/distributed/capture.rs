@@ -29,6 +29,7 @@ pub(super) const TABLES: &[&str] = &[
     "artifacts",
     "artifact_comments",
     "artifact_links",
+    "artifact_exports",
     "file_attachments",
     "published_pages",
     "page_exports",

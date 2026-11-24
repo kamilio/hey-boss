@@ -24,7 +24,7 @@
   function providerChanged() {
     const name = $('share-provider').value, saved = (sharePage.publications || []).find(p=>p.provider===name);
     $('share-audience').textContent = `${audience(providers.find(p=>p.name===name)?.audience || '')} access · ${saved?.url ? 'Updates the saved link.' : 'Creates a link unless you supply one below.'}`;
-    $('share-auto').checked = saved ? saved.auto_sync : true;
+    $('share-auto').checked = saved ? saved.auto_sync : providers.find(p=>p.name===name)?.auto_sync !== false;
     $('share-submit').textContent = saved ? 'Save and sync' : 'Publish';
   }
   async function openShare(page, refresh, providerName) {

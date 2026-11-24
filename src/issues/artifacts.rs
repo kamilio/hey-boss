@@ -108,7 +108,7 @@ pub(super) fn links(db: &Connection, p: &Project, issue: Option<i64>) -> Result<
     Ok(json!({"ok":true,"project":p,"artifacts":rows,"more":more}))
 }
 
-fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
+pub(super) fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     let mut artifact = get(db, &p.id, id)?;
     let source = artifact["body"].as_str().unwrap();
     let rendered = crate::markdown::render_fragment(source).replace(
@@ -134,6 +134,7 @@ fn view(db: &Connection, p: &Project, id: &str) -> Result<Value> {
     let mut stmt=db.prepare("SELECT l.kind,l.target,(SELECT title FROM issues WHERE project_id=l.project_id AND number=CAST(l.target AS INTEGER)) FROM artifact_links l WHERE l.project_id=?1 AND l.artifact_id=?2 AND l.kind='issue' ORDER BY l.created_at LIMIT 1000")?;
     let backlinks=stmt.query_map(params![p.id,id],|r|Ok(json!({"kind":r.get::<_,String>(0)?,"target":r.get::<_,String>(1)?,"title":r.get::<_,Option<String>>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
     artifact["body_html"] = json!(rendered);
+    artifact["publications"] = super::artifact_publishing::list(db, &p.id, id, &artifact)?;
     let result = json!({"ok":true,"project":p,"artifact":artifact,"comments":comments,"more_comments":more,"backlinks":backlinks});
     if serde_json::to_vec(&result)?.len() > crate::issues::WIRE_LIMIT - 65536 {
         return Err(Error::invalid(
@@ -279,6 +280,10 @@ pub(super) fn execute(
             )?;
             db.execute(
                 "DELETE FROM artifact_links WHERE project_id=?1 AND artifact_id=?2",
+                params![p.id, id],
+            )?;
+            db.execute(
+                "DELETE FROM artifact_exports WHERE project_id=?1 AND artifact_id=?2",
                 params![p.id, id],
             )?;
             db.execute(

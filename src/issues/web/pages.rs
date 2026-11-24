@@ -83,7 +83,8 @@ pub(super) fn delete(app: &App, bytes: &[u8]) -> Result<Value> {
 pub(super) fn providers() -> Result<Value> {
     let providers: Vec<_> = pages::publishing::providers()?
         .into_iter()
-        .map(|(name, p)| json!({"name":name,"audience":p.audience}))
+        .filter(|(_, p)| p.content == pages::publishing::Content::Page)
+        .map(|(name, p)| json!({"name":name,"audience":p.audience,"auto_sync":p.automatic()}))
         .collect();
     Ok(json!({"ok":true,"providers":providers}))
 }
@@ -95,7 +96,7 @@ pub(super) fn share(app: &App, bytes: &[u8]) -> Result<Value> {
         name: String,
         provider: String,
         link: Option<String>,
-        auto_sync: bool,
+        auto_sync: Option<bool>,
     }
     let request: Share = serde_json::from_slice(bytes)?;
     let page = pages::publishing::share(

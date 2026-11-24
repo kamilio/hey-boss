@@ -355,6 +355,8 @@ mod large_markdown;
 
 #[path = "artifact_reader.rs"]
 mod artifact_reader;
+#[path = "artifact_publishing.rs"]
+mod artifact_publishing;
 
 #[path = "artifact_import_browser.rs"]
 mod artifact_import;

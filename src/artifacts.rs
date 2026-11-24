@@ -10,6 +10,16 @@ pub enum Operation {
         operation: Box<Operation>,
         files: Vec<import::File>,
     },
+    Providers,
+    Share {
+        id: String,
+        provider: String,
+        link: Option<String>,
+        auto_sync: Option<bool>,
+    },
+    Sync {
+        id: String,
+    },
     Preview {
         body: String,
     },
@@ -74,7 +84,11 @@ impl Operation {
     pub fn writes(&self) -> bool {
         !matches!(
             self,
-            Self::Preview { .. } | Self::List { .. } | Self::View { .. } | Self::Links { .. }
+            Self::Providers
+                | Self::Preview { .. }
+                | Self::List { .. }
+                | Self::View { .. }
+                | Self::Links { .. }
         )
     }
     pub fn validate(&self) -> Result<()> {
@@ -133,6 +147,17 @@ impl Operation {
                     }
                 }
             }
+            Self::Providers => {}
+            Self::Share {
+                id, provider, link, ..
+            } => {
+                identifier(id, "artifact ID", 128)?;
+                crate::pages::valid_name(provider)?;
+                if let Some(link) = link {
+                    identifier(link, "publication link", 4096)?;
+                }
+            }
+            Self::Sync { id } => identifier(id, "artifact ID", 128)?,
             Self::Preview { body } => text(body)?,
             Self::List { query, offset, .. } => {
                 if let Some(q) = query {

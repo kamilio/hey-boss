@@ -38,6 +38,8 @@ mod subtasks;
 #[path = "worker_store.rs"]
 mod workers;
 
+#[path = "artifact_publishing.rs"]
+mod artifact_publishing;
 #[path = "artifacts.rs"]
 mod artifacts;
 #[path = "assignments.rs"]
@@ -1499,6 +1501,7 @@ impl Store {
             tx.commit()?;
         }
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='dictation_vocabulary' AND type='table')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(super::vocabulary::SCHEMA)?; }
+        artifact_publishing::migrate(&db)?;
         if !db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='artifact_link_target' AND type='index')", [], |r|r.get::<_,bool>(0))? { db.execute_batch(artifacts::SCHEMA)?; }
         if db.query_row("SELECT count(*) FROM sqlite_master WHERE name IN ('fleet_row_local','fleet_outbox_retention','fleet_conflicts_pending') AND type='index'", [], |r|r.get::<_,i64>(0))? < 3 {
             db.execute_batch(super::fleet::INDEXES)?;
@@ -1780,6 +1783,18 @@ impl Store {
                     self.cache_job_response(&response)?;
                 }
                 return Ok(response);
+            }
+        }
+        if let Operation::Artifact { operation } = &r.operation {
+            if matches!(
+                operation,
+                crate::artifacts::Operation::Providers
+                    | crate::artifacts::Operation::Share { .. }
+                    | crate::artifacts::Operation::Sync { .. }
+            ) {
+                validate(r)?;
+                let project = request_project(&self.db, r)?;
+                return artifact_publishing::execute(&self.db, &project, operation);
             }
         }
         let deadline = Instant::now() + CONTENTION_BUDGET;
@@ -2947,6 +2962,18 @@ impl Store {
         }
         tx.commit()?;
         attachment_files.new.clear();
+        if let Operation::Artifact { operation } = &r.operation {
+            let edited = match operation {
+                crate::artifacts::Operation::Import { operation, .. } => operation.as_ref(),
+                operation => operation,
+            };
+            if matches!(edited, crate::artifacts::Operation::Edit { .. }) {
+                if let Some(id) = result["artifact"]["id"].as_str() {
+                    artifact_publishing::synchronize(&self.db, &project, id, true)?;
+                    result["artifact"]["publications"] = artifact_publishing::list(&self.db, &project.id, id, &result["artifact"])?;
+                }
+            }
+        }
         if let Some(path) = attachment_files.removed.take() {
             crate::attachments::delete_file(&path)?;
         }

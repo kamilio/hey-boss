@@ -102,3 +102,17 @@ fn uncertain_creation_requires_linking_before_retry_and_never_creates_twice() {
         "create\nread\nupdate\n"
     );
 }
+
+#[test]
+fn provider_defaults_keep_pages_automatic_and_markdown_manual() {
+    let f = Fixture::new();
+    let mut p = provider(&f);
+    assert!(p.automatic());
+    p.content = Content::Artifact;
+    assert!(!p.automatic());
+    p.auto_sync = Some(true);
+    assert!(p.automatic());
+    p.content = Content::Page;
+    p.auto_sync = Some(false);
+    assert!(!p.automatic());
+}

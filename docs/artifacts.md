@@ -106,3 +106,47 @@ Artifacts use the same private SQLite project store, local web CSRF protection
 and SSH transport as issues. They are authored on the authoritative
 machine rather than replicated into fleet issue queues. Use `--host SUPERVISOR`
 from a companion to work with shared documents. Phones use the same local web interface on explicitly allowed Wi-Fi networks; see [local mobile access](mobile.md).
+
+## Publish to Notion
+
+**Share** opens configured destinations. **Sync now** uploads saved Markdown;
+manual publications keep their link and show **Changes pending** after edits.
+Enable **Automatically sync saved edits** for a publication to upload on save.
+The native editor’s Share button opens these same controls in the web reader.
+Comments stay in Hey Boss. Deleting an artifact leaves its remote document intact.
+Private attachment links must be replaced with externally accessible URLs first.
+
+Configure Markdown destinations alongside Pages in `~/.hey-boss/publishing.yaml`:
+
+```yaml
+notion:
+  content: artifact
+  auto_sync: false
+  command: node /absolute/path/to/hey-boss/tools/notion-publisher.mjs
+  audience: private
+  create: [create, '{source}', '{name}']
+  read: [read, '', '', '{id}']
+  update: [update, '{source}', '{name}', '{id}', '{version}']
+  fields: {id: /id, url: /url, version: /version}
+```
+
+The adapter uses the installed `wire` CLI and its Notion login. It uploads with
+`wire sync`, retains a stable URL, and rejects updates if the remote Markdown
+changed. Review remote edits before using **Existing link** to replace them.
+A failed first upload is never created again automatically; recover its Notion
+link and enter it there. No Notion credentials are stored in publisher config.
+Configure this on the artifact authority; clients and phones route there.
+
+```sh
+hey-boss artifact providers
+hey-boss artifact share ID --provider notion
+hey-boss artifact sync ID
+hey-boss artifact share ID --provider notion --auto-sync true
+```
+
+`content` defaults to `page`. New page publications default to automatic sync;
+new Markdown publications default to manual. `auto_sync` in config overrides
+that default, while a saved publication keeps its own setting. Provider commands
+use the [same contract as Pages](publishing.md#external-publishing-providers),
+with `{source}` pointing to a Markdown file and `{name}` to the artifact title.
+Links, settings, and upload receipts replicate; commands and login remain local.

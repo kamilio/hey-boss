@@ -114,7 +114,7 @@ pub(crate) fn validate_manifest(manifest: &Manifest) -> Result<()> {
 pub(crate) fn root(database: &Path) -> PathBuf {
     database.with_extension("pages")
 }
-fn private_dir(path: &Path) -> Result<()> {
+pub(crate) fn private_dir(path: &Path) -> Result<()> {
     match fs::DirBuilder::new().mode(0o700).create(path) {
         Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => (),

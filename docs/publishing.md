@@ -130,3 +130,7 @@ the provider and use `share --link` to avoid creating duplicates.
 Deleting a private page does not delete its external publication. Remove it
 through the provider CLI. Publishing that name again starts a fresh page and
 does not silently reconnect its old external targets.
+
+Provider `auto_sync` sets the default for new publications (Pages defaults to
+`true`). Use `content: artifact` for [Markdown destinations such as Notion](artifacts.md#publish-to-notion);
+those appear in the artifact Share controls and default to manual sync.

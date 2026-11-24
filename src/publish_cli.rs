@@ -39,8 +39,8 @@ enum Action {
         #[arg(long)]
         link: Option<String>,
         /// Automatically upload on subsequent pages publish calls.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        auto_sync: bool,
+        #[arg(long, action = clap::ArgAction::Set)]
+        auto_sync: Option<bool>,
     },
     /// Retry uploads to all saved external targets, preserving their URLs.
     Sync { name: String },
@@ -68,7 +68,7 @@ pub fn run(options: &Options) -> Result<()> {
         } => {
             let mut page = pages::publish(&database, source, name)?;
             if let Some(provider) = provider {
-                page = pages::publishing::share(&database, name, provider, None, true)?;
+                page = pages::publishing::share(&database, name, provider, None, None)?;
             }
             check_sync(&page, true)?;
             let url = format!("http://hey-boss.test{}", page.path);
@@ -82,7 +82,10 @@ pub fn run(options: &Options) -> Result<()> {
             serde_json::json!({"ok":true,"private":page.publications.is_empty(),"url":url,"page":page,"replication":"Saved locally; fleet copies update when connected"})
         }
         Action::Providers => {
-            let providers = pages::publishing::providers()?;
+            let providers: std::collections::BTreeMap<_, _> = pages::publishing::providers()?
+                .into_iter()
+                .filter(|(_, p)| p.content == pages::publishing::Content::Page)
+                .collect();
             if !options.json {
                 println!("Config: {}", pages::publishing::config_path()?.display());
                 for (name, provider) in &providers {

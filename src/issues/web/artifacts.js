@@ -3,7 +3,7 @@ const HeyBossArtifacts = (() => {
   const $ = (s, root=document) => root.querySelector(s);
   const esc = s => String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]);
   const failure=(message,uncertain=false)=>Object.assign(Error(message),{uncertain});
-  const reads = new Set(["list","view","links","preview"]);
+  const reads = new Set(["list","view","links","preview","providers"]);
   const url = (project,id,extra={}) => `/artifacts#${new URLSearchParams({project,...(id?{artifact:id}:{}),...extra})}`;
   const resourceURL=(context,target)=>{
     const params=new URLSearchParams({project:context.project,issue:target,...(!mobile&&context.host?{host:context.host}:{})});
@@ -14,7 +14,7 @@ const HeyBossArtifacts = (() => {
   const author=value=>HeyBossUI.actorLabel(value);
   async function rpc(context,operation,reading,requestID) {
     const payload = {project:context.project,operation,...(context.host?{host:context.host}:{}),request_id:reading?null:(requestID||HeyBossUI.requestId())};
-    let response;try { response = await fetch(mobile?"/api/artifact-requests":"/api/action",{method:"POST",headers:{"Content-Type":"application/json",...(mobile?{}:{"X-Hey-Boss-CSRF":context.csrf})},body:JSON.stringify(payload),signal:AbortSignal.timeout(20000)}); } catch(e) {throw failure("Connection interrupted. "+(reading?"Reconnect and try again.":"Retry this pending save with the same content after reconnecting."),!reading);}
+    let response;try { response = await fetch(mobile?"/api/artifact-requests":"/api/action",{method:"POST",headers:{"Content-Type":"application/json",...(mobile?{}:{"X-Hey-Boss-CSRF":context.csrf})},body:JSON.stringify(payload),signal:AbortSignal.timeout(["share","sync"].includes(operation.operation?.command)?310000:20000)}); } catch(e) {throw failure("Connection interrupted. "+(reading?"Reconnect and try again.":"Retry this pending save with the same content after reconnecting."),!reading);}
     let value;try {value = await response.json();}catch(e){throw failure("Delivery could not be confirmed. "+(reading?"Reconnect and try again.":"Retry the pending save after reconnecting."),!reading);}
     if (!response.ok) throw Object.assign(failure(value.error?.message||value.error||"Could not connect; your draft is preserved.",response.status>=500),{code:value.error?.code});
     if (mobile) {
@@ -232,7 +232,7 @@ const HeyBossArtifacts = (() => {
       const current=doc.id,projectID=context.project,host=context.host,sequence=generation;
       try {
         const latest=await api(context,{command:"view",id:current});
-        if(editing||sequence!==generation||context.project!==projectID||context.host!==host||doc?.id!==current||latest.artifact.version<=doc.version)return;
+        if(editing||sequence!==generation||context.project!==projectID||context.host!==host||doc?.id!==current||(latest.artifact.version<=doc.version&&JSON.stringify(latest.artifact.publications)===JSON.stringify(doc.publications)))return;
         doc=latest.artifact;doc.result=latest;
         reading();status(`Auto-saved in native editor · revision ${doc.version}`);
       } catch {}
@@ -422,6 +422,42 @@ const HeyBossArtifacts = (() => {
       $("#artifact-editor").onkeydown=e=>{if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="s"){e.preventDefault();if(!saving)e.currentTarget.requestSubmit();}};
       autosize((draft?.body??doc?.body??"").length);status(pending?"Recovered pending save · retry to confirm delivery":draft?"Draft restored":"Changes save as a browser draft");$("#artifact-title").focus();
     }
+
+    function publicationRows() {
+      return (doc.publications||[]).map(p=>{
+        const safeURL=/^https?:\/\//.test(p.url||"")?p.url:"";
+        return '<div class="artifact-publication"><div>'+(safeURL?'<a href="'+esc(safeURL)+'" target="_blank" rel="noopener noreferrer">Open in '+esc(p.provider)+' ↗</a>':'<strong>'+esc(p.provider)+'</strong>')+'<p class="artifact-muted">'+(p.auto_sync?'Automatic':'Manual')+' · '+(p.synced?'Up to date':p.error?'Sync failed':'Changes pending')+'</p>'+(p.error?'<p class="artifact-publication-error">'+esc(p.error)+'</p>':'')+'</div><div class="artifact-actions">'+(!p.synced?'<button class="button" data-publication-sync="'+esc(p.provider)+'">Sync now</button>':'')+'<button class="artifact-text-button" data-publication="'+esc(p.provider)+'">Settings</button></div></div>';
+      }).join('');
+    }
+    async function shareArtifact(providerName) {
+      const artifactID=doc.id,shareContext={...context};
+      const dialog=document.createElement('dialog');dialog.className='artifact-share-dialog';dialog.setAttribute('aria-label','Publish artifact');
+      dialog.innerHTML='<form><h2>Publish artifact</h2><p class="artifact-muted">Publish the saved Markdown and keep a stable external link.</p><label>Destination<select name="provider" required></select></label><p data-audience class="artifact-muted"></p><label>Existing link or ID <span class="artifact-muted">(optional)</span><input name="link" placeholder="Link an existing document"></label><p class="artifact-muted">Linking replaces that document’s content with this artifact.</p><label class="artifact-share-auto"><input name="auto" type="checkbox">Automatically sync saved edits</label><p data-error role="alert" hidden></p><div class="artifact-actions"><button class="button" type="button" data-cancel>Cancel</button><button class="button primary" type="submit" disabled>Sync now</button></div></form>';
+      document.body.append(dialog);dialog.showModal();
+      const form=$('form',dialog),select=form.elements.provider,submit=$('[type=submit]',dialog),alert=$('[data-error]',dialog);
+      let busy=false,providers=[];
+      dialog.oncancel=e=>{if(busy)e.preventDefault();};
+      dialog.onclose=()=>{dialog.remove();$('#artifact-share')?.focus();};
+      $('[data-cancel]',dialog).onclick=()=>dialog.close();
+      const changed=()=>{const saved=(doc.publications||[]).find(p=>p.provider===select.value),provider=providers.find(p=>p.name===select.value);form.elements.auto.checked=saved?saved.auto_sync:provider.auto_sync;$('[data-audience]',dialog).textContent=provider.audience+' access · '+(saved?.url?'Updates the saved link.':'Creates a new document on first sync.');};
+      try {
+        providers=(await api(shareContext,{command:'providers'})).providers;
+        if(!providers.length)throw Error('No artifact publishers configured. Add a Markdown provider to publishing.yaml.');
+        select.innerHTML=providers.map(p=>'<option value="'+esc(p.name)+'">'+esc(p.name)+'</option>').join('');
+        if(providerName&&providers.some(p=>p.name===providerName))select.value=providerName;
+        select.onchange=changed;changed();submit.disabled=false;select.focus();
+      } catch(e){alert.textContent=e.message;alert.hidden=false;}
+      form.onsubmit=async e=>{
+        e.preventDefault();if(busy)return;busy=true;alert.hidden=true;
+        const operation={command:'share',id:artifactID,provider:select.value,link:form.elements.link.value.trim()||null,auto_sync:form.elements.auto.checked};
+        for(const control of form.elements)control.disabled=true;
+        submit.textContent='Syncing…';
+        try {const result=await api(shareContext,operation);if(doc?.id===artifactID&&context.project===shareContext.project){doc=result.artifact;doc.result=result;reading();}dialog.close();}
+        catch(e){alert.textContent=e.message;alert.hidden=false;try{const result=await api(shareContext,{command:'view',id:artifactID});if(doc?.id===artifactID&&context.project===shareContext.project){doc=result.artifact;doc.result=result;reading();}}catch{}}
+        finally{busy=false;for(const control of form.elements)control.disabled=false;submit.textContent='Sync now';}
+      };
+    }
+
     function reading() {
       editing=false;anchor=null;status("");const v=doc.result;
       mode("reading");
@@ -438,7 +474,8 @@ const HeyBossArtifacts = (() => {
       const commentCount=v.comments.filter(c=>!c.parent&&!c.resolved).length;
       commentsOpen ??= false;
       const markup=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>
-        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel">${mobile?"":`<button id="artifact-edit-browser" type="button">${icon("edit")}Edit in browser</button>`}<button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
+        <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button" id="artifact-share">${icon("link")}Share</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel">${mobile?"":`<button id="artifact-edit-browser" type="button">${icon("edit")}Edit in browser</button>`}<button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
+        <section class="artifact-publications" aria-label="External publications">${publicationRows()}</section>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
       HeyBossHTML.replaceContent($("#artifact-document"),markup,reuse?previous:null);
@@ -457,6 +494,14 @@ const HeyBossArtifacts = (() => {
       document.title=`${doc.title} · Artifacts · Hey Boss`;
       if($("#artifact-edit-browser"))$("#artifact-edit-browser").onclick=editor;
       $("#artifact-edit").onclick=()=>browserEditor()?editor():triggerNativeEdit({id:doc.id});
+      $("#artifact-share").onclick=()=>shareArtifact();
+      document.querySelectorAll("[data-publication-sync]").forEach(button=>button.onclick=async()=>{
+        const id=doc.id,selected={...context};button.disabled=true;button.textContent="Syncing…";
+        try {const result=await api(selected,{command:"share",id,provider:button.dataset.publicationSync});if(doc?.id===id&&context.project===selected.project){doc=result.artifact;doc.result=result;reading();}}
+        catch(e){error(e);try{const result=await api(selected,{command:"view",id});if(doc?.id===id&&context.project===selected.project){doc=result.artifact;doc.result=result;reading();}}catch{} }
+        finally{button.disabled=false;button.textContent="Sync now";}
+      });
+      document.querySelectorAll("[data-publication]").forEach(button=>button.onclick=()=>shareArtifact(button.dataset.publication));
       $("#artifact-export").onclick=()=>{menu.open=false;const blob=new Blob([doc.body],{type:"text/markdown;charset=utf-8"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=(doc.title.replace(/[^\p{L}\p{N}_ -]/gu,"_")||"artifact")+".md";a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);};
       const mutate=async(op,button)=>{button.disabled=true;try{const r=await api(context,op);if(!button.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Saved");}catch(e){button.disabled=false;error(e);}};
       $("#artifact-archive").onclick=e=>documentAction(doc,"archive",e.currentTarget);
@@ -566,7 +611,7 @@ const HeyBossArtifacts = (() => {
       $("#nav-artifacts").setAttribute("aria-current","page");
       if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;}
       const resource=HeyBossRoutes.resolve();const idDoc=resource?.entity==="artifact"?resource.id:"";
-      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;$("#artifact-new").hidden=v.artifacts_enabled===false;reading();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
+      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;$("#artifact-new").hidden=v.artifacts_enabled===false;reading();status("");if(params.get("share")==="1")shareArtifact();}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
       else if(params.get("new")==="1"){
         const seq=++generation;mode("library");status("Loading…");
         try{const value=await api(context,{command:"list",offset:0});if(seq!==generation)return;

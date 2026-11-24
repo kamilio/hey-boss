@@ -70,6 +70,24 @@ struct Target {
 enum Action {
     /// Execute one artifact operation read as JSON from stdin.
     Rpc,
+    /// List configured Markdown publishers.
+    Providers,
+    /// Publish saved Markdown and remember its external link.
+    Share {
+        id: String,
+        #[arg(long)]
+        provider: String,
+        /// Link an existing document and replace its content.
+        #[arg(long)]
+        link: Option<String>,
+        /// Upload future saved edits automatically (defaults to provider config).
+        #[arg(long, action = clap::ArgAction::Set)]
+        auto_sync: Option<bool>,
+    },
+    /// Upload pending changes to saved external publications.
+    Sync {
+        id: String,
+    },
     List {
         #[arg(long)]
         query: Option<String>,
@@ -241,6 +259,19 @@ pub fn run(options: &Options) -> Result<()> {
         return Ok(());
     }
     let op = match &options.action {
+        Action::Providers => Operation::Providers,
+        Action::Share {
+            id,
+            provider,
+            link,
+            auto_sync,
+        } => Operation::Share {
+            id: id.clone(),
+            provider: provider.clone(),
+            link: link.clone(),
+            auto_sync: *auto_sync,
+        },
+        Action::Sync { id } => Operation::Sync { id: id.clone() },
         Action::Rpc => {
             use std::io::Read;
             let mut raw = String::new();
@@ -398,6 +429,17 @@ pub fn run(options: &Options) -> Result<()> {
             .filter(|h| !h.is_empty())
     });
     let value = crate::cli_request::execute(&request, host.as_deref(), false)?;
+    if matches!(options.action, Action::Sync { .. }) {
+        if let Some(publication) = value["artifact"]["publications"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|p| p["error"].is_string()))
+        {
+            return Err(Error::new(
+                "sync_failed",
+                publication["error"].as_str().unwrap(),
+            ));
+        }
+    }
     if matches!(options.action, Action::Export { .. }) {
         let body = value["artifact"]["body"].as_str().unwrap();
         if let Action::Export {
@@ -417,6 +459,19 @@ pub fn run(options: &Options) -> Result<()> {
         }
     } else if options.json {
         println!("{}", serde_json::to_string(&value)?);
+    } else if let Some(providers) = value["providers"].as_array() {
+        for p in providers {
+            println!(
+                "{} · {} · {}",
+                p["name"].as_str().unwrap(),
+                p["audience"].as_str().unwrap(),
+                if p["auto_sync"] == true {
+                    "Automatic"
+                } else {
+                    "Manual"
+                }
+            );
+        }
     } else if let Some(id) = value["deleted"].as_str() {
         println!("Permanently deleted {id}");
     } else if let Some(doc) = value.get("artifact") {
@@ -432,6 +487,26 @@ pub fn run(options: &Options) -> Result<()> {
             },
             doc["body"].as_str().unwrap()
         );
+        for p in doc["publications"].as_array().into_iter().flatten() {
+            println!(
+                "\n{} · {} · {}\n{}",
+                p["provider"].as_str().unwrap(),
+                if p["synced"] == true {
+                    "Up to date"
+                } else {
+                    "Changes pending"
+                },
+                if p["auto_sync"] == true {
+                    "Automatic"
+                } else {
+                    "Manual"
+                },
+                p["url"].as_str().unwrap_or("")
+            );
+            if let Some(error) = p["error"].as_str() {
+                eprintln!("{error}");
+            }
+        }
     } else {
         for doc in value["artifacts"].as_array().unwrap() {
             println!(
