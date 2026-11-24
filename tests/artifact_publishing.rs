@@ -11,6 +11,7 @@ fn configured_artifact_publishers_track_manual_automatic_failed_and_uncertain_up
         .unwrap();
     let root = dir.path();
     let database = root.join("issues.db");
+    let _owner = hey_boss::database::Owner::host(&database).unwrap();
     projects::seed(&database, &["named:Publishing"]);
     let script = root.join("provider.sh");
     fs::write(
