@@ -1,6 +1,6 @@
 pub mod agent;
 pub mod context;
-mod delegate;
+pub mod delegate;
 pub mod media;
 pub mod notebook;
 pub mod plugins;

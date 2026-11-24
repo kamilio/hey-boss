@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     fs::write(root.join("thread.json"), json!({"messages":[{"role":"assistant","text":"The retry handler assigned a new message ID after reconnecting, so the server treated retries as new messages."}]}).to_string())?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut tools = Plugins {
+        delegates: None,
         cwd: root,
         focus: None,
         home: root,

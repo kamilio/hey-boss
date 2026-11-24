@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { target, desiredCommand, recapPage, serverCLI, acrossHosts, voiceSnapshot, answerCommand } from './hey-t3.mjs';
+import { target, desiredCommand, recapPage, serverCLI, acrossHosts, voiceSnapshot, answerCommand, runDelegation } from './hey-t3.mjs';
 
 test('voice answers the exact pending question and cannot approve tools or answer stale forms', () => {
   const projection = {thread:{id:'attached'},runtimeRequests:[{id:'request',kind:'user_input',status:'pending'}],visibleTurnItems:[{item:{type:'user_input_request',requestId:'request',questions:[{id:'scope'}]}}]};
@@ -280,4 +280,29 @@ test('a delegation returns only its own completed reply', async () => {
   assert.throws(()=>delegateResult(projection,'m'),/failed/);
   run.status='completed';
   assert.equal(delegateResult(projection,'m'),'Final answer');
+});
+
+test('delegation subscribes and settles before returning', async () => {
+  const calls=[];
+  const result=await runDelegation(async (op,args)=>{
+    calls.push([op,args]);
+    if(op==='delegate-next')return calls.filter(c=>c[0]===op).length===1?{sequence:7,output:null}:{sequence:9,output:'done'};
+  },'task',new AbortController().signal);
+  assert.equal(result,'done');
+  assert.deepEqual(calls.map(c=>c[0]),['send','delegate-next','delegate-next','delegate-stop']);
+  assert.equal(calls[2][1].options.sequence,7);
+});
+
+test('delegation settles on failure and cancellation without waiting for a subscription', async () => {
+  for(const fail of [true,false]) {
+    const controller=new AbortController(), calls=[];
+    let started;const ready=new Promise(r=>{started=r});
+    const result=runDelegation(async op=>{
+      calls.push(op);
+      if(op==='delegate-next'){started();if(fail)throw Error('child failed');return new Promise(()=>{});}
+    },'task',controller.signal);
+    const rejected=assert.rejects(result,fail?/child failed/:/cancelled/);
+    await ready;if(!fail)controller.abort();await rejected;
+    assert.equal(calls.at(-1),'delegate-stop');
+  }
 });

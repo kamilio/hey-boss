@@ -70,9 +70,15 @@ pub async fn run_with_input(
     let observed = observation
         .and_then(|v| v.get("observed").cloned())
         .unwrap_or(json!("unavailable"));
-    book.push(json!({"role":"user","content":if let Some(link) = attached {
+    if request.get("delegate_result").is_some() {
+        if !accept_follow_up(&mut book, request, tools)? {
+            return Ok(());
+        }
+    } else {
+        book.push(json!({"role":"user","content":if let Some(link) = attached {
         json!({"attached_thread":link,"automatic_update":automatic,"initial_catch_up":request["initial_catch_up"] == true,"text":turn}).to_string()
     } else if job { turn.to_owned() } else { format!("Observed pre-focus desktop context: {observed}\n\n{turn}") }}))?;
+    }
     emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
     let mut usage = Value::Null;
     let mut add_usage = |reported: &Value| {
@@ -119,7 +125,6 @@ pub async fn run_with_input(
                 book.push(json!({"role":"tool","name":name,"toolCallId":id,"content":"Skipped because the user submitted a follow-up."}))?;
                 continue;
             }
-            let mut activity = None;
             let content: Result<Value> = async {
                 ensure!(
                     !job || schemas.iter().any(|tool| tool["name"] == name),
@@ -137,36 +142,18 @@ pub async fn run_with_input(
                     .await;
                 }
                 if name == "delegate" {
-                    let provider = match args.get("provider") {
-                        None => "t3",
-                        Some(_) => field(&args, "provider")?,
-                    };
-                    anyhow::ensure!(
-                        matches!(provider, "t3" | "codex" | "claude"),
-                        "Unknown delegate provider"
-                    );
-                    let request = field(&args, "request")?;
-                    let description = field(&args, "description")?;
-                    let mut item =
-                        json!({"provider":provider,"request":request,"description":description});
-                    let result = crate::delegate::run(tools, id, &mut item).await;
-                    activity = Some(item);
-                    return result.map(Value::String);
+                    return tools
+                        .delegates
+                        .context("Delegation requires an owned session")?
+                        .start(tools, &args, &book.messages)
+                        .map(|receipt| json!(receipt.to_string()));
                 }
                 tools.call(name, &args).await
             }
             .await;
-            let failed = content.is_err();
             let content = content.unwrap_or_else(|e| json!(e.to_string()));
-            let mut record = json!({"role":"tool","name":name,"toolCallId":id,"content":content});
-            if activity.is_some() {
-                record["failed"] = json!(failed);
-            }
+            let record = json!({"role":"tool","name":name,"toolCallId":id,"content":content});
             book.push(record)?;
-            if let Some(mut item) = activity {
-                item["aggregatedOutput"] = content;
-                emit(json!({"ToolCompleted":{"id":id,"output":item,"failed":failed}}))?;
-            }
             follow_up = input.try_recv().ok();
         }
         if let Some(cut) = compact_at(&book.messages) {
@@ -194,16 +181,26 @@ pub async fn run_with_input(
         }
         follow_up = follow_up.or_else(|| input.try_recv().ok());
         if follow_up.is_some() {
+            let mut accepted = false;
             while let Some(request) = follow_up {
                 let text = field(&request, "turn")?;
-                book.push(json!({"role":"user","content":text}))?;
-                emit(json!({"InputAccepted":{"text":text,"message":request["message"]}}))?;
+                if request.get("delegate_result").is_some() {
+                    accepted |= accept_follow_up(&mut book, &request, tools)?;
+                } else {
+                    book.push(json!({"role":"user","content":text}))?;
+                    accepted = true;
+                    emit(json!({"InputAccepted":{"text":text,"message":request["message"]}}))?;
+                }
                 follow_up = input.try_recv().ok();
             }
-            continue;
+            if accepted {
+                continue;
+            }
         }
         if calls.is_empty() {
-            emit(json!({"TurnCompleted":{"status":"Completed","output":text,"usage":usage}}))?;
+            if !job || !tools.delegates.is_some_and(|tasks| tasks.pending()) {
+                emit(json!({"TurnCompleted":{"status":"Completed","output":text,"usage":usage}}))?;
+            }
             return Ok(());
         }
     }
@@ -227,4 +224,23 @@ fn compact_at(messages: &[Value]) -> Option<usize> {
         .nth(2)
         .map(|(i, _)| i)
         .filter(|i| *i > 0 && messages[..*i].iter().any(|m| m["role"] == "user"))
+}
+
+fn accept_follow_up(
+    book: &mut crate::notebook::Notebook,
+    request: &Value,
+    tools: &Plugins<'_>,
+) -> Result<bool> {
+    let item = &request["delegate_result"];
+    let id = field(item, "id")?;
+    let fresh = !book.delegations.contains(id);
+    if fresh {
+        book.push(json!({"role":"user","name":"delegate_result","delegation":id,"content":field(request,"turn")?}))?;
+        emit(json!({"ToolCompleted":{"id":id,"output":item,"failed":item["failed"]}}))?;
+        emit(json!({"InputAccepted":{"text":field(request,"turn")?,"delegate_result":item}}))?;
+    }
+    if let Some(tasks) = tools.delegates {
+        tasks.accept(id)?;
+    }
+    Ok(fresh)
 }

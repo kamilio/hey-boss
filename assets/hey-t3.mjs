@@ -411,19 +411,30 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
     const page = await bounded(false);
     return { sequence: page.snapshotSequence, snapshot: voiceSnapshot(page.projection) };
   }
-  if (op === 'delegate-result' || op === 'delegate-stop') {
-    const {projection} = await bounded(false);
+  if (op === 'delegate-next' || op === 'delegate-result' || op === 'delegate-stop') {
+    if (op === 'delegate-next' && options.sequence !== undefined) {
+      const change = await voiceChange(base, headers, id, options.sequence);
+      if (!change.changed) return change;
+    }
+    const page = await bounded(false), {projection} = page;
     const run = projection.runs.find(r => r.userMessageId === arg);
     if (op === 'delegate-stop') {
+      if (projection.runs.length && projection.runs.at(-1)?.id !== run?.id) return;
       if (run && !['completed','failed','interrupted','cancelled'].includes(run.status))
         await rpc('orchestration.dispatchCommand', {type:'run.interrupt', commandId:randomUUID(), threadId:id, runId:run.id, holdQueue:true});
+      const fresh = (await bounded(false)).projection;
+      if (!fresh.runs.length || fresh.runs.at(-1)?.id === run?.id) {
+        const command = desiredCommand('settle', fresh.thread);
+        if (command) await rpc('orchestration.dispatchCommand', command);
+      }
       return;
     }
-    if (run?.status !== 'completed') return delegateResult(projection, arg);
+    const result = (value) => op === 'delegate-next' ? {sequence:page.snapshotSequence,output:value} : value;
+    if (run?.status !== 'completed') return result(delegateResult(projection, arg));
     // Only fetch the full conversation if the bounded page missed the final reply.
     if (projection.visibleTurnItems.some(({item}) => item.runId === run.id && item.type === 'assistant_message' && !item.streaming && item.text?.trim()))
-      return delegateResult(projection, arg);
-    return delegateResult((await get(path,headers)).projection, arg);
+      return result(delegateResult(projection, arg));
+    return result(delegateResult((await get(path,headers)).projection, arg));
   }
   if (op === 'answer') {
     const {projection} = await bounded(false);
@@ -606,6 +617,26 @@ export async function acrossHosts(input, hosts, request = onConnection) {
   throw Error('Project not found on reachable machines; use an ID from hey-t3 projects.');
 }
 
+export async function runDelegation(call, turn, signal) {
+  let sequence;
+  let cancel;
+  const cancelled = new Promise((_, reject) => {
+    cancel = () => reject(Error('Delegation cancelled.'));
+    if (signal.aborted) cancel(); else signal.addEventListener('abort', cancel, {once:true});
+  });
+  cancelled.catch(() => {});
+  try {
+    if (signal.aborted) throw Error('Delegation cancelled.');
+    await call('send', {text:turn});
+    if (signal.aborted) throw Error('Delegation cancelled.');
+    for (;;) {
+      const next = await Promise.race([call('delegate-next', {options:{sequence}}), cancelled]);
+      sequence = next.sequence;
+      if (next.output != null) return next.output;
+    }
+  } finally { signal.removeEventListener('abort', cancel); await call('delegate-stop'); }
+}
+
 // Desktop bridge: closing stdin releases only the run created by this call.
 async function conversation() {
   const input = createInterface({input:process.stdin});
@@ -618,25 +649,16 @@ async function conversation() {
   const environment = localID(), messageId = randomUUID();
   const {link} = await onHost({op:'start', environment, arg:'root', options:{title:turn.trim().split('\n')[0].slice(0,100)}});
   const {id} = target(link);
-  const call = (op, extra={}) => onHost({op, environment, id, arg:messageId, ...extra});
-  if (closed) return;
-  console.log(JSON.stringify({Session:{link}}));
-  let done = false;
+  const call = (op, extra={}) => onHost({op, environment, id, arg:messageId, ...extra, options:{...extra.options,messageId}});
+  console.log(JSON.stringify({Session:{link,messageId}}));
+  const cancellation = new AbortController();
+  if (closed) cancellation.abort();
+  input.on('close', () => cancellation.abort());
   try {
-    await call('send', {text:turn, options:{messageId}});
-    while (!closed) {
-      const output = await call('delegate-result');
-      if (output !== null) {
-        done = true;
-        console.log(JSON.stringify({TurnCompleted:{status:'Completed',output}}));
-        return;
-      }
-      await new Promise(resolve => setTimeout(resolve, 3000));
-    }
-  } finally {
-    if (!done) await call('delegate-stop');
-    input.close();
-  }
+    const output = await runDelegation(call, turn, cancellation.signal);
+    if (!closed) console.log(JSON.stringify({TurnCompleted:{status:'Completed',output}}));
+  } finally { input.close(); }
+
 }
 
 async function main(args) {

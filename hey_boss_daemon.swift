@@ -8337,6 +8337,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var t3Thread: String?
     private var t3LastUpdate: String?
     private var t3Watcher: Process?
+    private var delegateResults: [[String: Any]] = []
     private var t3Pending: (key: String, text: String)?
     private var t3Processing: String?
     @discardableResult func addSelection(chat: UUID?, time: TimeInterval, source: String, text: String) -> Int? {
@@ -8681,6 +8682,17 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 self.t3Watcher = nil
                 self.status.stringValue = "T3 connection stopped. Restart voice to reconnect."; self.status.isHidden = false
             }
+        }
+    }
+    private func deliverDelegateResults() {
+        guard process != nil, pauseID == nil, !heldReply,
+              ![Phase.recording, .decoding, .starting].contains(phase) else { return }
+        while let item = delegateResults.first {
+            do {
+                let text = String(decoding: try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]), as: UTF8.self)
+                try write(["turn":text,"delegate_result":item,"mode":"follow-up"])
+                delegateResults.removeFirst()
+            } catch { workspaceFailed(error.localizedDescription); return }
         }
     }
     private func deliverT3Update() {
@@ -9190,6 +9202,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         meter.setAccessibilityLabel(voiceAction)
         meter.setAccessibilityValue(status.stringValue)
         updateComposerActions()
+        DispatchQueue.main.async { [weak self] in self?.deliverDelegateResults() }
         welcome.isHidden = !turns.arrangedSubviews.isEmpty || next != .idle
     }
     var voiceStatus: [String: Any] {
@@ -9753,7 +9766,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     var conversationHistory: [[String: String]] {
         messages.filter { $0.speaker != "Conversation" }.map {
-            ["role": ["You", "T3"].contains($0.speaker) ? "user" : "assistant", "content": $0.content]
+            ["role": ["You", "T3", "Delegate"].contains($0.speaker) ? "user" : "assistant", "content": $0.content]
         }
     }
     private var agentStateURL: URL { chatURL(library.selected).deletingPathExtension().appendingPathExtension("agent.json") }
@@ -10107,6 +10120,18 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             }
         }
         switch kind {
+        case "DelegateReady":
+            if !delegateResults.contains(where: { $0["id"] as? String == id }) { delegateResults.append(data) }
+            deliverDelegateResults()
+        case "InputAccepted":
+            guard let item = data["delegate_result"] as? [String:Any], let text = data["text"] as? String else { return }
+            let starting = turnDone || !answering
+            interruptPlayback()
+            append(item["description"] as? String ?? "Delegation result", from: "Delegate", capture: Capture(source: item["provider"] as? String ?? "Agent", text: item["aggregatedOutput"] as? String ?? text))
+            messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
+            if starting { activeTurn = UUID() }
+            turnDone = false; lastMessage = nil; turnAccepted = true
+            save(); state(.thinking, "Thinking…")
         case "ConversationMedia":
             var result = ["id": id]
             do { try showMedia(data) } catch { result["error"] = error.localizedDescription }
@@ -10130,8 +10155,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         case "ToolStarted", "ToolCompleted":
             guard let item = (data["input"] ?? data["output"]) as? [String:Any] else { return }
             if let description = item["description"] as? String {
-                if !stream.isEmpty { finishMessage(stream) }
                 let isNew = !activities.contains { $0.id == id }
+                if isNew && !stream.isEmpty { finishMessage(stream) }
                 let activity = ToolActivity(id: id, afterMessage: messages.count, description: description,
                     command: item["command"] as? String, output: item["aggregatedOutput"] as? String ?? "",
                     state: kind == "ToolStarted" ? "Running" : data["failed"] as? Bool == true ? "Failed" : "Completed",
@@ -10303,6 +10328,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(phase, "Waiting for approval")
     }
     private func closeWorkspace() {
+        delegateResults.removeAll()
         let key = directory == nil ? agentStateURL.path : thread
         if let process, let key, process.isRunning {
             // A resumed Codex thread has one writer until its previous helper exits.
@@ -10440,7 +10466,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if !pending.isEmpty, let data = try? Data(contentsOf: agentStateURL.deletingPathExtension().appendingPathExtension("jsonl"), options: .mappedIfSafe) {
             // The helper fsyncs its result before notifying the window. Only inspect that notebook after an interrupted handoff.
             for line in data.split(separator: 10).reversed() where recovered.count < pending.count {
-                guard let row = try? JSONSerialization.jsonObject(with: line) as? [String:Any], row["name"] as? String == "delegate",
+                guard let row = try? JSONSerialization.jsonObject(with: line) as? [String:Any] else { continue }
+                if row["name"] as? String == "delegate_result", let raw = row["content"] as? String,
+                   let result = try? JSONSerialization.jsonObject(with: Data(raw.utf8)) as? [String:Any],
+                   let id = result["id"] as? String, pending.contains(id), let failed = result["failed"] as? Bool {
+                    recovered[id] = (result["aggregatedOutput"] as? String ?? "", failed); continue
+                }
+                guard row["name"] as? String == "delegate",
                       let id = row["toolCallId"] as? String, pending.contains(id), let failed = row["failed"] as? Bool,
                       let text = row["content"] as? String else { continue }
                 recovered[id] = (text, failed)

@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, ErrorKind, Write},
     os::unix::fs::DirBuilderExt,
@@ -12,6 +13,7 @@ use std::{
 pub struct Notebook {
     file: File,
     pub messages: Vec<Value>,
+    pub delegations: HashSet<String>,
 }
 
 impl Notebook {
@@ -52,6 +54,7 @@ impl Notebook {
         };
         file.try_lock().context("Conversation is already in use")?;
         let mut messages = Vec::new();
+        let mut delegations = HashSet::new();
         let mut reader = BufReader::new(&file);
         let mut line = Vec::new();
         let mut end = 0;
@@ -76,11 +79,18 @@ impl Notebook {
                 messages.splice(..cut as usize, [summary]);
             } else {
                 ensure!(entry["role"].is_string(), "Invalid notebook message");
+                if let Some(id) = entry["delegation"].as_str() {
+                    delegations.insert(id.to_owned());
+                }
                 messages.push(entry);
             }
             end += line.len() as u64;
         }
-        let mut book = Self { file, messages };
+        let mut book = Self {
+            file,
+            messages,
+            delegations,
+        };
         // At most the last batch can still be executing at a crash. Never replay it.
         let last = book.messages.iter().rposition(|m| m["role"] != "tool");
         if let Some(i) = last
@@ -97,6 +107,9 @@ impl Notebook {
     pub fn push(&mut self, msg: Value) -> Result<()> {
         write_line(&mut self.file, &msg)?;
         self.file.sync_data()?;
+        if let Some(id) = msg["delegation"].as_str() {
+            self.delegations.insert(id.to_owned());
+        }
         self.messages.push(msg);
         Ok(())
     }

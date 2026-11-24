@@ -104,6 +104,9 @@ func audit() {
         print("PASS long tool descriptions and commands allow window resizing, sidebar resizing and zoom")
         return
     }
+    if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_ASYNC_DELEGATE"] {
+        app.finishLaunching(); try! auditAsyncDelegate(root); return
+    }
     if #available(macOS 26, *), let root = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_PHONE_QUEUE"] {
         app.finishLaunching(); try! auditPhoneQueue(root); return
     }
@@ -6429,4 +6432,48 @@ func auditPhoneQueue(_ path: String) throws {
     precondition(chat.conversationHistory.isEmpty)
     precondition((try? call("send", ["chat":target,"text":"Wrong chat","message":UUID().uuidString])) == nil)
     print("PASS queued sends: durable receipt, busy retries, relaunch, chat changes and mismatched IDs")
+}
+
+
+@available(macOS 26, *)
+func auditAsyncDelegate(_ path: String) throws {
+    let root = URL(fileURLWithPath: path)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: root.appendingPathComponent("current.json"))
+    let wire = Pipe(); chat.process = Process(); chat.writer = wire.fileHandleForWriting
+    chat.event(["TurnCompleted":["status":"Completed","output":"Handed off"]])
+    let item: [String:Any] = ["id":"child", "provider":"poe", "request":"Child task", "description":"Check the change", "aggregatedOutput":"Child result", "failed":false]
+    chat.event(["ToolStarted":["id":"child", "input":item]])
+    precondition(chat.phase == .idle, "Child progress must not pretend the parent is running")
+    chat.input.stringValue = "Keep this draft"
+    chat.state(.decoding, "Transcribing…")
+    chat.event(["DelegateReady":item])
+    var probe = pollfd(fd: wire.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+    precondition(poll(&probe, 1, 0) == 0, "Completion must wait for pending speech")
+    chat.state(.idle, "Voice off")
+    let deadline = Date(timeIntervalSinceNow: 2)
+    while poll(&probe, 1, 0) == 0, Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(poll(&probe, 1, 0) > 0, "Idle completion must be delivered")
+    let delivered = try JSONSerialization.jsonObject(with: wire.fileHandleForReading.availableData) as! [String:Any]
+    precondition(delivered["mode"] as? String == "follow-up")
+    precondition((delivered["delegate_result"] as? [String:Any])?["id"] as? String == "child")
+    chat.event(["ToolCompleted":["id":"child", "output":item, "failed":false]])
+    chat.event(["InputAccepted":["text":delivered["turn"]!, "delegate_result":item]])
+    precondition(chat.phase == .thinking && chat.input.stringValue == "Keep this draft")
+    precondition(chat.conversationHistory.last?["role"] == "user" && chat.conversationHistory.last!["content"]!.contains("Child result"))
+    chat.window.makeKeyAndOrderFront(nil)
+    var captured = false
+    Task { @MainActor in
+        try! await Task.sleep(for: .milliseconds(300))
+        let windows = try! await SCShareableContent.currentProcess.windows
+        let filter = SCContentFilter(desktopIndependentWindow: windows.first { $0.windowID == UInt32(chat.window.windowNumber) }!)
+        let config = SCStreamConfiguration(); config.showsCursor = false; config.ignoreShadowsSingleWindow = true
+        config.width = Int(chat.window.frame.width); config.height = Int(chat.window.frame.height)
+        let image = try! await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        try! NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])!.write(to: root.appendingPathComponent("delegate.png"))
+        captured = true
+    }
+    while !captured { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03)) }
+    chat.stop("Done"); chat.window.close()
+    print("PASS async delegation: idle wake-up, speech boundary, result history and draft preservation")
 }

@@ -19,6 +19,8 @@ async fn serve() -> Result<()> {
         .context("Missing desktop resources")?
         .to_owned();
     let http = reqwest::Client::new();
+    let (delegates, mut completions) =
+        hey_boss_conversation::delegate::Delegates::open(Path::new(&state))?;
     let (tx, mut turns) = mpsc::unbounded_channel();
     let (ack, mut acks) = mpsc::unbounded_channel();
     let mut term = signal(SignalKind::terminate())?;
@@ -40,16 +42,19 @@ async fn serve() -> Result<()> {
         loop {
             let req = match queued.pop_front() {
                 Some(req) => req,
-                None => match turns.recv().await {
-                    Some(req) => req,
-                    None => break,
+                None => tokio::select! {
+                    req = turns.recv() => match req { Some(req) => req, None => break },
+                    item = completions.recv() => { emit(json!({"DelegateReady":item.context("Delegate delivery closed")?}))?; continue; },
                 },
             };
             if req["cancel"] == true {
                 queued.clear();
+                delegates.cancel()?;
+                while completions.try_recv().is_ok() {}
                 continue;
             }
             let mut plugins = Plugins {
+                delegates: Some(&delegates),
                 focus: None,
                 home: &home,
                 cwd: &cwd,
@@ -82,6 +87,9 @@ async fn serve() -> Result<()> {
                                 _ => { emit(json!({"error":"Unknown input mode"}))?; }
                             }
                         }
+                        item = completions.recv() => {
+                            emit(json!({"DelegateReady":item.context("Delegate delivery closed")?}))?;
+                        }
                         result = &mut run => {
                             if let Err(e) = result { emit(json!({"error":format!("{e:#}")}))?; }
                             break false;
@@ -91,6 +99,10 @@ async fn serve() -> Result<()> {
             };
             // Inputs arriving at the terminal boundary become new turns, never disappear.
             let remaining: Vec<_> = std::iter::from_fn(|| follow_rx.try_recv().ok()).collect();
+            if stop_queue {
+                delegates.cancel()?;
+                while completions.try_recv().is_ok() {}
+            }
             if !stop_queue {
                 if cancelled {
                     let replacement = queued.pop_front();

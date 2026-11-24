@@ -26,7 +26,7 @@ pub fn schemas() -> Vec<Value> {
         &[],
     );
     [
-        ("delegate","",object(json!({"request":s,"description":s,"provider":{"type":"string","enum":["t3","claude","codex"],"default":"t3"}}),&["request","description"])),
+        ("delegate","",object(json!({"request":s,"description":s,"provider":{"type":"string","enum":["t3","claude","codex","pi","poe"],"default":"t3"},"fork":{"type":"boolean"}}),&["request","description"])),
         ("shell",include_str!("../../conversation-tools/shell.md"),cmd.clone()),
         ("batch",include_str!("../../conversation-tools/batch.md"),object(json!({"commands":{"type":"array","items":cmd,"minItems":1,"maxItems":8}}),&["commands"])),
         ("inspect_window",include_str!("../../conversation-tools/inspect_window.md"),object(json!({"target":s,"mode":{"type":"string","enum":["accessibility","screenshot","both"]}}),&["target","mode"])),
@@ -127,6 +127,7 @@ async fn shell(cwd: &Path, login: &Path, args: &Value) -> Result<String> {
     result
 }
 pub struct Plugins<'a> {
+    pub delegates: Option<&'a crate::delegate::Delegates>,
     pub cwd: &'a Path,
     pub focus: Option<String>,
     pub home: &'a Path,

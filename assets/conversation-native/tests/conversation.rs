@@ -84,6 +84,7 @@ async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> R
     fs::write(root.join("delivery.json"), "{}")?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut plugins = Plugins {
+        delegates: None,
         cwd: root,
         focus: None,
         home: root,
@@ -200,6 +201,7 @@ async fn native_loop_resumes_tools_and_compacts_durably() -> Result<()> {
     let state = home.join("history/session.json");
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        delegates: None,
         focus: None,
         home,
         cwd: &cwd,
@@ -356,6 +358,7 @@ async fn media_formats_and_desktop_window_socket() -> Result<()> {
     });
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        delegates: None,
         focus: None,
         home: &socket_home,
         cwd,
@@ -418,6 +421,7 @@ async fn cancelling_shell_kills_descendants() -> Result<()> {
     let cwd = tmp.path();
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        delegates: None,
         focus: None,
         home: cwd,
         cwd,
@@ -453,6 +457,7 @@ async fn login_shell_loads_interactive_startup_and_preserves_quoting() -> Result
     fs::set_permissions(&shell, fs::Permissions::from_mode(0o700))?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        delegates: None,
         focus: None,
         home: &cwd,
         cwd: &cwd,
@@ -533,11 +538,15 @@ input.once('line', line => {
             "delegate",
             json!({"request":request,"description":description}),
         ),
+        msg("Handed off."),
         msg("Finished."),
     ])
     .await?;
     let (_ack, mut acks) = mpsc::unbounded_channel();
+    let path = dir.join("chat.agent.json");
+    let (delegates, mut ready) = hey_boss_conversation::delegate::Delegates::open(&path)?;
     let mut p = Plugins {
+        delegates: Some(&delegates),
         focus: None,
         home: dir,
         cwd: dir,
@@ -546,13 +555,25 @@ input.once('line', line => {
         http: &reqwest::Client::new(),
         acks: &mut acks,
     };
-    let path = dir.join("chat.agent.json");
     // Leave the acknowledgement channel open and silent: playback must not gate delegation.
     tokio::time::timeout(
         Duration::from_secs(5),
         agent::run(&path, &url, &json!({"turn":"Check."}), &mut p),
     )
     .await??;
+    assert!(delegates.pending());
+    let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
+        .await?
+        .unwrap();
+    assert_eq!(result["aggregatedOutput"], format!("Answer: {request}"));
+    agent::run(
+        &path,
+        &url,
+        &hey_boss_conversation::delegate::follow_up(result),
+        &mut p,
+    )
+    .await?;
+    assert!(!delegates.pending());
     let requests = server.await??;
     let schema = requests[0]["tools"]
         .as_array()
@@ -570,7 +591,9 @@ input.once('line', line => {
     );
     let result = requests[1]["input"].as_array().unwrap().last().unwrap();
     assert_eq!(result["call_id"], "call_1");
-    assert_eq!(result["output"], format!("Answer: {request}"));
+    let receipt: Value = serde_json::from_str(result["output"].as_str().unwrap())?;
+    assert_eq!(receipt["status"], "running");
+    assert!(requests[2]["input"].to_string().contains("Answer: "));
     let book = hey_boss_conversation::notebook::Notebook::open(&path, &Value::Null)?;
     let args: Value = serde_json::from_str(
         book.messages[1]["tool_calls"][0]["function"]["arguments"]
@@ -580,7 +603,13 @@ input.once('line', line => {
     assert_eq!(args["description"], description);
     assert_eq!(args["request"], request);
     assert_eq!(book.messages[2]["content"], result["output"]);
-    assert_eq!(book.messages[2]["failed"], false);
+    assert_eq!(
+        book.messages
+            .iter()
+            .filter(|m| m["name"] == "delegate_result")
+            .count(),
+        1
+    );
     Ok(())
 }
 
@@ -600,6 +629,7 @@ async fn background_turn_uses_checkout_and_no_desktop_context() -> Result<()> {
     .await?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut p = Plugins {
+        delegates: None,
         focus: None,
         home,
         cwd: &cwd,
@@ -654,6 +684,7 @@ async fn follow_up_skips_proposed_tools_and_is_saved_before_next_inference() -> 
     .await?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut plugins = Plugins {
+        delegates: None,
         focus: None,
         home: root,
         cwd: root,
@@ -690,5 +721,168 @@ async fn follow_up_skips_proposed_tools_and_is_saved_before_next_inference() -> 
         .map(|m| m["content"].as_str().unwrap())
         .collect();
     assert_eq!(users, ["First", "Correction one", "Correction two"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn poe_delegates_spawn_fork_recover_and_deduplicate() -> Result<()> {
+    use hey_boss_conversation::delegate::{Delegates, follow_up};
+    let dir = scratch();
+    let root = dir.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    let runner = root.join("conversation-job");
+    fs::write(
+        &runner,
+        r#"#!/usr/bin/env node
+const fs=require('node:fs'), readline=require('node:readline');
+const input=readline.createInterface({input:process.stdin});
+input.once('line',line=>{
+fs.writeFileSync('child-request.json',JSON.stringify({state:process.argv[2],request:JSON.parse(line)}));
+console.log(JSON.stringify({TurnCompleted:{status:'Completed',output:'child answer'}}));input.close();
+});
+"#,
+    )?;
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700))?;
+    let state = root.join("parent.json");
+    let (tasks, mut ready) = Delegates::open(&state)?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let tools = Plugins {
+        delegates: Some(&tasks),
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let history = vec![
+        json!({"role":"user","content":"parent context"}),
+        json!({"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"delegate","arguments":"{}"}}]}),
+    ];
+    let args = json!({"provider":"poe","request":"child task","description":"Child","fork":true});
+    let receipt = tasks.start(&tools, &args, &history)?;
+    assert_eq!(receipt["status"], "running");
+    let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
+        .await?
+        .unwrap();
+    let captured: Value = serde_json::from_slice(&fs::read(root.join("child-request.json"))?)?;
+    assert_ne!(captured["state"], state.to_string_lossy().as_ref());
+    assert_eq!(captured["request"]["history"][0], history[0]);
+    assert_eq!(captured["request"]["history"][2]["toolCallId"], "pending");
+    assert_eq!(history.len(), 2);
+    assert_eq!(result["aggregatedOutput"], "child answer");
+    // A completed result is recovered until the notebook has durably accepted it.
+    drop(tools);
+    drop(tasks);
+    let (tasks, mut ready) = Delegates::open(&state)?;
+    let mut tools = Plugins {
+        delegates: Some(&tasks),
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    assert_eq!(ready.try_recv()?, result);
+    let (url, server) = mock(vec![msg("Handled")]).await?;
+    let request = follow_up(result);
+    agent::run(&state, &url, &request, &mut tools).await?;
+    agent::run(&state, &url, &request, &mut tools).await?;
+    assert_eq!(
+        server.await??.len(),
+        1,
+        "A repeated receipt must not start another inference"
+    );
+    assert!(!tasks.pending());
+    let mut book = hey_boss_conversation::notebook::Notebook::open(&state, &Value::Null)?;
+    assert_eq!(
+        book.messages
+            .iter()
+            .filter(|m| m["delegation"] == receipt["id"])
+            .count(),
+        1
+    );
+    book.compact(
+        book.messages.len(),
+        json!({"role":"user","content":"Summary"}),
+    )?;
+    drop(book);
+    agent::run(&state, &url, &request, &mut tools).await?;
+    let fresh = tasks.start(
+        &tools,
+        &json!({"provider":"poe","request":"fresh","description":"Fresh"}),
+        &history,
+    )?;
+    let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
+        .await?
+        .unwrap();
+    assert_eq!(result["id"], fresh["id"]);
+    let captured: Value = serde_json::from_slice(&fs::read(root.join("child-request.json"))?)?;
+    assert!(captured["request"].get("history").is_none());
+    tasks.cancel()?;
+    assert!(!tasks.pending());
+    drop(tools);
+    drop(tasks);
+    let (recovered, mut ready) = Delegates::open(&state)?;
+    assert!(!recovered.pending());
+    assert!(ready.try_recv().is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ending_the_owner_closes_delegate_input_without_restarting_the_task() -> Result<()> {
+    use hey_boss_conversation::delegate::Delegates;
+    let dir = scratch();
+    let root = dir.path();
+    let runner = root.join("conversation-job");
+    fs::write(
+        &runner,
+        "#!/bin/sh\nread -r request\ntouch started\nread -r next || touch cancelled\n",
+    )?;
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700))?;
+    let state = root.join("parent.json");
+    let (tasks, _ready) = Delegates::open(&state)?;
+    let (_, mut acks) = mpsc::unbounded_channel();
+    let tools = Plugins {
+        delegates: Some(&tasks),
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    tasks.start(
+        &tools,
+        &json!({"provider":"poe","request":"wait","description":"Wait"}),
+        &[],
+    )?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.join("started").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    drop(tools);
+    drop(tasks);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !root.join("cancelled").exists() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    let (_tasks, mut ready) = Delegates::open(&state)?;
+    let result = ready.try_recv()?;
+    assert_eq!(result["failed"], true);
+    assert!(
+        result["aggregatedOutput"]
+            .as_str()
+            .unwrap()
+            .contains("may have run")
+    );
     Ok(())
 }
