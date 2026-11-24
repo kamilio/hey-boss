@@ -5,7 +5,7 @@ mod diagnostic;
 pub(super) mod inspect;
 pub(super) mod quota;
 
-fn failure(status: StatusCode, code: &str, message: &str) -> Response {
+pub(super) fn failure(status: StatusCode, code: &str, message: &str) -> Response {
     (
         status,
         axum::Json(json!({"error":{"type":"proxy_routing_error","code":code,"message":message}})),
@@ -99,20 +99,39 @@ pub(super) async fn forward(proxy: Arc<Proxy>, request: Request) -> Response {
                     message,
                 );
             }
-            let mut selected =
-                match tokio::time::timeout(Duration::from_secs(25), proxy.select(&leg.provider))
-                    .await
-                {
-                    Ok(Ok(selected)) => selected,
-                    _ => {
-                        return diagnostic::failure(
-                            report.as_ref(),
-                            StatusCode::SERVICE_UNAVAILABLE,
+            let timeout = if leg.implementation == "codex" {
+                crate::codex_auth::CREDENTIAL_TIMEOUT
+            } else {
+                Duration::from_secs(25)
+            };
+            let mut selected = match tokio::time::timeout(timeout, proxy.select(&leg.provider))
+                .await
+            {
+                Ok(Ok(selected)) => selected,
+                Ok(Err(error)) => {
+                    let (code, message) = error
+                        .downcast_ref::<crate::codex_auth::RefreshError>()
+                        .map(|error| (error.code(), error.message()))
+                        .unwrap_or((
                             "route_account_unavailable",
                             "Selected provider credentials or account identity are unavailable",
-                        );
-                    }
-                };
+                        ));
+                    return diagnostic::failure(
+                        report.as_ref(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        code,
+                        message,
+                    );
+                }
+                Err(_) => {
+                    return diagnostic::failure(
+                        report.as_ref(),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "route_account_timeout",
+                        "Timed out waiting for provider credentials; any in-flight refresh continues; retry shortly",
+                    );
+                }
+            };
             selected.fallback_attempt = true;
             if leg.billing_mode == BillingMode::IncludedSubscription
                 && quota::cooling_down(&selected, &leg.upstream_model).await

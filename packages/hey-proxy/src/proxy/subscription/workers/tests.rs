@@ -140,6 +140,7 @@ async fn named_quota_reads_select_work_account_without_any_inference() {
             &crate::codex_auth::Tokens {
                 access_token: format!("synthetic-{suffix}"),
                 refresh_token: "synthetic-refresh".into(),
+                refresh_error: None,
                 expires_at: crate::codex_auth::now() + 3600,
                 account_id: Some(format!("synthetic-account-{suffix}")),
             },

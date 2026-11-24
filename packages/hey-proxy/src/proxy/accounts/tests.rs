@@ -21,6 +21,7 @@ fn fixture(dir: &Path) -> (Config, PathBuf) {
             &Tokens {
                 access_token: format!("synthetic-access-{name}"),
                 refresh_token: format!("synthetic-refresh-{name}"),
+                refresh_error: None,
                 expires_at: crate::codex_auth::now() + 3600,
                 account_id: Some(id.into()),
             },
@@ -284,7 +285,8 @@ async fn named_refresh_usage_cooldown_and_inference_are_account_scoped() {
                 r.fetch_add(1, Ordering::SeqCst);
                 let body = axum::body::to_bytes(request.into_body(), 65536).await.unwrap();
                 let body: Value = serde_json::from_slice(&body).unwrap();
-                let name = body["refresh_token"].as_str().unwrap().strip_prefix("synthetic-refresh-").unwrap();
+                let token = body["refresh_token"].as_str().unwrap();
+                let name = token.strip_prefix("synthetic-refresh-").or_else(|| token.strip_prefix("new-refresh-")).unwrap();
                 tokio::time::sleep(Duration::from_millis(20)).await;
                 return axum::Json(json!({"access_token":format!("fresh-token-{name}"),"refresh_token":format!("new-refresh-{name}"),"expires_in":3600})).into_response();
             }
@@ -324,6 +326,7 @@ async fn named_refresh_usage_cooldown_and_inference_are_account_scoped() {
             &Tokens {
                 access_token: format!("expired-token-{name}"),
                 refresh_token: format!("synthetic-refresh-{name}"),
+                refresh_error: None,
                 expires_at: 0,
                 account_id: Some(id.into()),
             },
@@ -344,6 +347,7 @@ async fn named_refresh_usage_cooldown_and_inference_are_account_scoped() {
     assert_eq!(refreshes.load(Ordering::SeqCst), 2);
     work.rejected_binding().await;
     assert_eq!(refreshes.load(Ordering::SeqCst), 3);
+    assert!(proxy.select("work").await.is_ok());
     assert_eq!(
         personal.binding.as_ref().unwrap().token,
         "fresh-token-personal"

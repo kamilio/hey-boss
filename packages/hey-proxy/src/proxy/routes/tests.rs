@@ -67,6 +67,7 @@ impl Fixture {
                 &crate::codex_auth::Tokens {
                     access_token: format!("oauth-{name}"),
                     refresh_token: format!("refresh-{name}"),
+                    refresh_error: None,
                     expires_at: crate::codex_auth::now() + 3600,
                     account_id: Some(name.into()),
                 },
@@ -160,6 +161,105 @@ async fn default_subscription_preserves_requested_model_and_alpha_exception() {
     assert_eq!(seen[0]["body"]["model"], "gpt-future");
     assert_eq!(seen[1]["auth"], "Bearer synthetic-paid-key");
     assert_eq!(seen[1]["body"]["model"], "ultima-alpha");
+}
+
+#[tokio::test]
+async fn oauth_refresh_errors_reach_routes_pinned_requests_usage_and_probes() {
+    let mut f = Fixture::new().await;
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let app = Router::new().route(
+        "/oauth/token",
+        axum::routing::post(move || {
+            count.fetch_add(1, Ordering::SeqCst);
+            async {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    axum::Json(
+                        json!({"error":{"code":"refresh_token_reused","message":"private-token"}}),
+                    ),
+                )
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer_url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut config = (*f.proxy.config).clone();
+    if let config::accounts::AccountConfig::Codex { issuer, .. } =
+        config.accounts.get_mut("personal").unwrap()
+    {
+        *issuer = Some(issuer_url);
+    }
+    crate::codex_auth::tests::fixture(&f._dir.path().join("personal.json"), 1);
+    f.proxy = Arc::new(local_snapshot(config, f.proxy.service.source.clone()).unwrap());
+    let route = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
+    let pinned = super::super::forward(
+        State(f.proxy.service.clone()),
+        Request::builder()
+            .method("POST")
+            .uri("/v1/responses")
+            .header("x-hey-proxy-provider", "personal")
+            .header("x-hey-proxy-account", "existing-binding")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    for response in [route, pinned] {
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["error"]["code"], "codex_refresh_token_reused");
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-token"));
+    }
+    let usage = subscription::account_usage(&f.proxy, "codex", "personal")
+        .await
+        .unwrap_err();
+    assert_eq!(usage.1, "codex_refresh_token_reused");
+    let probe = f
+        .request(json!({"model":"gpt-6.1-sol","input":"hello-hey-proxy-model"}))
+        .await;
+    assert_eq!(probe.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(probe.into_body(), 65536)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("refresh token was already used"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        f.seen.lock().unwrap().is_empty(),
+        "auth failures must not choose another account or paid fallback"
+    );
+    task.abort();
+}
+
+#[tokio::test]
+async fn codex_route_waits_for_refresh_beyond_old_selection_deadline() {
+    let mut f = Fixture::new().await;
+    let app = Router::new().route("/oauth/token", axum::routing::post(|| async {
+        tokio::time::sleep(Duration::from_secs(26)).await;
+        axum::Json(json!({"access_token":"refreshed-oauth-personal","refresh_token":"refreshed-personal","expires_in":3600}))
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let issuer_url = format!("http://{}", listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut config = (*f.proxy.config).clone();
+    if let config::accounts::AccountConfig::Codex { issuer, .. } =
+        config.accounts.get_mut("personal").unwrap()
+    {
+        *issuer = Some(issuer_url);
+    }
+    crate::codex_auth::tests::fixture(&f._dir.path().join("personal.json"), 1);
+    f.proxy = Arc::new(local_snapshot(config, f.proxy.service.source.clone()).unwrap());
+    let response = f.request(json!({"model":"gpt-6.1-sol","input":[]})).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-hey-proxy-provider"], "personal");
+    assert_eq!(
+        f.seen.lock().unwrap()[0]["auth"],
+        "Bearer refreshed-oauth-personal"
+    );
+    task.abort();
 }
 
 #[tokio::test]

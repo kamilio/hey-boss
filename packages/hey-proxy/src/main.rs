@@ -389,7 +389,12 @@ async fn main() -> Result<()> {
                 snapshot
                     .select(name)
                     .await
-                    .map_err(|_| anyhow::anyhow!("Named account is not ready"))?;
+                    .map_err(|error| {
+                        if let Some(error) = error.downcast_ref::<codex_auth::RefreshError>() {
+                            return anyhow::anyhow!(*error);
+                        }
+                        anyhow::anyhow!("Named account is not ready")
+                    })?;
             }
         }
         println!("Credential sources ready");
