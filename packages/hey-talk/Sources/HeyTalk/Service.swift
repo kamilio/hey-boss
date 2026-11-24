@@ -728,7 +728,11 @@ final class TalkService: NSObject, NSApplicationDelegate {
         case "paste_clipboard":
             guard AXIsProcessTrusted() else { reply(failure(ConversationFocus.permission)); return }
             guard let pid = request["pid"] as? Int32, let count = request["change_count"] as? Int,
-                  let target = FocusedInput.keyboardApp, target.processIdentifier == pid, pid != getpid(),
+                  // Electron can leave AXFocusedApplication unavailable. The key
+                  // is sent directly to this PID; an unavailable AX reply must
+                  // not veto the explicitly requested, still-active app.
+                  let target = FocusedInput.keyboardApp ?? NSWorkspace.shared.frontmostApplication,
+                  target.processIdentifier == pid, pid != getpid(),
                   NSPasteboard.general.changeCount == count else {
                 reply(failure("Focus or clipboard changed before pasting. Nothing was pasted.")); return
             }

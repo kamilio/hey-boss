@@ -6,6 +6,7 @@ final class CycleTests: XCTestCase {
     private var directory: URL!
     private var history: History!
     private var model: ClipboardApp!
+    private var previousApp: NSRunningApplication?
 
     override func setUpWithError() throws {
         _ = NSApplication.shared
@@ -20,6 +21,7 @@ final class CycleTests: XCTestCase {
         model = nil
         history.finishWrites()
         try FileManager.default.removeItem(at: directory)
+        previousApp?.activate()
     }
     func testRepeatedVAdvancesAndWrapsWithoutChangingHistory() {
         for text in ["oldest", "middle", "newest"] { history.add(text, app: "Test") }
@@ -157,5 +159,65 @@ final class CycleTests: XCTestCase {
         XCTAssertEqual(panel.level, .popUpMenu)
         XCTAssertFalse(panel.hidesOnDeactivate)
         XCTAssertEqual(panel.frame.size, NSSize(width: 480, height: 300))
+    }
+
+    @MainActor
+    func testLiveReleasePastesIntoTextEdit() async throws {
+        guard ProcessInfo.processInfo.environment["HEY_CLIPBOARD_PASTE_TEST"] == "1" else {
+            throw XCTSkip("Requires an empty TextEdit document, Hey Talk, and Accessibility")
+        }
+        previousApp = NSWorkspace.shared.frontmostApplication
+        let destination = try XCTUnwrap(NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.TextEdit").first)
+        destination.activate()
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(destination.isActive)
+        let application = AXUIElementCreateApplication(destination.processIdentifier)
+        var value: CFTypeRef?
+        XCTAssertEqual(AXUIElementCopyAttributeValue(application, kAXFocusedUIElementAttribute as CFString, &value), .success)
+        let field = try XCTUnwrap(value) as! AXUIElement
+        func contents() -> String? {
+            var value: CFTypeRef?
+            AXUIElementCopyAttributeValue(field, kAXValueAttribute as CFString, &value)
+            return value as? String
+        }
+        guard contents() == "" else { return XCTFail("Focus an empty scratch document; existing text is never replaced") }
+        let paused = try Server.request(["command": "status"])["paused"] as? Bool == true
+        if !paused { _ = try Server.request(["command": "pause"]) }
+        let board = NSPasteboard.general
+        let original = (board.pasteboardItems ?? []).map { item in
+            Dictionary(uniqueKeysWithValues: item.types.compactMap { type in item.data(forType: type).map { (type, $0) } })
+        }
+        let text = "Clipboard release verification"
+        defer {
+            if board.string(forType: .string) == text {
+                board.clearContents()
+                let items = original.map { values in
+                    let item = NSPasteboardItem()
+                    for (type, data) in values { item.setData(data, forType: type) }
+                    return item
+                }
+                board.writeObjects(items)
+            }
+            if !paused { _ = try? Server.request(["command": "resume"]) }
+        }
+        history.add(text, app: "Test")
+        model.cycle()
+        let panel = try XCTUnwrap(NSApp.windows.first { $0 is PickerPanel && $0.isVisible })
+        // Simulate holding the shortcut while the panel acquires keyboard focus.
+        // Physical modifier polling is disabled only for this test interval.
+        model.cycling = false
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(panel.isKeyWindow, "The picker must own keyboard focus before release")
+        model.cycling = true
+        model.flagsChanged([])
+        for _ in 0..<30 {
+            if contents() == text || model.message != nil { break }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        XCTAssertNil(model.message)
+        XCTAssertFalse(model.cycling)
+        XCTAssertFalse(panel.isVisible)
+        XCTAssertEqual(contents(), text)
+        if contents() == text { AXUIElementSetAttributeValue(field, kAXValueAttribute as CFString, "" as CFString) }
     }
 }
