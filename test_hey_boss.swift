@@ -14,6 +14,37 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_T3_VOICE"] {
+        let root = URL(fileURLWithPath: path)
+        try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let saved = root.appendingPathComponent("current.json")
+        let link = "t3code://threads/00000000-0000-0000-0000-000000000001/simulated"
+        let fixture: [String: Any] = ["messages": [
+            ["speaker":"T3", "text":"Thread update", "capture":["source":"T3", "text":"Saved result"]],
+            ["speaker":"Hey Boss", "text":"Tests passed."]
+        ], "t3Thread":link, "t3LastUpdate":"already-announced"]
+        try! JSONSerialization.data(withJSONObject: fixture).write(to: saved)
+        let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: saved)
+        precondition(chat.conversationHistory.first?["role"] == "user", "Thread context must not become an assistant instruction")
+        chat.stop("Ready")
+        func latest() -> [String: Any] {
+            let index = try! JSONSerialization.jsonObject(with: Data(contentsOf: saved)) as! [String: Any]
+            let journal = root.appendingPathComponent((index["selected"] as! String) + ".jsonl")
+            let line = try! Data(contentsOf: journal).split(separator: 10).last!
+            return (try! JSONSerialization.jsonObject(with: Data(line)) as! [String: Any])["added"] as! [String: Any]
+        }
+        precondition(latest()["t3Thread"] as? String == link && latest()["t3LastUpdate"] as? String == "already-announced", "Stopping preserves attachment and announcement cursor")
+        let restored = VoiceConversation(cli: "/usr/bin/false", saveURL: saved)
+        precondition(restored.conversationHistory.count == 2, "An attached chat must reopen even before the user speaks")
+        restored.stop("Ready")
+        precondition(latest()["t3Thread"] as? String == link)
+        precondition(restored.selectDirectory(nil))
+        restored.append("New ordinary conversation", from: "You")
+        restored.stop("Ready")
+        precondition(latest()["t3Thread"] == nil && latest()["t3LastUpdate"] == nil, "New conversations must not inherit the attached thread")
+        print("PASS T3 attachment: restore, stop, cursor, context role, and new-chat isolation")
+        return
+    }
     if ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_NOTIFICATION_AGES"] == "1" { auditNotificationAges(); return }
     if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_CHAT_SIDEBAR"] {
         app.finishLaunching()

@@ -240,10 +240,17 @@ final class TalkService: NSObject, NSApplicationDelegate {
             catch { speech.onNotice?(error.localizedDescription) }
         }
     }
-    @MainActor private func startCatchUp() async throws {
-        try await speech.catchUp { [weak self] recap in self?.openConversation(recap: recap) }
+    @MainActor private func startCatchUp(link: String? = nil) async throws {
+        let source: CatchUpSource
+        if let link { source = try CatchUpSource.thread(link) }
+        else { source = try await CatchUpSource.current() }
+        if case let .t3(environment, thread) = source {
+            openConversation(t3: "t3code://threads/\(environment)/\(thread)")
+        } else {
+            try await speech.catchUp(source: source) { [weak self] recap in self?.openConversation(recap: recap) }
+        }
     }
-    private func openConversation(recap: String? = nil) {
+    private func openConversation(recap: String? = nil, t3: String? = nil) {
         guard !openingConversation, !switchingToDictation else { return }
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
@@ -259,8 +266,9 @@ final class TalkService: NSObject, NSApplicationDelegate {
         Task { @MainActor in
             do {
                 guard openingConversation, conversationRevision == revision else { return }
-                var request: [String: Any] = ["command": recap == nil ? "conversation_start" : "conversation_context", "sync": false]
+                var request: [String: Any] = ["command": recap == nil && t3 == nil ? "conversation_start" : "conversation_context", "sync": false]
                 if let recap { request["title"] = "Catch Up"; request["description"] = recap }
+                if let t3 { request["link_url"] = t3 }
                 // Queue Stop behind Start if Escape arrives while the socket request is in flight.
                 let reply: [String: Any]? = try await withCheckedThrowingContinuation { continuation in
                     contextQueue.async { [request] in continuation.resume(with: Result { try self.chatRequest(request) }) }
@@ -784,7 +792,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                     return
                 case "catch-up":
                     Task { @MainActor in
-                        do { try await startCatchUp(); reply(["ok": true, "speech": speech.status]) }
+                        do { try await startCatchUp(link: request["thread"] as? String ?? (args.count == 2 ? args[1] : nil)); reply(["ok": true, "speech": speech.status]) }
                         catch { speech.onNotice?(error.localizedDescription); reply(failure(error.localizedDescription)) }
                     }
                     return

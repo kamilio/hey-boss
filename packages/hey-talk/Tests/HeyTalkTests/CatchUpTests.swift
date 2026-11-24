@@ -2,6 +2,13 @@ import XCTest
 @testable import HeyTalk
 
 final class CatchUpTests: XCTestCase {
+    func testExplicitThreadKeepsEnvironmentAndRejectsOtherLinks() throws {
+        let environment = "00000000-0000-0000-0000-000000000001"
+        let link = "t3code://threads/\(environment)/voice-thread"
+        XCTAssertEqual(try CatchUpSource.thread(link), .t3(environment: environment, thread: "voice-thread"))
+        try SpeechSettings.validate(["catch-up", link])
+        XCTAssertThrowsError(try SpeechSettings.validate(["catch-up", "https://example.com"]))
+    }
     func testObsidianRecapsOnlyTheOpenMarkdownNote() throws {
         let note = try ObsidianNote(output: "=> [\"Research\",\"Ideas/Launch.md\"]\n\n## Draft\nCurrent edit.\n")
         XCTAssertEqual(note.path, "Ideas/Launch.md")

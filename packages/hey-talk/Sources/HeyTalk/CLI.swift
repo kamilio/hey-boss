@@ -27,7 +27,7 @@ enum CLI {
     hey-talk correction [on|off|toggle]         Fix punctuation and typos with Luna
     hey-talk speech [on|off|add BUNDLE_ID|remove BUNDLE_ID]  Hyper+T toggles mode
     hey-talk speech target [--json]           Inspect the selected/hovered paragraph
-    hey-talk speech catch-up                  Hear a T3, Slack, or Obsidian recap, then talk about it
+    hey-talk speech catch-up [THREAD_LINK]    Talk with T3, or hear a Slack/Obsidian recap
     hey-talk speech play|pause|stop           Read aloud · Hyper+S toggles playback
     hey-talk enter-exceptions [add|remove BUNDLE_ID]  Apps that never receive Enter
     hey-talk enter-exceptions sites [add|remove HOST]  Websites that never receive Enter
@@ -105,6 +105,13 @@ enum CLI {
             let values = Array(args.dropFirst())
             try SpeechSettings.validate(values)
             request["arguments"] = values
+            if values == ["catch-up"], let thread = ProcessInfo.processInfo.environment["T3CODE_THREAD_ID"] {
+                let idFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".t3/userdata/environment-id")
+                let environment = try String(contentsOf: idFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+                let link = "t3code://threads/\(environment)/\(thread)"
+                _ = try CatchUpSource.thread(link)
+                request["thread"] = link
+            }
         }
         if verb == "vocabulary" {
             let values = Array(args.dropFirst())

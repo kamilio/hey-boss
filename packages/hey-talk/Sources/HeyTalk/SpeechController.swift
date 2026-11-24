@@ -35,11 +35,10 @@ final class SpeechController {
     private var preparing: Task<Void, Never>?
     var active: Bool { preparing != nil || playback.active }
 
-    @MainActor func catchUp(onPlayed: @escaping (String) -> Void) async throws {
+    @MainActor func catchUp(source: CatchUpSource, onPlayed: @escaping (String) -> Void) async throws {
         guard !sleeping else { throw TalkError("Unlock this Mac before reading aloud.") }
         revision &+= 1
         let ticket = revision
-        let source = try await CatchUpSource.current()
         guard ticket == revision else { return }
         if source.sameLocation(as: recapSource) {
             if playback.active { playback.togglePause() } else { stop() }

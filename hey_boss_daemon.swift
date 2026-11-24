@@ -8298,6 +8298,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private(set) var contextChip = NSButton()
     private var selections: [Selection] = [] { didSet { refreshAttachments() } }
     private var pendingCapture: Capture? { didSet { refreshAttachments() } }
+    private var t3Thread: String?
+    private var t3LastUpdate: String?
+    private var t3Watcher: Process?
+    private var t3Pending: (key: String, text: String)?
+    private var t3Processing: String?
     @discardableResult func addSelection(chat: UUID?, time: TimeInterval, source: String, text: String) -> Int? {
         guard restoreError == nil, !text.isEmpty, time.isFinite else { return nil }
         if let chat, chat != library.selected || voiceStatus["selection_chat"] == nil { return nil }
@@ -8364,6 +8369,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         var visuals: [Visual]?
         var activities: [ToolActivity]?
         var interruptedAfter: PlaybackInterruption?
+        var t3Thread: String?
+        var t3LastUpdate: String?
     }
     // Each line replaces only the changed suffixes; composer state travels with the
     // same record so an interrupted turn never restores mismatched text and tools.
@@ -8577,10 +8584,60 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.orderOut(nil)
         toggle()
     }
-    func openWithContext(source: String?, text: String?) {
-        guard selectDirectory(directory, capture: source.map { Capture(source: $0, text: text) }) else { return }
+    func openWithContext(source: String?, text: String?, t3: String? = nil) {
+        guard selectDirectory(t3 == nil ? directory : nil, capture: source.map { Capture(source: $0, text: text) }) else { return }
+        if let t3 {
+            t3Thread = t3
+            append("Attached to T3", from: "Conversation")
+            rememberTurn(); save()
+        }
         window.orderOut(nil)
         toggle()
+    }
+    private func watchT3() {
+        guard t3Watcher == nil, let link = t3Thread else { return }
+        let child = Process(), output = Pipe()
+        child.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-t3")
+        child.arguments = ["--voice-watch", link]
+        var environment = ProcessInfo.processInfo.environment
+        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        child.environment = environment; child.standardOutput = output
+        do { try child.run(); t3Watcher = child }
+        catch { status.stringValue = "Couldn’t attach to T3: " + error.localizedDescription; status.isHidden = false; return }
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var pending = Data()
+            while true {
+                let data = output.fileHandleForReading.availableData
+                if data.isEmpty { break }
+                pending.append(data)
+                while let end = pending.firstIndex(of: 10) {
+                    let event = (try? JSONSerialization.jsonObject(with: pending[..<end])) as? [String: Any]
+                    pending.removeSubrange(...end)
+                    onMain {
+                        guard let self, self.t3Watcher === child, let event else { return }
+                        if let error = event["error"] as? String {
+                            self.status.stringValue = "T3 disconnected · Reconnecting: " + error; self.status.isHidden = false
+                        }
+                        if let snapshot = event["snapshot"], let key = event["key"] as? String, key != self.t3LastUpdate,
+                           let bytes = try? JSONSerialization.data(withJSONObject: snapshot, options: [.sortedKeys]) {
+                            self.t3Pending = (key, String(decoding: bytes, as: UTF8.self))
+                            self.deliverT3Update()
+                        }
+                    }
+                }
+            }
+            onMain {
+                guard let self, self.t3Watcher === child else { return }
+                self.t3Watcher = nil
+                self.status.stringValue = "T3 connection stopped. Restart voice to reconnect."; self.status.isHidden = false
+            }
+        }
+    }
+    private func deliverT3Update() {
+        guard phase == .listening, pauseID == nil, !micMuted, input.stringValue.isEmpty,
+              selections.isEmpty, pendingCapture == nil, let pending = t3Pending else { return }
+        t3Processing = pending.key
+        _ = respond(pending.text, automatic: true)
     }
     @objc private func inspectCapture(_ sender: NSButton) {
         let pending = sender === contextChip
@@ -8701,10 +8758,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.title = titleField.stringValue
     }
     private func rememberTurn() {
-        guard let first = messages.first(where: { $0.speaker == "You" }) else { return }
+        let first = messages.first(where: { $0.speaker == "You" })
+        guard first != nil || t3Thread != nil else { return }
         let previous = library.chats.first { $0.id == library.selected }
-        let chat = Chat(id: library.selected, title: previous?.title ?? String(first.text.prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
-                        workspace: directory?.lastPathComponent ?? "GPT-6.1 Sol", updated: Date(), generatedTitle: previous?.generatedTitle, archived: previous?.archived)
+        let chat = Chat(id: library.selected, title: previous?.title ?? String((first?.text ?? "T3 Catch-up").prefix(120)).split(whereSeparator: \.isWhitespace).joined(separator: " "),
+                        workspace: t3Thread == nil ? directory?.lastPathComponent ?? "GPT-6.1 Sol" : "T3 Catch-up", updated: Date(), generatedTitle: previous?.generatedTitle, archived: previous?.archived)
         library.chats.removeAll { $0.id == chat.id }; library.chats.insert(chat, at: 0); refreshHistory()
     }
     func generateTitle() {
@@ -9027,6 +9085,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         return save()
     }
     func clearTurns() {
+        t3Thread = nil; t3LastUpdate = nil; t3Pending = nil; t3Processing = nil
         firstRendered = 0
         for row in turns.arrangedSubviews { row.removeFromSuperview() }
         interruptedAfter = nil
@@ -9040,6 +9099,10 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         if next != .speaking || playbackPaused { caption.orderOut(nil) }
         if next == .idle { sessionLock = nil }
         phase = next; status.stringValue = micMuted && (next == .listening || next == .recording) ? "Listening paused" : message
+        if next == .listening, t3Thread != nil {
+            watchT3()
+            DispatchQueue.main.async { [weak self] in self?.deliverT3Update() }
+        }
         meter.show(next)
         let voiceAction = voiceStatus["action"] as! String
         meter.isEnabled = true
@@ -9488,14 +9551,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.contentView?.layoutSubtreeIfNeeded()
         turns.scrollToVisible(NSRect(x: 0, y: max(0, turns.bounds.maxY - 1), width: 1, height: 1))
     }
-    @discardableResult func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = [], phoneID: UUID? = nil) -> Bool {
+    @discardableResult func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = [], phoneID: UUID? = nil, automatic: Bool = false) -> Bool {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return false }
         playedPassages.removeAll(); playingPassage = ""; playingThrough = 0
         turnDone = false; lastMessage = nil; turnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
         let text = Self.referencedTranscript(transcript, ends: ends, selections: selections)
         selections = []
-        append(text, from: "You", capture: capture)
+        append(automatic ? "Thread update" : text, from: automatic ? "T3" : "You", capture: automatic ? Capture(source: "T3", text: text) : capture)
         messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
         messages[messages.count - 1].phoneID = phoneID
         rememberTurn()
@@ -9522,6 +9585,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             do {
                 if process == nil { try startSol() }
                 var request: [String: Any] = ["turn": question]
+                if let t3Thread { request["t3_thread"] = t3Thread; request["automatic"] = automatic }
                 if !FileManager.default.fileExists(atPath: agentStateURL.deletingPathExtension().appendingPathExtension("jsonl").path) {
                     request["history"] = Array(conversationHistory.dropLast())
                 }
@@ -9548,7 +9612,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     var conversationHistory: [[String: String]] {
         messages.filter { $0.speaker != "Conversation" }.map {
-            ["role": $0.speaker == "You" ? "user" : "assistant", "content": $0.content]
+            ["role": ["You", "T3"].contains($0.speaker) ? "user" : "assistant", "content": $0.content]
         }
     }
     private var agentStateURL: URL { chatURL(library.selected).deletingPathExtension().appendingPathExtension("agent.json") }
@@ -9670,6 +9734,11 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         stream = ""; published = ""; messageLabel = nil; narratedItems.removeAll()
     }
     private func finishTurn(_ text: String) {
+        if let key = t3Processing {
+            t3LastUpdate = key
+            if t3Pending?.key == key { t3Pending = nil }
+            t3Processing = nil
+        }
         if !text.isEmpty && (lastMessage != text || !stream.isEmpty) { finishMessage(text) }
         dismissApprovals(); turnDone = true; updateComposerActions()
         if !save() { failTerminal(status.stringValue) }
@@ -9927,7 +9996,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     activities[index].output = activity.output; activities[index].state = activity.state
                     renderTool(activities[index])
                 } else { activities.append(activity); renderTool(activity) }
-                if isNew && kind == "ToolStarted", audio != nil {
+                if isNew && kind == "ToolStarted", audio != nil, t3Thread == nil {
                     let label = ConversationText(wrappingLabelWithString: description)
                     speech.append((label, NSRange(location: 0, length: description.utf16.count), description)); playNext()
                 }
@@ -10113,6 +10182,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(audio == nil ? .idle : .listening, message)
     }
     private func cancelTurn(failure: String? = nil) {
+        t3Processing = nil
         failTerminal(failure ?? "Reply stopped")
         for index in activities.indices where activities[index].state == "Running" {
             activities[index].state = "Interrupted"; renderTool(activities[index])
@@ -10169,10 +10239,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         catch { stop("Couldn’t resume microphone: " + error.localizedDescription); return false }
         pauseID = nil
         if phase == .starting { openVoiceInput() } else if answering { playNext() }
+        deliverT3Update()
         updateComposerActions()
         return true
     }
     func stop(_ message: String) {
+        if let watcher = t3Watcher { t3Watcher = nil; if watcher.isRunning { watcher.terminate() } }
+        t3Pending = nil; t3Processing = nil
         phoneDeadline?.invalidate(); phoneDeadline = nil
         hideMedia()
         pauseID = nil
@@ -10202,13 +10275,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !messages.isEmpty {
                 // Only a relaunch before the next checkpoint sees this notice.
                 let rows = unfinishedWorkspace ? messages + [Message(text: "No final workspace reply was saved.", speaker: "Conversation")] : messages
-                let saved = Saved(messages: rows, selections: selections.isEmpty ? nil : selections, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter)
+                let saved = Saved(messages: rows, selections: selections.isEmpty ? nil : selections, pendingCapture: pendingCapture, draftText: input.stringValue.isEmpty ? nil : input.stringValue, directory: directory, thread: thread, visuals: visuals.isEmpty ? nil : visuals, activities: activities, interruptedAfter: interruptedAfter, t3Thread: t3Thread, t3LastUpdate: t3LastUpdate)
                 try recordChat(saved)
             }
             try writeLibrary(); return true
         } catch { status.isHidden = false; status.stringValue = "Couldn’t save this conversation: " + error.localizedDescription; return false }
     }
     private func apply(_ saved: Saved) {
+        t3Thread = saved.t3Thread; t3LastUpdate = saved.t3LastUpdate
         directory = saved.directory; thread = saved.thread; interruptedAfter = saved.interruptedAfter
         selections = saved.selections ?? []; pendingCapture = saved.pendingCapture; input.stringValue = saved.draftText ?? ""
         let pending = Set((saved.activities ?? []).filter { $0.provider != nil && $0.state == "Running" }.map(\.id))
@@ -11945,7 +12019,7 @@ struct Daemon {
                                     overview.currentConversation().startFromPill()
                                     reply.send(["status": "ok"]); return
                                 }
-                                overview.currentConversation().openWithContext(source: request.title, text: request.description)
+                                overview.currentConversation().openWithContext(source: request.title, text: request.description, t3: request.link_url)
                                 reply.send(["status": "ok"])
                             }
                             return

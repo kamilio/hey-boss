@@ -5,6 +5,14 @@ import TalkCore
 enum CatchUpSource: Equatable {
     case t3(environment: String, thread: String), slack(URL), obsidian(ObsidianNote)
 
+    static func thread(_ value: String) throws -> Self {
+        guard let prefix = ["t3code://threads/", "t3code://app/#/"].first(where: value.hasPrefix) else { throw TalkError("Expected a T3 thread link.") }
+        let ids = value.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: false)
+        guard ids.count == 2, UUID(uuidString: String(ids[0])) != nil, !ids[1].isEmpty,
+              ids[1].utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || [95,58,45].contains($0) }) else { throw TalkError("Expected a T3 thread link.") }
+        return .t3(environment: String(ids[0]).lowercased(), thread: String(ids[1]))
+    }
+
     @MainActor static func current() async throws -> Self {
         guard let app = FocusedInput.keyboardApp else { throw TalkError("Focus a T3 thread, Slack conversation, or Obsidian note.") }
         if app.bundleIdentifier == "md.obsidian" {
@@ -18,7 +26,7 @@ enum CatchUpSource: Equatable {
         case "com.t3tools.t3code":
             let document = FocusedInput.read(app: app, forAuto: false)?.document ??
                 BrowserPage.page(in: window, deadline: ProcessInfo.processInfo.systemUptime + 0.4)?.url.absoluteString
-            if let document, let link = FocusedInput.threadLink(document) { return .t3(environment: link.pathComponents[1], thread: link.lastPathComponent) }
+            if let document, let source = try? thread(document) { return source }
         case "com.tinyspeck.slackmacgap":
             if let path = ConversationContext.slackRoute(app, window: window), let url = URL(string: path) { return .slack(url) }
         default: break
