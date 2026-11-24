@@ -124,7 +124,7 @@ notion:
   command: node /absolute/path/to/hey-boss/tools/notion-publisher.mjs
   audience: private
   create: [create, '{source}', '{name}']
-  read: [read, '', '', '{id}']
+  read: [read, '{id}']
   update: [update, '{source}', '{name}', '{id}', '{version}']
   fields: {id: /id, url: /url, version: /version}
 ```

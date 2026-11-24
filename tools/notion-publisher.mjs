@@ -5,7 +5,8 @@ import {mkdtempSync, readFileSync, writeFileSync, rmSync} from 'node:fs';
 import {dirname, join, resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 
-const [operation, source, title, id, version] = process.argv.slice(2);
+const [operation, source, title, target, version] = process.argv.slice(2);
+const id = operation === 'read' ? source : target;
 const hash = text => createHash('sha256').update(text).digest('hex');
 const notionURL = value => {
   const url = new URL(value);

@@ -24,7 +24,7 @@ else process.exit(1);
     let result=run('create',source,'Plan');assert.equal(result.status,0,result.stderr);
     const publication=JSON.parse(result.stdout);assert.match(publication.url,/notion.so/);
     assert.equal(readFileSync(join(root,'remote.md'),'utf8'),'# Plan\n\n\nFirst revision');
-    const read=run('read','','',publication.id);assert.equal(read.status,0,read.stderr);assert.equal(JSON.parse(read.stdout).version,publication.version);
+    const read=run('read',publication.id);assert.equal(read.status,0,read.stderr);assert.equal(JSON.parse(read.stdout).version,publication.version);
     writeFileSync(source,'Second revision');
     result=run('update',source,'Plan',publication.id,publication.version);assert.equal(result.status,0,result.stderr);
     const updated=JSON.parse(result.stdout);assert.equal(updated.url,publication.url);assert.notEqual(updated.version,publication.version);
