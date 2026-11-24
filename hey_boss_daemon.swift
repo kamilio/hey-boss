@@ -6533,7 +6533,7 @@ final class ArtifactBackend {
                 process.environment = env; process.standardInput = stdin; process.standardOutput = stdout; process.standardError = FileHandle.nullDevice
                 let done = DispatchSemaphore(value: 0); process.terminationHandler = { _ in done.signal() }
                 try process.run()
-                if done.wait(timeout: .now() + (command == "skill" ? 660 : 30)) != .success {
+                if done.wait(timeout: .now() + (command == "skill" ? 660 : command == "artifact" && arguments.first == "sync" ? 310 : 30)) != .success {
                     process.terminate()
                     if done.wait(timeout: .now() + 2) != .success { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
                     throw StorageError(description: "Connection timed out. Draft is preserved; retrying…")
@@ -10705,6 +10705,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     let page = NSView()
     let reload = NSButton(title: "Reload", target: nil, action: nil)
     let libraryButton = NSToolbarItem(itemIdentifier: .init("library"))
+    var syncingPublication = false
     var focusMode: Bool { split.splitViewItems.first?.isCollapsed ?? false }
     let titleField = NSTextField(string: "")
     let search = NSSearchField()
@@ -10928,9 +10929,9 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
             outline.showsIndicator = false; outline.toolTip = "Jump to a heading"; outline.menu = NSMenu(title: "Outline")
             return outline
         case "sharing":
-            let item = NSToolbarItem(itemIdentifier: identifier); item.label = "Share"
-            item.image = NSImage(systemSymbolName: "square.and.arrow.up", accessibilityDescription: "Share artifact")
-            item.target = self; item.action = #selector(shareArtifact); item.toolTip = "Publish saved Markdown and manage external links"
+            let item = NSToolbarItem(itemIdentifier: identifier); item.label = "Sync"
+            item.image = NSImage(systemSymbolName: "arrow.triangle.2.circlepath", accessibilityDescription: "Sync artifact")
+            item.target = self; item.action = #selector(syncArtifact); item.toolTip = "Sync saved Markdown to linked documents"
             return item
         case "format":
             let item = NSMenuToolbarItem(itemIdentifier: identifier); item.label = "Format"
@@ -10955,13 +10956,21 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         default: return nil
         }
     }
-    @objc func shareArtifact() {
-        guard gallery.isHidden, session.ready, session.launch.file == nil, let id = session.launch.id, !id.isEmpty else { return }
-        guard !session.dirty else { session.flush(); status.stringValue = "Saving changes… Choose Share once saved."; return }
-        var parameters = URLComponents()
-        parameters.queryItems = [URLQueryItem(name: "project", value: session.launch.project), URLQueryItem(name: "artifact", value: id), URLQueryItem(name: "share", value: "1")]
-        if let host = session.launch.host { parameters.queryItems?.append(URLQueryItem(name: "host", value: host)) }
-        if let url = URL(string: "http://hey-boss.test/artifacts#" + (parameters.percentEncodedQuery ?? "")) { NSWorkspace.shared.open(url) }
+    @objc func syncArtifact() {
+        guard gallery.isHidden, session.ready, !session.dirty, !syncingPublication, session.launch.file == nil, let id = session.launch.id, !id.isEmpty else { return }
+        syncingPublication = true; updateStatus(); status.stringValue = "Syncing…"
+        backend.request(["sync", id]) { [weak self] result in
+            guard let self else { return }
+            self.syncingPublication = false; self.updateStatus()
+            switch result {
+            case .success(let data):
+                let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                let artifact = value?["artifact"] as? [String: Any]
+                let publications = artifact?["publications"] as? [[String: Any]] ?? []
+                self.status.stringValue = publications.isEmpty ? "No linked documents. Link a destination through the CLI." : "Synced"
+            case .failure(let error): self.status.stringValue = error.localizedDescription; self.status.textColor = .systemRed
+            }
+        }
     }
     @objc func formatCommand(_ sender: NSMenuItem) {
         guard gallery.isHidden && session.ready else { return }
@@ -11181,7 +11190,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
         commentsButton.title = selectedBodyRange.length > 0 && htmlReader.document == nil ? "Comment on selection" : "Comments"
     }
     func updateStatus() {
-        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = gallery.isHidden && session.ready && session.launch.file == nil && session.launch.id != nil
+        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = gallery.isHidden && session.ready && !session.dirty && !syncingPublication && session.launch.file == nil && session.launch.id != nil
         updateReviewControls()
         window.title = session.title
         window.tab.toolTip = session.launch.file ?? session.title
@@ -11590,7 +11599,7 @@ final class NativeArtifactEditor: NSObject, NSWindowDelegate, NSTextViewDelegate
     }
     func setDocumentControls(_ enabled: Bool) {
         modeControl.isEnabled = enabled; outline.isEnabled = enabled
-        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = enabled && session.launch.file == nil && session.launch.id != nil
+        window.toolbar?.items.first { $0.itemIdentifier.rawValue == "sharing" }?.isEnabled = enabled && !session.dirty && !syncingPublication && session.launch.file == nil && session.launch.id != nil
         window.toolbar?.items.first { $0.itemIdentifier.rawValue == "format" }?.isEnabled = enabled
     }
     @objc func showLibrary() {

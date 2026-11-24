@@ -313,19 +313,5 @@
 .artifact-publication p { margin: 4px 0 0; font-size: 12px; }
 .artifact-publication a { font-weight: 600; }
 .artifact-publication .button { flex-shrink: 0; min-height: 44px; }
-.artifact-publication-error, .artifact-share-dialog [role="alert"] { color: var(--danger, #b42318); }
-.artifact-share-dialog { width: min(480px, calc(100vw - 32px)); box-sizing: border-box; padding: 24px; border: 1px solid var(--line); border-radius: 18px; background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
-.artifact-share-dialog::backdrop { background: #0006; backdrop-filter: blur(4px); }
-.artifact-share-dialog h2 { margin-top: 0; }
-.artifact-share-dialog label { display: block; margin: 18px 0 8px; font-size: 13px; font-weight: 600; }
-.artifact-share-dialog input:not([type="checkbox"]), .artifact-share-dialog select { display: block; width: 100%; box-sizing: border-box; margin-top: 8px; min-height: 44px; }
-.artifact-share-dialog .artifact-share-auto { display: flex; align-items: center; gap: 10px; }
-.artifact-share-dialog .artifact-actions { justify-content: flex-end; margin-top: 24px; }
-.artifact-share-dialog [role="alert"] { overflow-wrap: anywhere; }
-@media (max-width: 600px) {
-  .artifact-document-heading .artifact-actions { flex-wrap: wrap; }
-  .artifact-publication { align-items: flex-start; flex-direction: column; }
-  .artifact-publication > .artifact-actions { width: 100%; justify-content: flex-end; }
-}
-.artifact-share-dialog input:not([type="checkbox"]), .artifact-share-dialog select { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: inherit; padding: 10px 12px; font: inherit; }
-.artifact-share-dialog .artifact-share-auto { min-height: 44px; }
+.artifact-publication-error { color: var(--danger, #b42318); }
+.artifact-publications > .button { min-height: 44px; }

@@ -133,4 +133,4 @@ does not silently reconnect its old external targets.
 
 Provider `auto_sync` sets the default for new publications (Pages defaults to
 `true`). Use `content: artifact` for [Markdown destinations such as Notion](artifacts.md#publish-to-notion);
-those appear in the artifact Share controls and default to manual sync.
+link those through `artifact share`; they default to manual sync.

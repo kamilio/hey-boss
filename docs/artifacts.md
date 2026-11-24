@@ -109,10 +109,9 @@ from a companion to work with shared documents. Phones use the same local web in
 
 ## Publish to Notion
 
-**Share** opens configured destinations. **Sync now** uploads saved Markdown;
-manual publications keep their link and show **Changes pending** after edits.
-Enable **Automatically sync saved edits** for a publication to upload on save.
-The native editor’s Share button opens these same controls in the web reader.
+Configure destinations in YAML and link documents through the CLI. The reader
+shows their links and one **Sync** button; the native editor also has **Sync**.
+Manual publications show **Changes pending** after edits.
 Comments stay in Hey Boss. Deleting an artifact leaves its remote document intact.
 Private attachment links must be replaced with externally accessible URLs first.
 
@@ -132,16 +131,15 @@ notion:
 
 The adapter uses the installed `wire` CLI and its Notion login. It uploads with
 `wire sync`, retains a stable URL, and rejects updates if the remote Markdown
-changed. Review remote edits before using **Existing link** to replace them.
+changed. Review remote edits before relinking with `--link` to replace them.
 A failed first upload is never created again automatically; recover its Notion
-link and enter it there. No Notion credentials are stored in publisher config.
+link and pass it with `--link`. No Notion credentials are stored in publisher config.
 Configure this on the artifact authority; clients and phones route there.
 
 ```sh
 hey-boss artifact providers
-hey-boss artifact share ID --provider notion
+hey-boss artifact share ID --provider notion --link NOTION_URL
 hey-boss artifact sync ID
-hey-boss artifact share ID --provider notion --auto-sync true
 ```
 
 `content` defaults to `page`. New page publications default to automatic sync;

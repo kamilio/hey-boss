@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 
 #[test]
 #[ignore = "requires Chrome and a built hey-boss CLI"]
-fn artifact_publishing_manual_link_pending_and_retry_controls() {
+fn artifact_publishing_cli_links_and_one_sync_button() {
     let f = installed_fixture();
     f.init("Publishing QA").unwrap();
     let root = f.root.path();
@@ -28,19 +28,26 @@ fn artifact_publishing_manual_link_pending_and_retry_controls() {
     let mut p = Page::open(&format!(
         "{base}/artifacts#project=named%3APublishing+QA&artifact={id}"
     ));
-    p.wait("document.querySelector('#artifact-share')!==null");
-    p.eval("document.querySelector('#artifact-share').click()")
-        .unwrap();
-    p.wait("document.querySelector('.artifact-share-dialog [type=submit]')?.disabled===false");
-    assert_eq!(
-        p.eval("document.querySelector('.artifact-share-dialog [name=auto]').checked")
-            .unwrap(),
-        false
+    p.wait("document.querySelector('#artifact-reading')!==null");
+    assert_eq!(p.eval("document.querySelector('#artifact-share')===null && document.querySelector('#artifact-sync')===null").unwrap(), true);
+    run(f.command(&[
+        "artifact",
+        "share",
+        id,
+        "--project",
+        "Publishing QA",
+        "--provider",
+        "notion",
+        "--link",
+        "https://example.com/plan",
+        "--json",
+    ]))
+    .unwrap();
+    p.command("Page.reload", json!({})).unwrap();
+    p.wait(
+        "document.querySelector('.artifact-publication a')?.textContent.includes('Open in notion')",
     );
-    p.eval("document.querySelector('.artifact-share-dialog [type=submit]').click()")
-        .unwrap();
-    p.wait("document.querySelector('.artifact-publication a')?.textContent.includes('Open in notion') && !document.querySelector('.artifact-share-dialog')");
-    assert_eq!(p.eval("document.querySelector('.artifact-publication').textContent.includes('Manual · Up to date')").unwrap(),true);
+    assert_eq!(p.eval("document.querySelector('.artifact-publication').textContent.includes('Manual · Up to date') && document.querySelectorAll('.artifact-publications button').length===1").unwrap(),true);
     run(f.command(&[
         "artifact",
         "edit",
@@ -57,12 +64,9 @@ fn artifact_publishing_manual_link_pending_and_retry_controls() {
         "document.querySelector('.artifact-publication')?.textContent.includes('Changes pending')",
     );
     fs::write(root.join("fail"), "").unwrap();
-    p.eval("document.querySelector('[data-publication]').click()")
+    p.eval("document.querySelector('#artifact-sync').click()")
         .unwrap();
-    p.wait("document.querySelector('.artifact-share-dialog [type=submit]')?.disabled===false");
-    p.eval("document.querySelector('.artifact-share-dialog [type=submit]').click()")
-        .unwrap();
-    p.wait("document.querySelector('.artifact-share-dialog [role=alert]')?.textContent.includes('Notion unavailable')");
+    p.wait("document.querySelector('.artifact-publication-error')?.textContent.includes('Notion unavailable')");
     assert_eq!(
         p.eval("document.querySelector('.artifact-publication a').getAttribute('href')")
             .unwrap(),
@@ -74,11 +78,15 @@ fn artifact_publishing_manual_link_pending_and_retry_controls() {
             json!({"width":width,"height":900,"deviceScaleFactor":1,"mobile":false}),
         )
         .unwrap();
-        assert_eq!(p.eval("document.documentElement.scrollWidth<=innerWidth+1 && (()=>{const d=document.querySelector('dialog'),r=d.getBoundingClientRect();return r.left>=0&&r.right<=innerWidth&&d.scrollWidth<=d.clientWidth+1})()").unwrap(),true);
-        screenshot(&mut p, ".notion-sync-check", &format!("sharing-{width}"));
+        assert_eq!(
+            p.eval("document.documentElement.scrollWidth<=innerWidth+1")
+                .unwrap(),
+            true
+        );
+        screenshot(&mut p, ".notion-sync-check", &format!("sync-{width}"));
     }
     fs::remove_file(root.join("fail")).unwrap();
-    p.eval("document.querySelector('.artifact-share-dialog [type=submit]').click()")
+    p.eval("document.querySelector('#artifact-sync').click()")
         .unwrap();
-    p.wait("!document.querySelector('.artifact-share-dialog') && document.querySelector('.artifact-publication').textContent.includes('Up to date')");
+    p.wait("document.querySelector('.artifact-publication').textContent.includes('Up to date') && !document.querySelector('.artifact-publication-error')");
 }

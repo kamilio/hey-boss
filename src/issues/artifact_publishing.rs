@@ -123,7 +123,7 @@ fn share(
         .unwrap_or_else(|| definition.automatic());
     if link.is_none() && existing.is_some_and(|p| p["remote_id"] == "") {
         return Err(Error::invalid(
-            "Initial publication has an uncertain result. Find its remote link and use Share → Existing link; creation was not repeated",
+            "Initial publication has an uncertain result. Find its remote link and run artifact share --provider PROVIDER --link URL; creation was not repeated",
         ));
     }
     let body = artifact["body"].as_str().unwrap();
