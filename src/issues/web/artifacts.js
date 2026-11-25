@@ -227,27 +227,30 @@ const HeyBossArtifacts = (() => {
       if(retry)$("button",panel).onclick=()=>{panel.hidden=true;retry();};
       status(editing?"Could not save · draft preserved":"");
     };
-    let boot,context,project,doc=null,editing=false,generation=0,offset=0,rows=[],anchor=null,commentsOpen=null,draftTimer,resizeEditor,resizeFrame,readingHTML,selectText,selectionFrame,writingEditor,nativeSyncTimer;
+    let boot,context,project,doc=null,editing=false,generation=0,offset=0,rows=[],anchor=null,commentsOpen=null,draftTimer,resizeEditor,resizeFrame,readingHTML,selectText,selectionFrame,writingEditor,refreshTimer;
     const editorBody=()=>writingEditor?writingEditor.content():$("#artifact-body").value;
-    async function syncFromNative() {
-      if(!doc?.id||!context||editing||document.hidden)return;
-      const current=doc.id,projectID=context.project,host=context.host,sequence=generation;
+    let refreshing=false;
+    async function refreshDocument() {
+      if(!doc?.id||!context||editing||document.hidden||refreshing||$("#artifact-document button[type=submit]:disabled"))return;
+      const current=doc,sequence=generation;
+      refreshing=true;
       try {
-        const latest=await api(context,{command:"view",id:current});
-        if(editing||sequence!==generation||context.project!==projectID||context.host!==host||doc?.id!==current||(latest.artifact.version<=doc.version&&JSON.stringify(latest.artifact.publications)===JSON.stringify(doc.publications)))return;
+        const latest=await api(context,{command:"view",id:current.id});
+        if(editing||sequence!==generation||doc!==current||$("#artifact-document button[type=submit]:disabled"))return;
+        if(latest.artifact.version===doc.version&&latest.artifact.updated_at===doc.updated_at&&JSON.stringify([latest.artifact.publications,latest.comments,latest.backlinks])===JSON.stringify([doc.publications,doc.result.comments,doc.result.backlinks]))return;
         doc=latest.artifact;doc.result=latest;
-        reading();status(`Auto-saved in native editor · revision ${doc.version}`);
-      } catch {}
+        reading(true);status(`Updated · revision ${doc.version}`);
+      } catch {} finally {refreshing=false;}
     }
-    function startNativeSync() {
-      clearInterval(nativeSyncTimer);
-      nativeSyncTimer=setInterval(syncFromNative,1500);
+    function watchDocument() {
+      clearInterval(refreshTimer);
+      refreshTimer=setInterval(refreshDocument,1500);
     }
     async function triggerNativeEdit(options={}) {
       if(mobile)return false;
       try {
         await openNative(context,options);
-        startNativeSync();
+        watchDocument();
         status("Opened in native editor · auto-saving");
         return true;
       } catch(e) {
@@ -431,7 +434,14 @@ const HeyBossArtifacts = (() => {
         return '<div class="artifact-publication"><div>'+(safeURL?'<a href="'+esc(safeURL)+'" target="_blank" rel="noopener noreferrer">Open in '+esc(p.provider)+' ↗</a>':'<strong>'+esc(p.provider)+'</strong>')+'<p class="artifact-muted">'+(p.auto_sync?'Automatic':'Manual')+' · '+(p.synced?'Up to date':p.error?'Sync failed':'Changes pending')+'</p>'+(p.error?'<p class="artifact-publication-error">'+esc(p.error)+'</p>':'')+'</div></div>';
       }).join('');
     }
-    function reading() {
+    function reading(preserve=false) {
+      const active=preserve?document.activeElement:null;
+      const focused=active?.matches("#artifact-comment, [data-reply] textarea")?{reply:active.closest("[data-reply]")?.dataset.reply,start:active.selectionStart,end:active.selectionEnd,direction:active.selectionDirection}:null;
+      const inline=preserve?$(".artifact-inline-comment")?.getBoundingClientRect():null;
+      const commentError=preserve?$(".artifact-comment-error:not([hidden])")?.textContent:null;
+      const scroll=preserve?{left:scrollX,top:scrollY}:null;
+      const highlight=inline?CSS.highlights?.get("artifact-comment-selection")?.values().next().value:null;
+      const selected=highlight?{text:highlight.toString(),range:highlight}:null;
       $("#artifact-reading #artifact-comment-form")?.remove();
       editing=false;anchor=null;status("");const v=doc.result;
       mode("reading");
@@ -453,7 +463,8 @@ const HeyBossArtifacts = (() => {
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
         <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><button class="artifact-text-button" id="artifact-comment-close" type="button" aria-label="Close comment editor" hidden>${icon("x")}</button><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button><span class="artifact-muted artifact-comment-shortcut">Shift+Enter to send</span><p class="artifact-comment-error" role="alert" hidden></p></form><div id="artifact-threads">${threads}</div></aside></div>`;
       HeyBossHTML.replaceContent($("#artifact-document"),markup,reuse?previous:null);
-      if(!reuse){const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content,context);}
+      const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;
+      const rendered=reuse?Promise.resolve():renderMarkdown(reader,content,context);
       externalLinks($("#artifact-threads"));
       HeyBossAttachments.mount($("#artifact-attachments"), {...context,target:{kind:"artifact",id:doc.id}});
       readingHTML=content;
@@ -502,7 +513,7 @@ const HeyBossArtifacts = (() => {
       $("#artifact-comment").oninput=()=>drafts.set(commentKey,{body:$("#artifact-comment").value,anchor,pending:pendingComment});
       const restored=drafts.get(commentKey)?.anchor;
       const showAnchor=()=>{$("#artifact-quote").hidden=!anchor;$("#artifact-quote").textContent=anchor?.quote||"";$("#artifact-clear-quote").hidden=!anchor;};
-      if(restored){anchor=restored;showAnchor();showComments(true);}
+      if(restored){anchor=restored;showAnchor();if(!preserve)showComments(true);}
       $("#artifact-clear-quote").onclick=()=>{if(pendingComment)return;anchor=null;showAnchor();$("#artifact-comment").dispatchEvent(new Event("input"));};
       // A selection is also used for copying. Keep the reader stable until the
       // explicit Comment action is chosen, including touch/keyboard selections.
@@ -577,6 +588,40 @@ const HeyBossArtifacts = (() => {
         target.focus({preventScroll:true});
       };
       $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);if(b.disabled||!field.value.trim())return;b.disabled=true;$(".artifact-comment-error",form).hidden=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:HeyBossUI.requestId()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}const alert=$(".artifact-comment-error",form);alert.textContent=e.message;alert.hidden=false;}};
+      if(preserve)rendered.then(()=>{
+        if(!form.isConnected)return;
+        if(commentError){const alert=$(".artifact-comment-error",form);alert.textContent=commentError;alert.hidden=false;}
+        if(inline){
+          form.classList.add("artifact-inline-comment");$("#artifact-comment-close").hidden=false;reader.append(form);
+          const rect=reader.getBoundingClientRect();
+          form.style.top=`${inline.top+scroll.top-(rect.top+scrollY)}px`;
+          form.style.left=`${Math.max(0,Math.min(inline.left-rect.left,reader.clientWidth-form.offsetWidth))}px`;
+          if(selected&&CSS.highlights){
+            let range=reuse?selected.range:null;
+            if(!range){
+              const walker=document.createTreeWalker(reader,NodeFilter.SHOW_TEXT,{acceptNode:node=>{
+                const diagram=node.parentElement.closest(".artifact-diagram, .html-preview");
+                return node.parentElement.closest("#artifact-comment-form")||diagram&&!diagram.querySelector("pre")?.contains(node)?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT;
+              }});
+              const nodes=[];let text="",node;
+              while(node=walker.nextNode()){nodes.push({node,start:text.length});text+=node.data;}
+              const matches=[];
+              for(let offset=text.indexOf(selected.text);offset>=0&&selected.text;offset=text.indexOf(selected.text,offset+1))if((!anchor?.prefix||text.slice(0,offset).endsWith(anchor.prefix))&&(!anchor?.suffix||text.slice(offset+selected.text.length).startsWith(anchor.suffix)))matches.push(offset);
+              const start=matches.length===1?matches[0]:text.indexOf(selected.text);
+              if(start>=0&&(matches.length===1||text.indexOf(selected.text,start+1)<0)){
+                const end=start+selected.text.length,first=nodes.find(n=>n.start+n.node.length>start),last=nodes.find(n=>n.start+n.node.length>=end);
+                if(first&&last){range=document.createRange();range.setStart(first.node,start-first.start);range.setEnd(last.node,end-last.start);}
+              }
+            }
+            if(range)CSS.highlights.set("artifact-comment-selection",new Highlight(range));
+          }
+        }
+        if(focused){
+          const input=focused.reply?$(`[data-reply="${focused.reply}"] textarea`):field;
+          if(input){if(focused.reply)input.closest("details").open=true;input.focus({preventScroll:true});input.setSelectionRange(focused.start,focused.end,focused.direction);}
+        }
+        window.scrollTo(scroll);
+      });
     }
     async function library(append=false) {
       const seq=++generation;status("Loading…");$("#artifact-error").hidden=true;$("#artifact-more").hidden=true;
@@ -599,14 +644,14 @@ const HeyBossArtifacts = (() => {
     }
     async function navigate() {
       $("#artifact-delete-dialog")?.close();
-      clearInterval(nativeSyncTimer);clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
+      clearInterval(refreshTimer);clearTimeout(timer);if(editing)keepDraft();editing=false;generation++;$("#artifact-error").hidden=true;
       const params=route(),id=HeyBossUI.projectId(boot.projects[0]?.id);project=boot.projects.find(p=>p.id===id||p.name===id)||boot.projects[0];
       if(!project){error(Error("No registered projects. Reconnect the supervisor to load project data."),()=>location.reload());return;}
       context={project:project.id,csrf:boot.csrf,host:params.get("host")};for(const input of [$("#artifact-new"),$("#artifact-search"),$("#artifact-archived")])input.disabled=false;picker.update(boot.projects,project);doc=null;commentsOpen=null;
       $("#nav-artifacts").setAttribute("aria-current","page");
       if(mobile){$("#quick-issue-open").hidden=true;$("#nav-inbox").href="/";$("#nav-issues").href="/#issues";$("#nav-workers").hidden=true;}
       const resource=HeyBossRoutes.resolve();const idDoc=resource?.entity==="artifact"?resource.id:"";
-      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;$("#artifact-new").hidden=v.artifacts_enabled===false;reading();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
+      if(idDoc){mode("reading");$("#artifact-document").innerHTML='<div class="artifact-loading artifact-loading-document" aria-hidden="true"><span></span><span></span><span></span></div>';const seq=++generation;status("Loading…");try{const v=await api(context,{command:"view",id:idDoc});if(seq!==generation)return;doc=v.artifact;doc.result=v;$("#artifact-new").hidden=v.artifacts_enabled===false;reading();watchDocument();status("");}catch(e){if(seq===generation){$("#artifact-document").innerHTML=`<a class="back-link" href="${esc(libraryURL())}">${icon("arrow-left")}All artifacts</a>`;error(e,navigate);}}}
       else if(params.get("new")==="1"){
         const seq=++generation;mode("library");status("Loading…");
         try{const value=await api(context,{command:"list",offset:0});if(seq!==generation)return;
@@ -624,8 +669,10 @@ const HeyBossArtifacts = (() => {
     document.addEventListener("selectionchange",()=>{cancelAnimationFrame(selectionFrame);selectionFrame=requestAnimationFrame(()=>selectText?.());});
     document.addEventListener("scroll",()=>{const button=$("#artifact-selection-comment");if(button)button.hidden=true;},{passive:true});
     window.addEventListener("hashchange",navigate);window.addEventListener("beforeunload",()=>keepDraft());
-    window.addEventListener("focus",()=>{if(doc?.id)syncFromNative();else if(context&&!editing)library();});
-    window.addEventListener("pagehide",()=>clearInterval(nativeSyncTimer));
+    window.addEventListener("focus",()=>{if(doc?.id)refreshDocument();else if(context&&!editing)library();});
+    window.addEventListener("pagehide",()=>clearInterval(refreshTimer));
+    window.addEventListener("pageshow",()=>{if(doc?.id)watchDocument();});
+    document.addEventListener("visibilitychange",()=>{if(!document.hidden)refreshDocument();});
     document.addEventListener("keydown",e=>{
       if((e.metaKey||e.ctrlKey)&&!e.shiftKey&&!e.altKey&&e.key.toLowerCase()==="e"&&doc&&!editing){
         e.preventDefault();

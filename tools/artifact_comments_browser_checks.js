@@ -74,6 +74,25 @@ async page => {
     await page.waitForFunction(()=>document.querySelector('#artifact-status').textContent==='Reply saved');
     check(requests.at(-1).operation.operation.parent===1,'Reply shortcut keeps the parent thread');
   }
+  await page.locator('#artifact-comments-close').click();
+  await select('center');await page.locator('#artifact-selection-comment').click();
+  await page.locator('#artifact-comment').fill('Keep this draft while the document changes');
+  await page.locator('#artifact-comment').evaluate(e=>e.setSelectionRange(5,9));
+  const scroll=await page.evaluate(()=>scrollY);
+  artifact.title='Updated by another editor';artifact.version++;
+  artifact.body_html+='<p>New content from another editor.</p>';
+  await page.waitForFunction(()=>document.querySelector('#artifact-title')===null&&document.querySelector('.artifact-document-heading h1')?.textContent==='Updated by another editor');
+  check(await page.locator('#artifact-reading').innerText().then(s=>s.includes('New content from another editor.')),'Document changes render without reloading');
+  check(await page.locator('#artifact-comment').evaluate(e=>e===document.activeElement&&e.value==='Keep this draft while the document changes'&&e.selectionStart===5&&e.selectionEnd===9),'Refresh preserves the active draft, focus, and caret');
+  check(await page.evaluate(scroll=>Math.abs(scrollY-scroll)<2,scroll),'Refresh preserves reading position');
+  check(await page.evaluate(()=>CSS.highlights.get('artifact-comment-selection')?.size===1),'Refresh restores the selected passage highlight');
+  comments.push({id:comments.length+1,author:'boss',body:'Another reviewer commented',body_html:'<p>Another reviewer commented</p>',created_at:new Date().toISOString()});
+  await page.waitForFunction(()=>document.querySelector('#artifact-threads')?.textContent.includes('Another reviewer commented'));
+  check(await page.locator('#artifact-comment').evaluate(e=>e===document.activeElement&&e.selectionStart===5),'New comments render without interrupting typing');
+  await page.locator('#artifact-comment').evaluate(e=>e.dataset.unchanged='true');
+  await page.waitForResponse(response=>response.url().endsWith('/api/action')&&response.request().postDataJSON()?.operation?.operation?.command==='view');
+  await page.evaluate(()=>new Promise(requestAnimationFrame));
+  check(await page.locator('#artifact-comment').getAttribute('data-unchanged')==='true','Unchanged documents do not re-render');
   check(errors.length===0,'No browser errors');
   await page.unroute('**/api/action',route);
   return checks;
