@@ -41,6 +41,8 @@ async page => {
       const before=await page.evaluate(()=>({scroll:scrollY,width:document.querySelector('#artifact-reading').offsetWidth}));
       await page.locator('#artifact-selection-comment').click();
       check(await page.locator('#artifact-reading #artifact-comment').evaluate(e=>e===document.activeElement),`${width}: selection focuses inline composer`);
+      check(!await page.locator('#artifact-quote').isVisible(),'Inline composer does not repeat the selected text');
+      check(await page.evaluate(()=>CSS.highlights.get('artifact-comment-selection')?.size===1),'Passage stays highlighted after the textarea receives focus');
       check(await page.evaluate(before=>Math.abs(scrollY-before.scroll)<2&&document.querySelector('#artifact-reading').offsetWidth===before.width,before),`${width}: opening preserves scroll and document width (${position})`);
       const field=page.locator('#artifact-comment');
       check(await field.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.documentElement.scrollWidth<=innerWidth}),`${width}: input remains inside viewport`);
@@ -50,6 +52,7 @@ async page => {
       await field.dispatchEvent('keydown',{key:'Enter',shiftKey:true,isComposing:true});
       check(requests.length===count,'IME composition does not submit');
       await field.press('Escape');
+      check(await page.evaluate(()=>!CSS.highlights.has('artifact-comment-selection')),'Closing clears the passage highlight');
       check(await field.inputValue()==='First line\na','Escape preserves draft');
       check(await page.evaluate(before=>Math.abs(scrollY-before.scroll)<2,before),'Escape preserves scroll');
       await select(position);await page.locator('#artifact-selection-comment').click();

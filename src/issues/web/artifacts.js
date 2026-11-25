@@ -214,6 +214,7 @@ const HeyBossArtifacts = (() => {
     const date=value=>new Date(value).toLocaleDateString(undefined,{month:"short",day:"numeric",...(new Date(value).getFullYear()!==new Date().getFullYear()?{year:"numeric"}:{})});
     const libraryURL=()=>url(context.project,null,context.host?{host:context.host}:{});
     function mode(value) {
+      CSS.highlights?.delete("artifact-comment-selection");
       selectText=null;writingEditor?.destroy();writingEditor=null;
       $("#artifact-main").dataset.mode=value;
       $("#artifact-heading").hidden=value!=="library";
@@ -506,9 +507,10 @@ const HeyBossArtifacts = (() => {
       // A selection is also used for copying. Keep the reader stable until the
       // explicit Comment action is chosen, including touch/keyboard selections.
       const selectionButton=$("#artifact-selection-comment");
-      let candidate=null,selectionRect;
+      let candidate=null,selectionRange;
       const form=$("#artifact-comment-form"),field=$("#artifact-comment");
       const closeComposer=()=>{
+        CSS.highlights?.delete("artifact-comment-selection");
         form.classList.remove("artifact-inline-comment");form.removeAttribute("style");
         $("#artifact-threads").before(form);$("#artifact-comment-close").hidden=true;
         $("#artifact-reading").tabIndex=-1;$("#artifact-reading").focus({preventScroll:true});
@@ -537,7 +539,7 @@ const HeyBossArtifacts = (() => {
         const before=range.cloneRange();before.selectNodeContents(reader);before.setEnd(range.startContainer,range.startOffset);
         const after=range.cloneRange();after.selectNodeContents(reader);after.setStart(range.endContainer,range.endOffset);
         candidate={quote,prefix:Array.from(anchorText(before).slice(-160)).slice(-80).join(""),suffix:Array.from(anchorText(after).slice(0,160)).slice(0,80).join("")};
-        selectionRect=range.getBoundingClientRect();
+        selectionRange=range.cloneRange();
         selectionButton.hidden=false;
         if(!matchMedia("(max-width: 900px)").matches){
           const rect=range.getBoundingClientRect();
@@ -551,6 +553,8 @@ const HeyBossArtifacts = (() => {
         if(!candidate)return;
         anchor=candidate;candidate=null;selectionButton.hidden=true;showAnchor();
         $("#artifact-comment").dispatchEvent(new Event("input"));
+        const selectionRect=selectionRange.getBoundingClientRect();
+        if(CSS.highlights)CSS.highlights.set("artifact-comment-selection",new Highlight(selectionRange));
         const reader=$("#artifact-reading"),rect=reader.getBoundingClientRect();
         form.classList.add("artifact-inline-comment");$("#artifact-comment-close").hidden=false;reader.append(form);
         const height=form.offsetHeight,width=form.offsetWidth;
