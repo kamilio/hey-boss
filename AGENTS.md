@@ -10,7 +10,7 @@
 - No useless params and config, it's easier to change code. 
 - Install changed components only on machines that use them. For Hey Talk–only changes, use `packages/hey-talk/install.sh` on Macs with Hey Talk; skip `hey-boss upgrade`.
 - Use Rust if possible, NO PYTHON
-- The user writes prompts. Request prompt wording through `hey-boss notif ask`; do not invent or expand it.
+- Write concise, simple prompts. Do not ask for wording unless essential information is missing.
 - Store all prompt text in Markdown (`.md`) files. Code must load prompts from those files, never embed them.
 
 - When building Swift UI, visually check rounded window corners: no square backing, borders, or shadows outside the rounded glass surface.
