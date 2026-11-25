@@ -46,8 +46,9 @@ const HeyBossArtifacts = (() => {
     return value;
   }
   function anchorText(range) {
-    if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram, .html-preview"))return range.toString();
+    if(!range.commonAncestorContainer.querySelector?.(".artifact-diagram, .html-preview, #artifact-comment-form"))return range.toString();
     const fragment=range.cloneContents();
+    fragment.querySelector("#artifact-comment-form")?.remove();
     // The server anchors against rendered Markdown. Keep original code text,
     // excluding generated SVG labels and diagram controls from that context.
     for(const diagram of fragment.querySelectorAll(".artifact-diagram, .html-preview")){
@@ -430,6 +431,7 @@ const HeyBossArtifacts = (() => {
       }).join('');
     }
     function reading() {
+      $("#artifact-reading #artifact-comment-form")?.remove();
       editing=false;anchor=null;status("");const v=doc.result;
       mode("reading");
       const content=doc.body_html||'<p class="artifact-muted">This document is empty. Choose Edit to start writing.</p>';
@@ -438,7 +440,7 @@ const HeyBossArtifacts = (() => {
       const replies=new Map();
       for(const c of v.comments)if(c.parent){if(!replies.has(c.parent))replies.set(c.parent,[]);replies.get(c.parent).push(c);}
       const threads=v.comments.filter(c=>!c.parent).map(c=>{
-        const body=`${c.quote?`<blockquote>${esc(c.quote)}</blockquote>${c.outdated?'<p class="artifact-muted">Outdated selection · discussion preserved</p>':""}`:""}${comment(c)}${(replies.get(c.id)||[]).map(r=>`<div class="reply">${comment(r)}</div>`).join("")}<div class="artifact-thread-actions"><details class="artifact-reply"><summary>Reply</summary><form data-reply="${c.id}"><textarea aria-label="Reply to comment" required placeholder="Write a reply…" rows="3">${esc(drafts.get(`${draftKey(doc.id)}:reply:${c.id}`)?.body||"")}</textarea><button class="button" type="submit">Reply</button></form></details><button class="artifact-text-button" type="button" data-resolve="${c.id}" data-resolved="${!c.resolved}">${c.resolved?"Reopen thread":"Resolve"}</button></div>`;
+        const body=`${c.quote?`<blockquote>${esc(c.quote)}</blockquote>${c.outdated?'<p class="artifact-muted">Outdated selection · discussion preserved</p>':""}`:""}${comment(c)}${(replies.get(c.id)||[]).map(r=>`<div class="reply">${comment(r)}</div>`).join("")}<div class="artifact-thread-actions"><details class="artifact-reply"><summary>Reply</summary><form data-reply="${c.id}"><textarea aria-label="Reply to comment" required placeholder="Write a reply…" rows="3">${esc(drafts.get(`${draftKey(doc.id)}:reply:${c.id}`)?.body||"")}</textarea><button class="button" type="submit" title="Shift+Enter to send">Reply</button></form></details><button class="artifact-text-button" type="button" data-resolve="${c.id}" data-resolved="${!c.resolved}">${c.resolved?"Reopen thread":"Resolve"}</button></div>`;
         return c.resolved?`<details class="artifact-thread resolved"><summary>Resolved · ${esc(c.body.slice(0,70))}</summary>${body}</details>`:`<section class="artifact-thread">${body}</section>`;
       }).join("");
       const backlinks=v.backlinks.map(l=>`<li>${l.title?`<a href="${esc(resourceURL(context,l.target))}">${esc(l.title)}${l.kind==="issue"?` · #${esc(l.target)}`:""}</a>`:`<span class="artifact-muted">Removed ${esc(l.kind)} · ${esc(l.target)}</span>`}</li>`).join("");
@@ -448,7 +450,7 @@ const HeyBossArtifacts = (() => {
         <header class="artifact-document-heading"><div><h1>${esc(doc.title)}</h1><p class="artifact-muted">Updated ${esc(date(doc.updated_at))} · Revision ${doc.version}${doc.archived?' <span class="artifact-badge">Archived</span>':""}</p></div><div class="artifact-actions"><button class="button" id="artifact-comments-toggle" aria-expanded="${commentsOpen}" aria-controls="artifact-comments">${icon("comment")}Comments${commentCount?` <span class="artifact-count">${commentCount}</span>`:""}</button><button class="button primary" id="artifact-edit">${icon("edit")}Edit</button><details class="artifact-menu"><summary class="button" aria-label="More actions"><span aria-hidden="true">•••</span><span class="artifact-sr-only">More actions</span></summary><div class="artifact-menu-panel">${mobile?"":`<button id="artifact-edit-browser" type="button">${icon("edit")}Edit in browser</button>`}<button id="artifact-export" type="button">${icon("docs")}Export Markdown</button><button id="artifact-archive" type="button">${icon(doc.archived?"refresh":"archive")}${doc.archived?"Restore":"Archive"}</button><button id="artifact-delete" class="artifact-danger" type="button">${icon("trash")}Delete permanently…</button></div></details></div></header>
         <section class="artifact-publications" aria-label="External publications">${publicationRows()}${doc.publications?.length?'<button class="button" id="artifact-sync" type="button">Sync</button>':""}</section>
         <button class="button primary artifact-selection-action" id="artifact-selection-comment" type="button" aria-label="Comment on selection" hidden>${icon("comment")}Comment on selection</button>
-        <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button></form><div id="artifact-threads">${threads}</div></aside></div>`;
+        <div class="artifact-layout${commentsOpen?"":" comments-hidden"}"><div class="artifact-content"><article id="artifact-reading" class="markdown artifact-reading"></article><section id="artifact-attachments"></section>${HeyBossOrigin.card(doc.origin,context.project,author)}${backlinks?`<section class="artifact-backlinks"><h2>Linked from</h2><ul class="artifact-links">${backlinks}</ul></section>`:""}</div><aside id="artifact-comments" aria-label="Document comments" ${commentsOpen?"":"hidden"}><div class="artifact-comments-heading"><h2>Comments</h2><button class="artifact-text-button" type="button" id="artifact-comments-close" aria-label="Close comments">${icon("x")}</button></div><p class="artifact-muted artifact-comment-hint">Select a passage to comment on it.</p><form id="artifact-comment-form"><button class="artifact-text-button" id="artifact-comment-close" type="button" aria-label="Close comment editor" hidden>${icon("x")}</button><blockquote id="artifact-quote" class="artifact-quote" hidden></blockquote><button class="artifact-text-button" type="button" id="artifact-clear-quote" hidden>Clear selection</button><label class="artifact-sr-only" for="artifact-comment">Add a comment</label><textarea id="artifact-comment" required rows="3" placeholder="Add a comment…"></textarea><button class="button primary" type="submit">Comment</button><span class="artifact-muted artifact-comment-shortcut">Shift+Enter to send</span><p class="artifact-comment-error" role="alert" hidden></p></form><div id="artifact-threads">${threads}</div></aside></div>`;
       HeyBossHTML.replaceContent($("#artifact-document"),markup,reuse?previous:null);
       if(!reuse){const reader=$("#artifact-reading");reader.dataset.artifact=doc.id;renderMarkdown(reader,content,context);}
       externalLinks($("#artifact-threads"));
@@ -457,6 +459,7 @@ const HeyBossArtifacts = (() => {
       const showComments=open=>{commentsOpen=open;$("#artifact-comments").hidden=!open;$(".artifact-layout").classList.toggle("comments-hidden",!open);$("#artifact-comments-toggle").setAttribute("aria-expanded",String(open));};
       $("#artifact-comments-toggle").onclick=()=>{
         showComments(!commentsOpen);
+        if(commentsOpen)$("#artifact-comment").focus({preventScroll:true});
         if(commentsOpen&&matchMedia("(max-width: 900px)").matches)$("#artifact-comments").scrollIntoView({behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"instant":"smooth",block:"start"});
       };
       $("#artifact-comments-close").onclick=()=>{showComments(false);if(matchMedia("(max-width: 900px)").matches)$(".artifact-document-heading").scrollIntoView({block:"start"});$("#artifact-comments-toggle").focus({preventScroll:true});};
@@ -482,6 +485,7 @@ const HeyBossArtifacts = (() => {
         field.readOnly=!!pending;
         const keep=()=>drafts.set(key,{body:field.value,pending});
         field.oninput=keep;
+        form.parentElement.ontoggle=()=>{if(form.parentElement.open)field.focus({preventScroll:true});};
         form.onsubmit=async e=>{
           e.preventDefault();if(button.disabled||!field.value.trim())return;
           button.disabled=true;
@@ -496,13 +500,26 @@ const HeyBossArtifacts = (() => {
       $("#artifact-comment").value=drafts.get(commentKey)?.body||"";$("#artifact-comment").readOnly=!!pendingComment;
       $("#artifact-comment").oninput=()=>drafts.set(commentKey,{body:$("#artifact-comment").value,anchor,pending:pendingComment});
       const restored=drafts.get(commentKey)?.anchor;
-      const showAnchor=()=>{if(anchor)showComments(true);$("#artifact-quote").hidden=!anchor;$("#artifact-quote").textContent=anchor?.quote||"";$("#artifact-clear-quote").hidden=!anchor;};
-      if(restored){anchor=restored;showAnchor();}
+      const showAnchor=()=>{$("#artifact-quote").hidden=!anchor;$("#artifact-quote").textContent=anchor?.quote||"";$("#artifact-clear-quote").hidden=!anchor;};
+      if(restored){anchor=restored;showAnchor();showComments(true);}
       $("#artifact-clear-quote").onclick=()=>{if(pendingComment)return;anchor=null;showAnchor();$("#artifact-comment").dispatchEvent(new Event("input"));};
       // A selection is also used for copying. Keep the reader stable until the
       // explicit Comment action is chosen, including touch/keyboard selections.
       const selectionButton=$("#artifact-selection-comment");
-      let candidate=null;
+      let candidate=null,selectionRect;
+      const form=$("#artifact-comment-form"),field=$("#artifact-comment");
+      const closeComposer=()=>{
+        form.classList.remove("artifact-inline-comment");form.removeAttribute("style");
+        $("#artifact-threads").before(form);$("#artifact-comment-close").hidden=true;
+        $("#artifact-reading").tabIndex=-1;$("#artifact-reading").focus({preventScroll:true});
+      };
+      $("#artifact-comment-close").onclick=closeComposer;
+      form.onkeydown=e=>{if(e.key==="Escape"&&form.classList.contains("artifact-inline-comment")){e.preventDefault();closeComposer();}};
+      for(const input of $("#artifact-document").querySelectorAll("#artifact-comment, [data-reply] textarea"))input.onkeydown=e=>{
+        if(e.key!=="Enter"||!e.shiftKey||e.isComposing||e.repeat)return;
+        e.preventDefault();
+        if(!$("button[type=submit]",input.form).disabled)input.form.requestSubmit();
+      };
       const select=()=>{
         const selection=getSelection(),reader=$("#artifact-reading");
         if(document.activeElement===selectionButton)return;
@@ -510,6 +527,7 @@ const HeyBossArtifacts = (() => {
         if(!selection.rangeCount||selection.isCollapsed||pendingComment||reader.hasAttribute("aria-busy"))return;
         const range=selection.getRangeAt(0);
         if(!reader.contains(range.commonAncestorContainer))return;
+        if(form.contains(range.startContainer)||form.contains(range.endContainer))return;
         for(const node of [range.startContainer,range.endContainer]){
           const diagram=(node.nodeType===1?node:node.parentElement)?.closest(".artifact-diagram, .html-preview");
           if(diagram&&!diagram.querySelector("pre").contains(node))return;
@@ -519,6 +537,7 @@ const HeyBossArtifacts = (() => {
         const before=range.cloneRange();before.selectNodeContents(reader);before.setEnd(range.startContainer,range.startOffset);
         const after=range.cloneRange();after.selectNodeContents(reader);after.setStart(range.endContainer,range.endOffset);
         candidate={quote,prefix:Array.from(anchorText(before).slice(-160)).slice(-80).join(""),suffix:Array.from(anchorText(after).slice(0,160)).slice(0,80).join("")};
+        selectionRect=range.getBoundingClientRect();
         selectionButton.hidden=false;
         if(!matchMedia("(max-width: 900px)").matches){
           const rect=range.getBoundingClientRect();
@@ -532,10 +551,13 @@ const HeyBossArtifacts = (() => {
         if(!candidate)return;
         anchor=candidate;candidate=null;selectionButton.hidden=true;showAnchor();
         $("#artifact-comment").dispatchEvent(new Event("input"));
-        // The sidebar can be above a passage selected in a long document.
-        // Bring the quoted composer into view before moving keyboard focus.
-        $("#artifact-comment-form").scrollIntoView({block:"center"});
-        $("#artifact-comment").focus();
+        const reader=$("#artifact-reading"),rect=reader.getBoundingClientRect();
+        form.classList.add("artifact-inline-comment");$("#artifact-comment-close").hidden=false;reader.append(form);
+        const height=form.offsetHeight,width=form.offsetWidth;
+        const top=selectionRect.bottom+8+height<=innerHeight-12?selectionRect.bottom+8:Math.max(12,selectionRect.top-height-8);
+        form.style.top=`${top-rect.top+reader.scrollTop}px`;
+        form.style.left=`${Math.max(0,Math.min(selectionRect.left-rect.left,reader.clientWidth-width))}px`;
+        field.focus({preventScroll:true});
         getSelection().removeAllRanges();
       };
       selectText=select;$("#artifact-reading").onpointerup=select;$("#artifact-reading").onkeyup=select;
@@ -550,7 +572,7 @@ const HeyBossArtifacts = (() => {
         if(!target.hasAttribute("tabindex")){target.tabIndex=-1;target.addEventListener("blur",()=>target.removeAttribute("tabindex"),{once:true});}
         target.focus({preventScroll:true});
       };
-      $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);b.disabled=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:HeyBossUI.requestId()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}error(e);}};
+      $("#artifact-comment-form").onsubmit=async e=>{e.preventDefault();const b=$("button[type=submit]",e.currentTarget);if(b.disabled||!field.value.trim())return;b.disabled=true;$(".artifact-comment-error",form).hidden=true;pendingComment ||= {operation:{command:"comment",id:doc.id,body:$("#artifact-comment").value,...(anchor||{})},requestID:HeyBossUI.requestId()};$("#artifact-comment").readOnly=true;$("#artifact-comment").dispatchEvent(new Event("input"));try{const r=await api(context,pendingComment.operation,pendingComment.requestID);drafts.remove(commentKey);if(!b.isConnected)return;doc=r.artifact;doc.result=r;reading();status("Comment saved");}catch(e){if(!b.isConnected)return;b.disabled=false;if(!e.uncertain){pendingComment=null;$("#artifact-comment").readOnly=false;$("#artifact-comment").dispatchEvent(new Event("input"));}const alert=$(".artifact-comment-error",form);alert.textContent=e.message;alert.hidden=false;}};
     }
     async function library(append=false) {
       const seq=++generation;status("Loading…");$("#artifact-error").hidden=true;$("#artifact-more").hidden=true;

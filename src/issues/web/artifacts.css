@@ -191,6 +191,12 @@
 #artifact-comment-form > button[type="submit"], .artifact-reply button { margin-top: 9px; }
 #artifact-comment-form > button[type="submit"] { min-height: 34px; font-size: 12px; }
 #artifact-comment-form { padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.artifact-reading { position: relative; }
+#artifact-comment-form.artifact-inline-comment { position: absolute; z-index: 6; width: min(420px, 100%); max-height: calc(100dvh - 24px); overflow: auto; margin: 0; padding: 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--solid); box-shadow: var(--shadow); line-height: 1.5; }
+.artifact-inline-comment .artifact-quote { max-height: 72px; margin-right: 28px; }
+#artifact-comment-close { position: absolute; top: 8px; right: 8px; width: 28px; }
+.artifact-comment-shortcut { margin-left: 12px; font-size: 11px; }
+.artifact-comment-error { margin: 12px 0 0; font-size: 12px; color: var(--danger); }
 #artifact-clear-quote { margin: -4px 0 10px; }
 .artifact-editor { max-width: 960px; margin: 0 auto; }
 .artifact-editor-toolbar { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; padding: 12px 0; position: sticky; top: 0; z-index: 4; background: var(--bg); }
