@@ -12216,15 +12216,7 @@ struct Daemon {
                         if #available(macOS 26, *) {
                             onMain {
                                 if request.command.hasPrefix("chat_") {
-                                    // The same socket is forwarded over SSH to companions. Only the installed local CLI owns desktop chats.
-                                    var pid: pid_t = 0, length = socklen_t(MemoryLayout<pid_t>.size)
-                                    var path = [CChar](repeating: 0, count: 4096)
-                                    guard let cli = ProcessInfo.processInfo.environment["HEY_BOSS_CLI_PATH"],
-                                          getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &length) == 0,
-                                          proc_pidpath(pid, &path, UInt32(path.count)) > 0,
-                                          String(cString: path) == URL(fileURLWithPath: cli).resolvingSymlinksInPath().path else {
-                                        reply.send(["status":"error","error":"Use the installed CLI on this Mac."]); return
-                                    }
+                                    // The owner-private socket also serves authenticated SSH companions.
                                     overview.currentConversation().handleChat(request, reply); return
                                 }
                                 if request.command == "conversation_pause" || request.command == "conversation_resume" {
