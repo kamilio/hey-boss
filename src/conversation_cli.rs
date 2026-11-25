@@ -26,13 +26,13 @@ mod web;
 fn request(body: Value) -> io::Result<BufReader<UnixStream>> {
     let exe = std::env::current_exe()?.canonicalize()?;
     super::initialize(&exe)?;
-    if exe.with_file_name("hey-boss.companion").exists() {
-        return Err(io::Error::other(
-            "Run this command on the Mac with Hey Boss Conversations",
-        ));
-    }
     let state = fs::read_to_string(exe.with_file_name("hey-boss.state"))?;
-    let mut stream = UnixStream::connect(Path::new(state.trim_end()).join("daemon.sock"))?;
+    let state = Path::new(state.trim_end());
+    let mut stream = if exe.with_file_name("hey-boss.companion").exists() {
+        super::broker::connect_bridge(state, true).map_err(io::Error::other)?
+    } else {
+        UnixStream::connect(state.join("daemon.sock"))?
+    };
     serde_json::to_writer(&mut stream, &body)?;
     stream.shutdown(Shutdown::Write)?;
     Ok(BufReader::new(stream))

@@ -93,7 +93,7 @@ fn forward_live(
     forward_connected(&mut stream, state, request, caller)
 }
 
-fn connect_bridge(state: &Path, desktop_action: bool) -> Result<UnixStream, String> {
+pub(crate) fn connect_bridge(state: &Path, desktop_action: bool) -> Result<UnixStream, String> {
     if std::fs::read_to_string(state.join("bridge-protocol"))
         .ok()
         .as_deref()
