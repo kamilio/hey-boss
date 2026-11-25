@@ -2,13 +2,13 @@ use crate::{emit, field, plugins::Plugins};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
     collections::HashMap,
     fs,
     io::Write,
     os::unix::fs::DirBuilderExt,
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Mutex,
 };
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -23,7 +23,7 @@ use uuid::Uuid;
 pub struct Delegates {
     directory: PathBuf,
     ready: mpsc::UnboundedSender<Value>,
-    tasks: RefCell<HashMap<String, Option<AbortHandle>>>,
+    tasks: Mutex<HashMap<String, Option<AbortHandle>>>,
 }
 impl Delegates {
     pub fn open(state: &Path) -> Result<(Self, mpsc::UnboundedReceiver<Value>)> {
@@ -64,16 +64,16 @@ impl Delegates {
             Self {
                 directory,
                 ready,
-                tasks: RefCell::new(tasks),
+                tasks: Mutex::new(tasks),
             },
             receiver,
         ))
     }
     pub fn pending(&self) -> bool {
-        !self.tasks.borrow().is_empty()
+        !self.tasks.lock().unwrap().is_empty()
     }
     pub fn cancel(&self) -> Result<()> {
-        let tasks: Vec<_> = self.tasks.borrow_mut().drain().collect();
+        let tasks: Vec<_> = self.tasks.lock().unwrap().drain().collect();
         for (id, task) in tasks {
             if let Some(task) = task {
                 task.abort();
@@ -102,15 +102,21 @@ impl Delegates {
         if descendants.exists() {
             fs::remove_dir_all(descendants)?;
         }
-        self.tasks.borrow_mut().remove(id);
+        self.tasks.lock().unwrap().remove(id);
         Ok(())
     }
-    pub fn start(&self, tools: &Plugins<'_>, args: &Value, history: &[Value]) -> Result<Value> {
+    pub fn start(
+        &self,
+        tools: &Plugins<'_>,
+        url: &str,
+        args: &Value,
+        history: &[Value],
+    ) -> Result<Value> {
         let provider = args
             .get("provider")
             .map(|_| field(args, "provider"))
             .transpose()?
-            .unwrap_or("t3");
+            .unwrap_or("poe");
         ensure!(
             matches!(provider, "t3" | "codex" | "claude" | "pi" | "poe"),
             "Unknown delegate provider"
@@ -123,42 +129,18 @@ impl Delegates {
             args["fork"] != true || provider == "poe",
             "Only Poe delegates can fork this conversation"
         );
+        ensure!(
+            args.get("description").is_none_or(Value::is_string),
+            "description must be a string"
+        );
         let id = Uuid::new_v4().to_string();
-        let mut item = json!({"id":id,"provider":provider,"request":field(args,"request")?,"description":field(args,"description")?,"status":"running"});
+        let mut item = json!({"id":id,"provider":provider,"request":field(args,"request")?,"description":args["description"].as_str().unwrap_or(""),"status":"running"});
         fs::DirBuilder::new()
             .recursive(true)
             .mode(0o700)
             .create(&self.directory)?;
         let record = self.directory.join(format!("{id}.json"));
         save(&record, &item)?;
-        let mut cmd = if provider == "t3" {
-            let mut cmd = Command::new("node");
-            cmd.arg(tools.resources.join("hey-t3.mjs"))
-                .arg("--conversation");
-            cmd
-        } else if provider == "poe" {
-            let mut cmd = Command::new(tools.resources.join("conversation-job"));
-            cmd.arg(self.directory.join(format!("{id}.agent.json")));
-            cmd
-        } else {
-            let mut cmd = Command::new(
-                std::env::var_os("HEY_BOSS_CLI_PATH").unwrap_or_else(|| "hey-boss".into()),
-            );
-            cmd.args(["workspace-chat", "--provider", provider]);
-            cmd
-        };
-        let child = cmd
-            .current_dir(tools.cwd)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn();
-        let mut child = match child {
-            Ok(child) => child,
-            Err(error) => {
-                fs::remove_file(record)?;
-                return Err(error).context("Could not launch delegate");
-            }
-        };
         let mut request = json!({"turn":item["request"]});
         if args["fork"] == true {
             let mut messages = history.to_vec();
@@ -175,10 +157,83 @@ impl Delegates {
             }
             request["history"] = json!(messages);
         }
+        let child = if provider == "poe" {
+            None
+        } else {
+            let mut cmd = if provider == "t3" {
+                let mut cmd = Command::new("node");
+                cmd.arg(tools.resources.join("hey-t3.mjs"))
+                    .arg("--conversation");
+                cmd
+            } else {
+                let mut cmd = Command::new(
+                    std::env::var_os("HEY_BOSS_CLI_PATH").unwrap_or_else(|| "hey-boss".into()),
+                );
+                cmd.args(["workspace-chat", "--provider", provider]);
+                cmd
+            };
+            match cmd
+                .current_dir(tools.cwd)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => Some(child),
+                Err(error) => {
+                    fs::remove_file(record)?;
+                    return Err(error).context("Could not launch delegate");
+                }
+            }
+        };
+        let state = self.directory.join(format!("{id}.agent.json"));
+        let (home, cwd, login, resources, http, url) = (
+            tools.home.to_owned(),
+            tools.cwd.to_owned(),
+            tools.login.to_owned(),
+            tools.resources.to_owned(),
+            tools.http.clone(),
+            url.to_owned(),
+        );
         let ready = self.ready.clone();
+        let parent_events = crate::EVENTS.try_with(Clone::clone).ok();
         let task_id = id.clone();
         let task = tokio::spawn(async move {
+            let mut child = child;
             let result: Result<String> = async {
+                let Some(child) = child.as_mut() else {
+                    let (events, mut output) = mpsc::unbounded_channel();
+                    let (_ack, mut acks) = mpsc::unbounded_channel();
+                    let (delegates, mut completions) = Delegates::open(&state)?;
+                    let mut tools = Plugins {
+                        delegates: Some(&delegates),
+                        home: &home,
+                        cwd: &cwd,
+                        login: &login,
+                        resources: &resources,
+                        http: &http,
+                        focus: None,
+                        acks: &mut acks,
+                    };
+                    crate::EVENTS
+                        .scope(
+                            events,
+                            crate::agent::run_job(
+                                &state,
+                                &url,
+                                request,
+                                &mut tools,
+                                &mut completions,
+                            ),
+                        )
+                        .await?;
+                    let mut final_output = None;
+                    while let Ok(event) = output.try_recv() {
+                        if let Some(turn) = event.get("TurnCompleted") {
+                            final_output = turn["output"].as_str().map(str::to_owned);
+                        }
+                    }
+                    return final_output.context("Delegate finished without a final response");
+                };
                 let mut input = child.stdin.take().context("Missing delegate input")?;
                 input.write_all(format!("{request}\n").as_bytes()).await?;
                 let mut lines =
@@ -192,7 +247,12 @@ impl Delegates {
                     if let Some(link) = event["Session"]["link"].as_str() {
                         item["link"] = json!(link);
                         save(&record, &item)?;
-                        emit(json!({"ToolStarted":{"id":task_id,"input":item}}))?;
+                        let event = json!({"ToolStarted":{"id":task_id,"input":item}});
+                        if let Some(events) = &parent_events {
+                            events.send(event)?;
+                        } else {
+                            emit(event)?;
+                        }
                     }
                     if event.get("Approval").is_some() {
                         bail!("The child requested approval; no permission was granted.");
@@ -222,20 +282,23 @@ impl Delegates {
                     json!(format!("Could not save delegate result: {error:#}"));
             }
             let _ = ready.send(item);
-            let _ = child.wait().await;
+            if let Some(child) = child.as_mut() {
+                let _ = child.wait().await;
+            }
         });
         self.tasks
-            .borrow_mut()
+            .lock()
+            .unwrap()
             .insert(id.clone(), Some(task.abort_handle()));
         emit(
-            json!({"ToolStarted":{"id":id,"input":{"provider":provider,"request":args["request"],"description":args["description"]}}}),
+            json!({"ToolStarted":{"id":id,"input":{"provider":provider,"request":args["request"],"description":args["description"].as_str().unwrap_or("")}}}),
         )?;
         Ok(json!({"id":id,"status":"running"}))
     }
 }
 impl Drop for Delegates {
     fn drop(&mut self) {
-        for task in self.tasks.get_mut().values().flatten() {
+        for task in self.tasks.get_mut().unwrap().values().flatten() {
             task.abort();
         }
     }

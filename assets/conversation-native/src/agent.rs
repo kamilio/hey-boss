@@ -12,6 +12,47 @@ pub async fn run(state: &Path, url: &str, request: &Value, tools: &mut Plugins<'
     run_with_input(state, url, request, tools, &mut input).await
 }
 
+pub fn run_job<'a>(
+    state: &'a Path,
+    url: &'a str,
+    mut request: Value,
+    tools: &'a mut Plugins<'_>,
+    completions: &'a mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+) -> futures_util::future::BoxFuture<'a, Result<()>> {
+    Box::pin(async move {
+        let mut queued = std::collections::VecDeque::new();
+        loop {
+            request["job"] = json!(true);
+            let (follow, mut pending) = tokio::sync::mpsc::unbounded_channel();
+            {
+                let run = run_with_input(state, url, &request, tools, &mut pending);
+                tokio::pin!(run);
+                loop {
+                    tokio::select! {
+                        result = &mut run => { result?; break; }
+                        item = completions.recv() => {
+                            follow.send(crate::delegate::follow_up(item.context("Delegate delivery closed")?))?;
+                        }
+                    }
+                }
+            }
+            queued.extend(std::iter::from_fn(|| pending.try_recv().ok()));
+            if let Some(next) = queued.pop_front() {
+                request = next;
+            } else if tools.delegates.is_some_and(|tasks| tasks.pending()) {
+                request = crate::delegate::follow_up(
+                    completions
+                        .recv()
+                        .await
+                        .context("Delegate delivery closed")?,
+                );
+            } else {
+                return Ok(());
+            }
+        }
+    })
+}
+
 pub async fn run_with_input(
     state: &Path,
     url: &str,
@@ -79,7 +120,7 @@ pub async fn run_with_input(
         json!({"attached_thread":link,"automatic_update":automatic,"initial_catch_up":request["initial_catch_up"] == true,"text":turn}).to_string()
     } else if job { turn.to_owned() } else { format!("Observed pre-focus desktop context: {observed}\n\n{turn}") }}))?;
     }
-    emit(json!({"AgentAccepted":{"root":tools.cwd}}))?;
+    emit(json!({"AgentAccepted":{"root":tools.cwd,"message":request["message"]}}))?;
     let mut usage = Value::Null;
     let mut add_usage = |reported: &Value| {
         if reported.is_object() {
@@ -100,16 +141,25 @@ pub async fn run_with_input(
         }
     };
     loop {
-        let (msg, reported) = provider::complete(
+        let completion = provider::complete(
             tools.http,
             url,
             key,
             &prompt,
             &book.messages,
             &schemas,
-            attached.is_none(),
-        )
-        .await?;
+            attached.is_none() && !job,
+        );
+        // A newer input invalidates inference that has not committed any tool calls.
+        let (msg, reported) = tokio::select! {
+            biased;
+            Some(request) = input.recv() => {
+                accept_input(&mut book, &request, tools)?;
+                while let Ok(request) = input.try_recv() { accept_input(&mut book, &request, tools)?; }
+                continue;
+            }
+            result = completion => result?,
+        };
         add_usage(&reported);
         let calls = msg["tool_calls"].as_array().cloned().unwrap_or_default();
         let text = msg["content"].as_str().unwrap_or("").to_owned();
@@ -145,7 +195,7 @@ pub async fn run_with_input(
                     return tools
                         .delegates
                         .context("Delegation requires an owned session")?
-                        .start(tools, &args, &book.messages)
+                        .start(tools, url, &args, &book.messages)
                         .map(|receipt| json!(receipt.to_string()));
                 }
                 tools.call(name, &args).await
@@ -183,14 +233,7 @@ pub async fn run_with_input(
         if follow_up.is_some() {
             let mut accepted = false;
             while let Some(request) = follow_up {
-                let text = field(&request, "turn")?;
-                if request.get("delegate_result").is_some() {
-                    accepted |= accept_follow_up(&mut book, &request, tools)?;
-                } else {
-                    book.push(json!({"role":"user","content":text}))?;
-                    accepted = true;
-                    emit(json!({"InputAccepted":{"text":text,"message":request["message"]}}))?;
-                }
+                accepted |= accept_input(&mut book, &request, tools)?;
                 follow_up = input.try_recv().ok();
             }
             if accepted {
@@ -204,6 +247,19 @@ pub async fn run_with_input(
             return Ok(());
         }
     }
+}
+fn accept_input(
+    book: &mut crate::notebook::Notebook,
+    request: &Value,
+    tools: &Plugins<'_>,
+) -> Result<bool> {
+    if request.get("delegate_result").is_some() {
+        return accept_follow_up(book, request, tools);
+    }
+    let text = field(request, "turn")?;
+    book.push(json!({"role":"user","content":text}))?;
+    emit(json!({"InputAccepted":{"text":text,"message":request["message"]}}))?;
+    Ok(true)
 }
 fn compact_at(messages: &[Value]) -> Option<usize> {
     let size: usize = messages

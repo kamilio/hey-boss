@@ -16,6 +16,14 @@ pub struct Notebook {
     pub delegations: HashSet<String>,
 }
 
+impl Drop for Notebook {
+    fn drop(&mut self) {
+        // A concurrently spawned child can briefly inherit the descriptor before exec.
+        // Release our lock now rather than waiting for every inherited descriptor to close.
+        let _ = self.file.unlock();
+    }
+}
+
 impl Notebook {
     pub fn open(state: &Path, fallback: &Value) -> Result<Self> {
         let path = state.with_extension("jsonl");

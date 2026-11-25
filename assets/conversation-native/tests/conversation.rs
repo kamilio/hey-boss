@@ -40,35 +40,42 @@ async fn mock(items: Vec<Value>) -> Result<(String, tokio::task::JoinHandle<Resu
             for item in items {
                 let (stream, _) = listener.accept().await?;
                 let mut s = BufReader::new(stream);
-                let mut line = String::new();
-                let mut len = None;
-                loop {
-                    line.clear();
-                    assert!(s.read_line(&mut line).await? > 0);
-                    if line == "\r\n" {
-                        break;
-                    }
-                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
-                        len = Some(v.trim().parse::<usize>()?);
-                    }
-                }
-                let mut bytes = vec![0; len.unwrap()];
-                s.read_exact(&mut bytes).await?;
-                requests.push(serde_json::from_slice(&bytes)?);
-                let mut events = vec![];
-                if let Some(text) = item["content"][0]["text"].as_str() {
-                    events.push(json!({"type":"response.output_text.delta","delta":text}));
-                }
-                events.push(json!({"type":"response.completed","response":{"output":[item]}}));
-                let body = events
-                    .iter()
-                    .map(|e| format!("data: {e}\r\n\r\n"))
-                    .collect::<String>();
-                s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await?;
+                requests.push(read_request(&mut s).await?);
+                respond(&mut s, item).await?;
             }
             Ok(requests)
         }),
     ))
+}
+async fn read_request(s: &mut BufReader<tokio::net::TcpStream>) -> Result<Value> {
+    let mut line = String::new();
+    let mut len = None;
+    loop {
+        line.clear();
+        assert!(s.read_line(&mut line).await? > 0);
+        if line == "\r\n" {
+            break;
+        }
+        if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            len = Some(v.trim().parse::<usize>()?);
+        }
+    }
+    let mut bytes = vec![0; len.unwrap()];
+    s.read_exact(&mut bytes).await?;
+    Ok(serde_json::from_slice(&bytes)?)
+}
+async fn respond(s: &mut BufReader<tokio::net::TcpStream>, item: Value) -> Result<()> {
+    let mut events = vec![];
+    if let Some(text) = item["content"][0]["text"].as_str() {
+        events.push(json!({"type":"response.output_text.delta","delta":text}));
+    }
+    events.push(json!({"type":"response.completed","response":{"output":[item]}}));
+    let body = events
+        .iter()
+        .map(|e| format!("data: {e}\r\n\r\n"))
+        .collect::<String>();
+    s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await?;
+    Ok(())
 }
 #[tokio::test]
 async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> Result<()> {
@@ -532,7 +539,7 @@ fn notebook_extends_the_same_file_and_recovers_an_interrupted_write() -> Result<
 }
 
 #[tokio::test]
-async fn delegate_defaults_to_t3_and_journals_the_exact_exchange() -> Result<()> {
+async fn explicit_t3_delegation_journals_the_exact_exchange() -> Result<()> {
     let tmp = scratch();
     let dir = tmp.path();
     fs::write(
@@ -552,7 +559,7 @@ input.once('line', line => {
     let (url, server) = mock(vec![
         tool(
             "delegate",
-            json!({"request":request,"description":description}),
+            json!({"provider":"t3","request":request,"description":description}),
         ),
         msg("Handed off."),
         msg("Finished."),
@@ -601,10 +608,7 @@ input.once('line', line => {
         schema["parameters"]["properties"]["description"]["type"],
         "string"
     );
-    assert_eq!(
-        schema["parameters"]["required"],
-        json!(["request", "description"])
-    );
+    assert_eq!(schema["parameters"]["required"], json!(["request"]));
     let result = requests[1]["input"].as_array().unwrap().last().unwrap();
     assert_eq!(result["call_id"], "call_1");
     let receipt: Value = serde_json::from_str(result["output"].as_str().unwrap())?;
@@ -686,18 +690,11 @@ async fn background_turn_uses_checkout_and_no_desktop_context() -> Result<()> {
 }
 
 #[tokio::test]
-async fn follow_up_skips_proposed_tools_and_is_saved_before_next_inference() -> Result<()> {
+async fn queued_follow_up_is_saved_before_inference() -> Result<()> {
     let tmp = scratch();
     let root = tmp.path();
     fs::write(root.join("AGENTS.md"), "")?;
-    let (url, server) = mock(vec![
-        tool(
-            "shell",
-            json!({"command":"touch should-not-run","description":"Checking."}),
-        ),
-        msg("Redirected."),
-    ])
-    .await?;
+    let (url, server) = mock(vec![msg("Redirected.")]).await?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut plugins = Plugins {
         delegates: None,
@@ -723,12 +720,8 @@ async fn follow_up_skips_proposed_tools_and_is_saved_before_next_inference() -> 
     .await?;
     let requests = server.await??;
     assert!(!root.join("should-not-run").exists());
-    let next = requests[1]["input"].to_string();
-    assert!(
-        next.contains("Skipped because")
-            && next.contains("Correction one")
-            && next.contains("Correction two")
-    );
+    let next = requests[0]["input"].to_string();
+    assert!(next.contains("Correction one") && next.contains("Correction two"));
     let book = hey_boss_conversation::notebook::Notebook::open(&state, &Value::Null)?;
     let users: Vec<_> = book
         .messages
@@ -746,19 +739,7 @@ async fn poe_delegates_spawn_fork_recover_and_deduplicate() -> Result<()> {
     let dir = scratch();
     let root = dir.path();
     fs::write(root.join("AGENTS.md"), "")?;
-    let runner = root.join("conversation-job");
-    fs::write(
-        &runner,
-        r#"#!/usr/bin/env node
-const fs=require('node:fs'), readline=require('node:readline');
-const input=readline.createInterface({input:process.stdin});
-input.once('line',line=>{
-fs.writeFileSync('child-request.json',JSON.stringify({state:process.argv[2],request:JSON.parse(line)}));
-console.log(JSON.stringify({TurnCompleted:{status:'Completed',output:'child answer'}}));input.close();
-});
-"#,
-    )?;
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700))?;
+    let (child_url, child_server) = mock(vec![msg("child answer"), msg("fresh answer")]).await?;
     let state = root.join("parent.json");
     let (tasks, mut ready) = Delegates::open(&state)?;
     let (_, mut acks) = mpsc::unbounded_channel();
@@ -777,15 +758,18 @@ console.log(JSON.stringify({TurnCompleted:{status:'Completed',output:'child answ
         json!({"role":"assistant","tool_calls":[{"id":"pending","function":{"name":"delegate","arguments":"{}"}}]}),
     ];
     let args = json!({"provider":"poe","request":"child task","description":"Child","fork":true});
-    let receipt = tasks.start(&tools, &args, &history)?;
+    let receipt = tasks.start(&tools, &child_url, &args, &history)?;
     assert_eq!(receipt["status"], "running");
     let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
         .await?
         .unwrap();
-    let captured: Value = serde_json::from_slice(&fs::read(root.join("child-request.json"))?)?;
-    assert_ne!(captured["state"], state.to_string_lossy().as_ref());
-    assert_eq!(captured["request"]["history"][0], history[0]);
-    assert_eq!(captured["request"]["history"][2]["toolCallId"], "pending");
+    let child_state = state
+        .with_extension("delegates")
+        .join(format!("{}.agent.json", receipt["id"].as_str().unwrap()));
+    let captured = hey_boss_conversation::notebook::Notebook::open(&child_state, &Value::Null)?;
+    assert_eq!(captured.messages[0], history[0]);
+    assert_eq!(captured.messages[2]["toolCallId"], "pending");
+    drop(captured);
     assert_eq!(history.len(), 2);
     assert_eq!(result["aggregatedOutput"], "child answer");
     // A completed result is recovered until the notebook has durably accepted it.
@@ -827,17 +811,16 @@ console.log(JSON.stringify({TurnCompleted:{status:'Completed',output:'child answ
     )?;
     drop(book);
     agent::run(&state, &url, &request, &mut tools).await?;
-    let fresh = tasks.start(
-        &tools,
-        &json!({"provider":"poe","request":"fresh","description":"Fresh"}),
-        &history,
-    )?;
+    let fresh = tasks.start(&tools, &child_url, &json!({"request":"fresh"}), &history)?;
     let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
         .await?
         .unwrap();
     assert_eq!(result["id"], fresh["id"]);
-    let captured: Value = serde_json::from_slice(&fs::read(root.join("child-request.json"))?)?;
-    assert!(captured["request"].get("history").is_none());
+    assert_eq!(result["provider"], "poe");
+    assert_eq!(result["description"], "");
+    let requests = child_server.await??;
+    assert!(requests[0]["input"].to_string().contains("parent context"));
+    assert!(!requests[1]["input"].to_string().contains("parent context"));
     tasks.cancel()?;
     assert!(!tasks.pending());
     drop(tools);
@@ -853,12 +836,16 @@ async fn ending_the_owner_closes_delegate_input_without_restarting_the_task() ->
     use hey_boss_conversation::delegate::Delegates;
     let dir = scratch();
     let root = dir.path();
-    let runner = root.join("conversation-job");
     fs::write(
-        &runner,
-        "#!/bin/sh\nread -r request\ntouch started\nread -r next || touch cancelled\n",
+        root.join("hey-t3.mjs"),
+        r#"
+import fs from 'node:fs';
+import {createInterface} from 'node:readline';
+const input = createInterface({input:process.stdin});
+input.once('line', () => fs.writeFileSync('started', ''));
+input.on('close', () => fs.writeFileSync('cancelled', ''));
+"#,
     )?;
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700))?;
     let state = root.join("parent.json");
     let (tasks, _ready) = Delegates::open(&state)?;
     let (_, mut acks) = mpsc::unbounded_channel();
@@ -874,7 +861,8 @@ async fn ending_the_owner_closes_delegate_input_without_restarting_the_task() ->
     };
     tasks.start(
         &tools,
-        &json!({"provider":"poe","request":"wait","description":"Wait"}),
+        "unused",
+        &json!({"provider":"t3","request":"wait","description":"Wait"}),
         &[],
     )?;
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -899,6 +887,275 @@ async fn ending_the_owner_closes_delegate_input_without_restarting_the_task() ->
             .as_str()
             .unwrap()
             .contains("may have run")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn newer_input_cancels_stale_inference_before_it_can_speak() -> Result<()> {
+    let tmp = scratch();
+    let root = tmp.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/v1/responses", listener.local_addr()?);
+    let (input, mut pending) = mpsc::unbounded_channel();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await?;
+        let mut stale = BufReader::new(socket);
+        read_request(&mut stale).await?;
+        input.send(json!({"turn":"Design doc, not design log."}))?;
+        let (socket, _) = listener.accept().await?;
+        let mut current = BufReader::new(socket);
+        let request = read_request(&mut current).await?;
+        assert!(
+            request["input"]
+                .to_string()
+                .contains("Design doc, not design log.")
+        );
+        // Even a late response from the old request must not enter the transcript.
+        let _ = respond(
+            &mut stale,
+            msg("Back to the design log: done or carry over?"),
+        )
+        .await;
+        respond(&mut current, msg("Design doc. Carried over.")).await?;
+        Ok::<_, anyhow::Error>(())
+    });
+    let (_ack, mut acks) = mpsc::unbounded_channel();
+    let mut tools = Plugins {
+        delegates: None,
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let (events, mut output) = mpsc::unbounded_channel();
+    let state = root.join("parent.json");
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        hey_boss_conversation::EVENTS.scope(
+            events,
+            agent::run_with_input(
+                &state,
+                &url,
+                &json!({"turn":"Carry over the filesystem work.","job":true}),
+                &mut tools,
+                &mut pending,
+            ),
+        ),
+    )
+    .await??;
+    server.await??;
+    let events: Vec<_> = std::iter::from_fn(|| output.try_recv().ok()).collect();
+    assert!(!json!(events).to_string().contains("Back to the design log"));
+    assert_eq!(
+        events.last().unwrap()["TurnCompleted"]["output"],
+        "Design doc. Carried over."
+    );
+    let book = hey_boss_conversation::notebook::Notebook::open(&state, &Value::Null)?;
+    assert_eq!(book.messages.len(), 3);
+    Ok(())
+}
+
+#[tokio::test]
+async fn in_process_delegates_are_nonblocking_quiet_and_cancel_with_the_owner() -> Result<()> {
+    use hey_boss_conversation::delegate::Delegates;
+    let tmp = scratch();
+    let root = tmp.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/v1/responses", listener.local_addr()?);
+    let state = root.join("parent.json");
+    let (tasks, mut ready) = Delegates::open(&state)?;
+    let (_ack, mut acks) = mpsc::unbounded_channel();
+    let tools = Plugins {
+        delegates: Some(&tasks),
+        focus: None,
+        home: root,
+        cwd: root,
+        login: Path::new("/bin/sh"),
+        resources: root,
+        http: &reqwest::Client::new(),
+        acks: &mut acks,
+    };
+    let (events, mut output) = mpsc::unbounded_channel();
+    let receipts = hey_boss_conversation::EVENTS
+        .scope(events, async {
+            Ok::<_, anyhow::Error>([
+                tasks.start(&tools, &url, &json!({"request":"slow research"}), &[])?,
+                tasks.start(
+                    &tools,
+                    &url,
+                    &json!({"request":"fast research","description":""}),
+                    &[],
+                )?,
+            ])
+        })
+        .await?;
+    // Both launches return before either provider request has received a response.
+    let (slow, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
+    let mut slow = BufReader::new(slow);
+    read_request(&mut slow).await?;
+    let (fast, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept()).await??;
+    let mut fast = BufReader::new(fast);
+    read_request(&mut fast).await?;
+    respond(&mut fast, msg("Fast research result")).await?;
+    let result = tokio::time::timeout(Duration::from_secs(5), ready.recv())
+        .await?
+        .unwrap();
+    assert_eq!(result["id"], receipts[1]["id"]);
+    assert_eq!(result["aggregatedOutput"], "Fast research result");
+    let events: Vec<_> = std::iter::from_fn(|| output.try_recv().ok()).collect();
+    assert_eq!(
+        events.len(),
+        2,
+        "Child messages and completion must not leak into the parent's events"
+    );
+    assert!(
+        events
+            .iter()
+            .all(|e| e["ToolStarted"]["input"]["description"] == "")
+    );
+    assert!(!root.join("conversation-job").exists());
+    drop(tools);
+    drop(tasks);
+    let mut byte = [0];
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(5), slow.read(&mut byte)).await??,
+        0
+    );
+    assert!(ready.try_recv().is_err());
+    let (recovered, mut ready) = Delegates::open(&state)?;
+    let results = [ready.try_recv()?, ready.try_recv()?];
+    assert!(
+        results
+            .iter()
+            .any(|r| r["id"] == receipts[0]["id"] && r["failed"] == true)
+    );
+    assert!(
+        results
+            .iter()
+            .any(|r| r["id"] == receipts[1]["id"] && r["failed"] == false)
+    );
+    recovered.cancel()?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn spoken_follow_up_preserves_automatic_delegate_delivery() -> Result<()> {
+    let tmp = scratch();
+    let root = tmp.path();
+    fs::write(root.join("AGENTS.md"), "")?;
+    fs::create_dir(root.join(".hey-boss"))?;
+    fs::write(
+        root.join(".hey-boss/config.json"),
+        json!({"conversation":{"root":root,"shell":"/bin/sh"}}).to_string(),
+    )?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy = format!("http://{}", listener.local_addr()?);
+    let mut process = tokio::process::Command::new(env!("CARGO_BIN_EXE_conversation-agent"))
+        .arg(root.join("parent.json"))
+        .env("HOME", root)
+        .env("HTTP_PROXY", &proxy)
+        .env("http_proxy", &proxy)
+        .env("NO_PROXY", "")
+        .env("no_proxy", "")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut input = process.stdin.take().unwrap();
+    let mut events = BufReader::new(process.stdout.take().unwrap()).lines();
+    input
+        .write_all(b"{\"turn\":\"Research the task.\"}\n")
+        .await?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let (socket, _) = listener.accept().await?;
+        let mut first = BufReader::new(socket);
+        read_request(&mut first).await?;
+        respond(
+            &mut first,
+            tool("delegate", json!({"request":"child research"})),
+        )
+        .await?;
+        let mut child = None;
+        let mut parent = None;
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await?;
+            let mut socket = BufReader::new(socket);
+            let request = read_request(&mut socket).await?;
+            if request["input"][0]["content"] == "child research" {
+                child = Some(socket);
+            } else {
+                parent = Some(socket);
+            }
+        }
+        let mut child = child.unwrap();
+        let _parent = parent.unwrap();
+        input
+            .write_all(b"{\"turn\":\"Carry over the design doc.\",\"mode\":\"follow-up\"}\n")
+            .await?;
+        let (socket, _) = listener.accept().await?;
+        let mut follow_up = BufReader::new(socket);
+        let request = read_request(&mut follow_up).await?;
+        assert!(
+            request["input"]
+                .to_string()
+                .contains("Carry over the design doc.")
+        );
+        respond(&mut follow_up, msg("Design doc carried over.")).await?;
+        loop {
+            let event: Value = serde_json::from_str(&events.next_line().await?.unwrap())?;
+            assert!(event.get("error").is_none(), "{event}");
+            if event["TurnCompleted"]["status"] == "Completed" {
+                break;
+            }
+        }
+        respond(&mut child, msg("Research arrived after the interruption")).await?;
+        let result = loop {
+            let event: Value = serde_json::from_str(&events.next_line().await?.unwrap())?;
+            assert!(event.get("error").is_none(), "{event}");
+            assert!(
+                event.get("Message").is_none(),
+                "Child speech leaked to parent"
+            );
+            if let Some(item) = event.get("DelegateReady") {
+                break item.clone();
+            }
+        };
+        assert_eq!(result["failed"], false);
+        assert_eq!(
+            result["aggregatedOutput"],
+            "Research arrived after the interruption"
+        );
+        let follow = hey_boss_conversation::delegate::follow_up(result);
+        input.write_all(format!("{follow}\n").as_bytes()).await?;
+        let (socket, _) = listener.accept().await?;
+        let mut resumed = BufReader::new(socket);
+        let request = read_request(&mut resumed).await?;
+        assert!(
+            request["input"]
+                .to_string()
+                .contains("Research arrived after the interruption")
+        );
+        respond(&mut resumed, msg("Here is the research result.")).await?;
+        loop {
+            let event: Value = serde_json::from_str(&events.next_line().await?.unwrap())?;
+            if event["TurnCompleted"]["status"] == "Completed" {
+                break;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await??;
+    drop(input);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), process.wait())
+            .await??
+            .success()
     );
     Ok(())
 }

@@ -11,7 +11,15 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 use std::io::{self, Write};
 
+tokio::task_local! {
+    pub static EVENTS: tokio::sync::mpsc::UnboundedSender<Value>;
+}
+
 pub fn emit(value: Value) -> Result<()> {
+    if let Ok(result) = EVENTS.try_with(|events| events.send(value.clone())) {
+        result?;
+        return Ok(());
+    }
     writeln!(io::stdout().lock(), "{value}")?;
     Ok(())
 }

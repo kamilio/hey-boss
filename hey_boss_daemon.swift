@@ -8339,6 +8339,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     private var t3LastUpdate: String?
     private var t3Watcher: Process?
     private var delegateResults: [[String: Any]] = []
+    private var discardingReply = false
     private var t3Pending: (key: String, text: String)?
     private var t3Processing: String?
     @discardableResult func addSelection(chat: UUID?, time: TimeInterval, source: String, text: String) -> Int? {
@@ -8687,12 +8688,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         }
     }
     private func deliverDelegateResults() {
-        guard process != nil, pauseID == nil, !heldReply,
-              ![Phase.recording, .decoding, .starting].contains(phase) else { return }
+        guard process != nil, pauseID == nil, !heldReply, !discardingReply,
+              queuedMessages.isEmpty,
+              [Phase.idle, .listening].contains(phase) else { return }
         while let item = delegateResults.first {
             do {
                 let text = String(decoding: try JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]), as: UTF8.self)
-                try write(["turn":text,"delegate_result":item,"mode":"follow-up"])
+                try write(["turn":text,"delegate_result":item,"mode":"queue"])
                 delegateResults.removeFirst()
             } catch { workspaceFailed(error.localizedDescription); return }
         }
@@ -9348,8 +9350,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @objc func listenForNextTurn() {
         guard canListenNext else { return }
-        interruptPlayback()
-        if !turnDone { cancelTurn() }
+        audio?.pause(); heldReply = true
         state(.listening, "Listening")
     }
     @objc func sendTyped() {
@@ -9482,12 +9483,9 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         guard pauseID == nil, audio != nil, !micMuted else { return }
         switch event {
         case .began where phase == .listening || phase == .decoding || answering:
-            if answering && (reading || !playedPassages.isEmpty || turnDone) {
+            if answering {
                 audio?.pause(); heldReply = true
                 ReviewAudio.log.notice("Chat \(self.library.selected.uuidString, privacy: .public): holding reply until interruption is transcribed")
-            } else if answering {
-                interruptPlayback()
-                if !turnDone { cancelTurn() }
             }
             // The detector sends the buffered opening frames immediately after began.
             liveTranscript = recognizer.map { LiveTranscript(recognizer: $0) }
@@ -9530,7 +9528,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                 }
                 interruptPlayback()
                 heldReply = false
-                if !turnDone { cancelTurn() }
+                if !turnDone { cancelTurn(preserveDelegates: true) }
             }
             if audio.stopped { self.audio = nil }
             if text.isEmpty { state(audio.stopped ? .idle : .listening, audio.stopped ? "Microphone off" : "Listening") }
@@ -9705,6 +9703,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
     }
     @discardableResult func respond(_ transcript: String, ends: [(time: TimeInterval, offset: Int)] = [], phoneID: UUID? = nil, automatic: Bool = false) -> Bool {
         guard let instructions, !instructions.isEmpty else { stop("The conversation prompt is missing. Reinstall Hey Boss."); return false }
+        if directory == nil, process != nil, !turnDone { discardingReply = true }
         playedPassages.removeAll(); playingPassage = ""; playingThrough = 0
         turnDone = false; lastMessage = nil; turnAccepted = false
         let capture = pendingCapture.flatMap { $0.text == nil ? nil : $0 }; pendingCapture = nil
@@ -9737,7 +9736,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             self.reply = nil
             do {
                 if process == nil { try startSol() }
-                var request: [String: Any] = ["turn": question]
+                var request: [String: Any] = ["turn": question, "mode": "follow-up"]
+                request["message"] = activeTurn?.uuidString
                 if let t3Thread {
                     request["t3_thread"] = t3Thread; request["automatic"] = automatic
                     request["initial_catch_up"] = automatic && t3LastUpdate == nil
@@ -10109,6 +10109,14 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             return
         }
         guard let (kind,value) = envelope.first, let data = value as? [String:Any] else { return }
+        if discardingReply {
+            if (kind == "AgentAccepted" || kind == "InputAccepted"),
+               let message = data["message"] as? String, message == activeTurn?.uuidString {
+                discardingReply = false
+            } else if ["TextDelta", "Message", "AgentAccepted", "AgentStatus", "TurnCompleted", "InputAccepted"].contains(kind) {
+                return
+            }
+        }
         let id = data["id"] as? String ?? ""
         if let terminal {
             if !terminal.isConnected { stop("CLI disconnected"); return }
@@ -10126,10 +10134,13 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if !delegateResults.contains(where: { $0["id"] as? String == id }) { delegateResults.append(data) }
             deliverDelegateResults()
         case "InputAccepted":
-            guard let item = data["delegate_result"] as? [String:Any], let text = data["text"] as? String else { return }
+            guard let item = data["delegate_result"] as? [String:Any], let text = data["text"] as? String else {
+                turnAccepted = true; updateComposerActions(); save(); return
+            }
             let starting = turnDone || !answering
             interruptPlayback()
-            append(item["description"] as? String ?? "Delegation result", from: "Delegate", capture: Capture(source: item["provider"] as? String ?? "Agent", text: item["aggregatedOutput"] as? String ?? text))
+            let description = (item["description"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            append(description.isEmpty ? "Delegation result" : description, from: "Delegate", capture: Capture(source: item["provider"] as? String ?? "Agent", text: item["aggregatedOutput"] as? String ?? text))
             messages[messages.count - 1].interruptedAfter = interruptedAfter; interruptedAfter = nil
             if starting { activeTurn = UUID() }
             turnDone = false; lastMessage = nil; turnAccepted = true
@@ -10159,7 +10170,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
             if let description = item["description"] as? String {
                 let isNew = !activities.contains { $0.id == id }
                 if isNew && !stream.isEmpty { finishMessage(stream) }
-                let activity = ToolActivity(id: id, afterMessage: messages.count, description: description,
+                let quiet = description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let activity = ToolActivity(id: id, afterMessage: messages.count, description: quiet ? "Delegation" : description,
                     command: item["command"] as? String, output: item["aggregatedOutput"] as? String ?? "",
                     state: kind == "ToolStarted" ? "Running" : data["failed"] as? Bool == true ? "Failed" : "Completed",
                     provider: item["provider"] as? String, request: item["request"] as? String, link: item["link"] as? String)
@@ -10168,7 +10180,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
                     activities[index].output = activity.output; activities[index].state = activity.state
                     renderTool(activities[index])
                 } else { activities.append(activity); renderTool(activity) }
-                if isNew && kind == "ToolStarted", audio != nil, t3Thread == nil {
+                if isNew && kind == "ToolStarted", !quiet, audio != nil, t3Thread == nil {
                     let label = ConversationText(wrappingLabelWithString: description)
                     speech.append((label, NSRange(location: 0, length: description.utf16.count), description)); playNext()
                 }
@@ -10330,6 +10342,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         state(phase, "Waiting for approval")
     }
     private func closeWorkspace() {
+        discardingReply = false
         delegateResults.removeAll()
         let key = directory == nil ? agentStateURL.path : thread
         if let process, let key, process.isRunning {
@@ -10354,13 +10367,15 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         cancelTurn(failure: message)
         state(audio == nil ? .idle : .listening, message)
     }
-    private func cancelTurn(failure: String? = nil) {
+    private func cancelTurn(failure: String? = nil, preserveDelegates: Bool = false) {
+        let keptSession = preserveDelegates && directory == nil && process != nil
+        if keptSession { discardingReply = true }
         activeTurn = nil
         queuePaused = true
         if failure != nil, let key = t3Processing, t3Pending?.key == key { t3Pending = nil }
         t3Processing = nil
         failTerminal(failure ?? "Reply stopped")
-        for index in activities.indices where activities[index].state == "Running" {
+        for index in activities.indices where activities[index].state == "Running" && !keptSession {
             activities[index].state = "Interrupted"; renderTool(activities[index])
         }
         let unfinished = answering && !turnDone && (lastMessage?.isEmpty == false || (directory != nil && turnAccepted))
@@ -10372,7 +10387,8 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         speech.removeAll(); narratedItems.removeAll(); reading = false; turnDone = false
         stream = ""; published = ""; messageLabel = nil; lastMessage = nil
         reply?.cancel(); reply = nil; timeout?.invalidate(); timeout = nil
-        closeWorkspace(); dismissApprovals()
+        if !keptSession { closeWorkspace() }
+        dismissApprovals()
     }
     private func dismissApprovals() {
         approvals.removeAll()

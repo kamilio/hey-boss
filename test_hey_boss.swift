@@ -6469,17 +6469,43 @@ func auditAsyncDelegate(_ path: String) throws {
     chat.event(["DelegateReady":item])
     var probe = pollfd(fd: wire.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
     precondition(poll(&probe, 1, 0) == 0, "Completion must wait for pending speech")
+    for phase in [VoiceConversation.Phase.thinking, .speaking] {
+        chat.state(phase, "Reply in progress")
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.03))
+        precondition(poll(&probe, 1, 0) == 0, "Completion must not interrupt a reply")
+    }
     chat.state(.idle, "Voice off")
     let deadline = Date(timeIntervalSinceNow: 2)
     while poll(&probe, 1, 0) == 0, Date() < deadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
     precondition(poll(&probe, 1, 0) > 0, "Idle completion must be delivered")
     let delivered = try JSONSerialization.jsonObject(with: wire.fileHandleForReading.availableData) as! [String:Any]
-    precondition(delivered["mode"] as? String == "follow-up")
+    precondition(delivered["mode"] as? String == "queue")
     precondition((delivered["delegate_result"] as? [String:Any])?["id"] as? String == "child")
     chat.event(["ToolCompleted":["id":"child", "output":item, "failed":false]])
     chat.event(["InputAccepted":["text":delivered["turn"]!, "delegate_result":item]])
     precondition(chat.phase == .thinking && chat.input.stringValue == "Keep this draft")
     precondition(chat.conversationHistory.last?["role"] == "user" && chat.conversationHistory.last!["content"]!.contains("Child result"))
+    let listening = VoiceConversation(cli: "/usr/bin/false", saveURL: root.appendingPathComponent("listening/current.json"))
+    let quietWire = Pipe(); listening.process = Process(); listening.writer = quietWire.fileHandleForWriting
+    listening.event(["InputAccepted":["text":"Earlier result", "delegate_result":["description":"Earlier result"]]])
+    listening.audio = ReviewAudio()
+    listening.listenForNextTurn()
+    precondition(listening.process != nil && listening.phase == .listening, "Taking the floor must keep the agent running")
+    var quietProbe = pollfd(fd: quietWire.fileHandleForReading.fileDescriptor, events: Int16(POLLIN), revents: 0)
+    precondition(poll(&quietProbe, 1, 0) == 0, "Starting speech must not send a cancellation")
+    precondition(listening.respond("Use design doc."))
+    let submitDeadline = Date(timeIntervalSinceNow: 2)
+    while poll(&quietProbe, 1, 0) == 0, Date() < submitDeadline { RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.01)) }
+    precondition(poll(&quietProbe, 1, 0) > 0)
+    let follow = try JSONSerialization.jsonObject(with: quietWire.fileHandleForReading.availableData) as! [String:Any]
+    precondition(follow["mode"] as? String == "follow-up" && follow["turn"] as? String == "Use design doc.")
+    listening.event(["AgentAccepted":["root":root.path]])
+    listening.event(["Message":["text":"Stale reply"]])
+    precondition(!listening.conversationHistory.contains { $0["content"] == "Stale reply" }, "An old acknowledgement must not release stale speech")
+    listening.event(["InputAccepted":["text":"Use design doc.", "message":follow["message"]!]])
+    listening.event(["Message":["text":"Design doc, carried over."]])
+    precondition(listening.conversationHistory.last?["content"] == "Design doc, carried over.")
+    listening.stop("Done")
     chat.window.makeKeyAndOrderFront(nil)
     var captured = false
     Task { @MainActor in
