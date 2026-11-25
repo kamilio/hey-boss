@@ -79,7 +79,12 @@ async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> R
         root.join("hey-t3.mjs"),
         include_str!("../examples/t3-replay.mjs"),
     )?;
-    fs::set_permissions(root.join("hey-t3.mjs"), fs::Permissions::from_mode(0o700))?;
+    // App resources are readable files, not executables.
+    fs::set_permissions(root.join("hey-t3.mjs"), fs::Permissions::from_mode(0o644))?;
+    fs::write(
+        root.join("thread.json"),
+        json!({"messages":[{"role":"assistant","text":"Current result"}]}).to_string(),
+    )?;
     fs::write(root.join("sent.jsonl"), "")?;
     fs::write(root.join("delivery.json"), "{}")?;
     let (_, mut acks) = mpsc::unbounded_channel();
@@ -94,6 +99,9 @@ async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> R
         acks: &mut acks,
     };
     let link = "t3code://threads/00000000-0000-0000-0000-000000000001/simulated";
+    let read = hey_boss_conversation::t3::call(&plugins, link, "t3_read", &json!({})).await?;
+    let thread: Value = serde_json::from_str(read.as_str().unwrap())?;
+    assert_eq!(thread["messages"][0]["text"], "Current result");
     let state = root.join("session.json");
     // Even a misbehaving model cannot send during an incoming update.
     let (url, server) = mock(vec![
@@ -145,6 +153,14 @@ async fn attached_updates_cannot_act_and_user_turns_keep_the_fixed_thread() -> R
         json!({"op":"queue","text":"Keep the smaller fix.\nNo deployment."})
     );
     assert!(requests[1]["input"].to_string().contains("queued"));
+    let answered = hey_boss_conversation::t3::call(
+        &plugins,
+        link,
+        "t3_answer",
+        &json!({"request_id":"browser-request","answers":{"browser":"Safari"}}),
+    )
+    .await?;
+    assert!(answered.as_str().unwrap().contains("answered"));
     Ok(())
 }
 #[test]

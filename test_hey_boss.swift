@@ -14,6 +14,20 @@ func audit() {
     setbuf(stdout, nil)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)
+    if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_T3_WATCH"] {
+        let root = URL(fileURLWithPath: path)
+        let target = try! JSONSerialization.jsonObject(with: Data(contentsOf: root.appendingPathComponent("thread.json"))) as! [String: String]
+        let saved = root.appendingPathComponent("current.json")
+        try! JSONSerialization.data(withJSONObject: ["messages":[["speaker":"Hey Boss","text":"Already read."]],"t3Thread":target["link"]!,"t3LastUpdate":target["key"]!]).write(to: saved)
+        let chat = VoiceConversation(cli: "/usr/bin/false", saveURL: saved)
+        chat.state(.listening, "Listening")
+        RunLoop.main.run(until: Date().addingTimeInterval(5))
+        precondition(chat.voiceStatus["detail"] as? String == "Listening", "The T3 listener must stay connected with the desktop's restricted PATH")
+        precondition(chat.conversationHistory.count == 1, "The listener must not repeat the recap already read")
+        chat.stop("Ready")
+        print("PASS T3 listener: desktop PATH, live connection, and read-update deduplication")
+        return
+    }
     if #available(macOS 26, *), let path = ProcessInfo.processInfo.environment["HEY_BOSS_AUDIT_T3_VOICE"] {
         let root = URL(fileURLWithPath: path)
         try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

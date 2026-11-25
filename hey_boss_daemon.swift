@@ -8653,7 +8653,7 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         child.executableURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/hey-t3")
         child.arguments = ["--voice-watch", link]
         var environment = ProcessInfo.processInfo.environment
-        environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
+        environment["PATH"] = FileManager.default.homeDirectoryForCurrentUser.path + "/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + (environment["PATH"] ?? "/usr/bin:/bin")
         child.environment = environment; child.standardOutput = output
         do { try child.run(); t3Watcher = child }
         catch { status.stringValue = "Couldn’t attach to T3: " + error.localizedDescription; status.isHidden = false; return }

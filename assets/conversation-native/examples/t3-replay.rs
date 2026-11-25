@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     }
     let script = root.join("hey-t3.mjs");
     fs::write(&script, include_str!("t3-replay.mjs"))?;
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o644))?;
     fs::write(root.join("thread.json"), json!({"messages":[{"role":"assistant","text":"The retry handler assigned a new message ID after reconnecting, so the server treated retries as new messages."}]}).to_string())?;
     let (_, mut acks) = mpsc::unbounded_channel();
     let mut tools = Plugins {

@@ -25,7 +25,8 @@ pub async fn call(tools: &Plugins<'_>, link: &str, name: &str, args: &Value) -> 
     };
     let answering = name == "t3_answer";
     let sending = name == "t3_send" || answering;
-    let mut command = Command::new(script);
+    let mut command = Command::new("node");
+    command.arg(script);
     command
         .arg(if answering {
             "answer"
