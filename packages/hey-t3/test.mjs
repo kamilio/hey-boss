@@ -193,7 +193,7 @@ test('recap pages stop at the last human, excluding tool output and internal mes
     ),
     { lastMessage: 'Question', replies: 'Checking.\n\nDone.' },
   );
-  assert.throws(() => recapPage([row('user_message', 'Question', 'user')], []), /No replies/);
+  assert.deepEqual(recapPage([row('user_message', 'Question', 'user')], []), { lastMessage: 'Question', replies: '' });
 });
 
 test('an offline companion does not fall back to an old SSH registration', () => {

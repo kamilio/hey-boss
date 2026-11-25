@@ -244,13 +244,14 @@ final class TalkService: NSObject, NSApplicationDelegate {
         let source: CatchUpSource
         if let link { source = try CatchUpSource.thread(link) }
         else { source = try await CatchUpSource.current() }
-        if case let .t3(environment, thread) = source {
-            openConversation(t3: "t3code://threads/\(environment)/\(thread)")
-        } else {
-            try await speech.catchUp(source: source) { [weak self] recap in self?.openConversation(recap: recap) }
+        try await speech.catchUp(source: source) { [weak self] recap, update in
+            let thread: String?
+            if case let .t3(environment, id) = source { thread = "t3code://threads/\(environment)/\(id)" }
+            else { thread = nil }
+            self?.openConversation(recap: recap, t3: thread, t3Update: update)
         }
     }
-    private func openConversation(recap: String? = nil, t3: String? = nil) {
+    private func openConversation(recap: String? = nil, t3: String? = nil, t3Update: String? = nil) {
         guard !openingConversation, !switchingToDictation else { return }
         guard session.phase != .processing, waitingPaste == nil,
               session.phase != .recording || autoTarget != nil else {
@@ -269,6 +270,7 @@ final class TalkService: NSObject, NSApplicationDelegate {
                 var request: [String: Any] = ["command": recap == nil && t3 == nil ? "conversation_start" : "conversation_context", "sync": false]
                 if let recap { request["title"] = "Catch Up"; request["description"] = recap }
                 if let t3 { request["link_url"] = t3 }
+                if let t3Update { request["t3_update"] = t3Update }
                 // Queue Stop behind Start if Escape arrives while the socket request is in flight.
                 let reply: [String: Any]? = try await withCheckedThrowingContinuation { continuation in
                     contextQueue.async { [request] in continuation.resume(with: Result { try self.chatRequest(request) }) }

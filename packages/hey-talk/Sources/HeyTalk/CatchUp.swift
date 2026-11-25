@@ -54,14 +54,18 @@ struct SpokenRecap: Codable {
     var lastMessage: String? = nil
     var replies: String? = nil
     var note: String? = nil
+    var status: String? = nil
+    var t3UpdateKey: String? = nil
 
     @MainActor func summarize(onSentence: (String) throws -> Void) async throws {
         let bundle = Bundle.main.bundleURL.pathExtension == "app" ? Bundle.main : Bundle.module
         guard let url = bundle.url(forResource: "catch_up", withExtension: "md") else { throw TalkError("Reinstall Hey Talk to restore the recap prompt.") }
         var request = try ProxyResponses.request()
+        var passage = self
+        passage.t3UpdateKey = nil
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model":"gpt-6-luna", "store":false, "stream":true, "reasoning":["effort":"none"],
-            "instructions":try String(contentsOf: url, encoding: .utf8), "input":String(decoding: try JSONEncoder().encode(self), as: UTF8.self)])
+            "instructions":try String(contentsOf: url, encoding: .utf8), "input":String(decoding: try JSONEncoder().encode(passage), as: UTF8.self)])
         let (bytes, response) = try await URLSession.shared.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw TalkError("The recap service is unavailable.") }
         guard (200..<300).contains(http.statusCode) else { throw TalkError("The recap service returned HTTP \(http.statusCode).") }

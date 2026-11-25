@@ -42,6 +42,11 @@ func audit() {
         restored.append("New ordinary conversation", from: "You")
         restored.stop("Ready")
         precondition(latest()["t3Thread"] == nil && latest()["t3LastUpdate"] == nil, "New conversations must not inherit the attached thread")
+        let spoken = root.appendingPathComponent("spoken.json")
+        try! JSONSerialization.data(withJSONObject: ["messages":[["speaker":"Hey Boss", "text":"Fixed. Tests passed."]], "t3Thread":link, "t3LastUpdate":"read-update"]).write(to: spoken)
+        let afterReading = VoiceConversation(cli: "/usr/bin/false", saveURL: spoken)
+        precondition(afterReading.conversationHistory == [["role":"assistant", "content":"Fixed. Tests passed."]], "The recap already heard belongs in history, not in the user's next message")
+        afterReading.stop("Ready")
         print("PASS T3 attachment: restore, stop, cursor, context role, and new-chat isolation")
         return
     }

@@ -239,6 +239,26 @@ final class SpeechPlaybackTests: XCTestCase {
         }
         XCTAssertEqual(heard, ["An update.", "An update."])
     }
+    @MainActor func testT3RecapCarriesTheReadUpdateOnlyAfterTheLastAudioFinishes() throws {
+        let recap = try JSONDecoder().decode(SpokenRecap.self, from: Data(#"{"lastMessage":"Fix it","replies":"Fixed. Tests passed.","status":"completed","t3UpdateKey":"read-update"}"#.utf8))
+        let engine = FakeSpeechEngine(), output = FakeSpeechOutput()
+        let player = SpeechPlayback(engine: engine, output: output)
+        var handedOff: [(String, String?)] = []
+        try player.start("Fixed.", streaming: true)
+        engine.replies.last?(.success(SpeechAudio(samples: [0], sampleRate: 100)))
+        drain()
+        output.completions.last?()
+        try player.append(" Tests passed.")
+        engine.replies.last?(.success(SpeechAudio(samples: [0], sampleRate: 100)))
+        drain()
+        player.finishStream { handedOff.append(($0, recap.t3UpdateKey)) }
+        XCTAssertTrue(handedOff.isEmpty, "Finishing inference must not open the conversation before playback finishes")
+        let last = try XCTUnwrap(output.completions.last)
+        last(); last()
+        XCTAssertEqual(handedOff.count, 1)
+        XCTAssertEqual(handedOff.first?.0, "Fixed. Tests passed.")
+        XCTAssertEqual(handedOff.first?.1, "read-update")
+    }
     @MainActor private func drain() {
         let done = expectation(description: "main callbacks")
         DispatchQueue.main.async { done.fulfill() }

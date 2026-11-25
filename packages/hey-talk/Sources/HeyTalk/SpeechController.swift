@@ -35,11 +35,9 @@ final class SpeechController {
     private var preparing: Task<Void, Never>?
     var active: Bool { preparing != nil || playback.active }
 
-    @MainActor func catchUp(source: CatchUpSource, onPlayed: @escaping (String) -> Void) async throws {
+    @MainActor func catchUp(source: CatchUpSource, onPlayed: @escaping (String, String?) -> Void) async throws {
         guard !sleeping else { throw TalkError("Unlock this Mac before reading aloud.") }
         revision &+= 1
-        let ticket = revision
-        guard ticket == revision else { return }
         if source.sameLocation(as: recapSource) {
             if playback.active { playback.togglePause() } else { stop() }
             return
@@ -60,7 +58,7 @@ final class SpeechController {
                 }
                 try Task.checkCancellation()
                 self.preparing = nil
-                self.playback.finishStream(onPlayed: onPlayed)
+                self.playback.finishStream { text in onPlayed(text, passage.t3UpdateKey) }
             } catch {
                 guard !Task.isCancelled else { return }
                 self.preparing = nil

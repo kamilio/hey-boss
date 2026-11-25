@@ -91,7 +91,6 @@ export function recapPage(items, replies) {
   for (let i = items.length - 1; i >= 0; i--) {
     const item = items[i].item;
     if (item?.type === 'user_message' && (item.createdBy ?? 'user') === 'user') {
-      if (!replies.length) throw Error('No replies since your last message.');
       return { lastMessage: item.text ?? '', replies: replies.reverse().join('\n\n') };
     }
     if (item?.type === 'assistant_message' && item.text?.trim()) replies.push(item.text);
@@ -463,6 +462,8 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
         .map((item) => ({ role: item.type === 'assistant_message' ? 'assistant' : 'user', text: item.text })),
     };
   if (op === 'catch-up') {
+    const snapshot = voiceSnapshot(page.projection);
+    const t3UpdateKey = JSON.stringify([snapshot.run, snapshot.requests, snapshot.replies]);
     let items = page.projection.visibleTurnItems,
       more = page.hasMoreHistory,
       cursor = page.historyCursor;
@@ -470,7 +471,7 @@ async function onHost({ op, environment, id, text, guarded, options = {}, arg },
       seen = new Set();
     for (;;) {
       const recap = recapPage(items, replies);
-      if (recap) return recap;
+      if (recap) return { ...recap, status: snapshot.status, t3UpdateKey };
       if (!more) throw Error('No message from you in this thread yet.');
       if (!cursor || seen.has(cursor)) throw Error('T3 could not read earlier messages.');
       seen.add(cursor);

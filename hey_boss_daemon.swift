@@ -62,6 +62,7 @@ struct Request: Codable {
     let options: [String]?
     let autoclose: Double?
     let link_url: String?
+    let t3_update: String?
     let link_label: String?
     let task_id: String?
     let task_ids: [String]?
@@ -8635,11 +8636,12 @@ final class VoiceConversation: NSObject, NSWindowDelegate, NSToolbarDelegate, NS
         window.orderOut(nil)
         toggle()
     }
-    func openWithContext(source: String?, text: String?, t3: String? = nil) {
-        guard selectDirectory(t3 == nil ? directory : nil, capture: source.map { Capture(source: $0, text: text) }) else { return }
+    func openWithContext(source: String?, text: String?, t3: String? = nil, t3Update: String? = nil) {
+        guard selectDirectory(t3 == nil ? directory : nil, capture: t3 == nil ? source.map { Capture(source: $0, text: text) } : nil) else { return }
         if let t3 {
-            t3Thread = t3
-            append("Attached to T3", from: "Conversation")
+            t3Thread = t3; t3LastUpdate = t3Update
+            if let text, !text.isEmpty { append(text, from: "Hey Boss") }
+            else { append("Attached to T3", from: "Conversation") }
             rememberTurn(); save()
         }
         window.orderOut(nil)
@@ -12225,7 +12227,7 @@ struct Daemon {
                                     overview.currentConversation().startFromPill()
                                     reply.send(["status": "ok"]); return
                                 }
-                                overview.currentConversation().openWithContext(source: request.title, text: request.description, t3: request.link_url)
+                                overview.currentConversation().openWithContext(source: request.title, text: request.description, t3: request.link_url, t3Update: request.t3_update)
                                 reply.send(["status": "ok"])
                             }
                             return
