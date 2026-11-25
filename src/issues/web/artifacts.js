@@ -572,8 +572,9 @@ const HeyBossArtifacts = (() => {
         const top=selectionRect.bottom+8+height<=innerHeight-12?selectionRect.bottom+8:Math.max(12,selectionRect.top-height-8);
         form.style.top=`${top-rect.top+reader.scrollTop}px`;
         form.style.left=`${Math.max(0,Math.min(selectionRect.left-rect.left,reader.clientWidth-width))}px`;
-        field.focus({preventScroll:true});
+        // Clearing the selection after focus also clears WebKit's input caret.
         getSelection().removeAllRanges();
+        field.focus({preventScroll:true});
       };
       selectText=select;$("#artifact-reading").onpointerup=select;$("#artifact-reading").onkeyup=select;
       $("#artifact-reading").onclick=e=>{

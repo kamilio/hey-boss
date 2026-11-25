@@ -46,7 +46,8 @@ async page => {
       check(await page.evaluate(before=>Math.abs(scrollY-before.scroll)<2&&document.querySelector('#artifact-reading').offsetWidth===before.width,before),`${width}: opening preserves scroll and document width (${position})`);
       const field=page.locator('#artifact-comment');
       check(await field.evaluate(e=>{const r=e.getBoundingClientRect();return r.top>=0&&r.bottom<=innerHeight&&document.documentElement.scrollWidth<=innerWidth}),`${width}: input remains inside viewport`);
-      await field.fill('First line');await field.press('Enter');await field.press('a');
+      await page.keyboard.type('First line');await page.keyboard.press('Enter');await page.keyboard.type('a');
+      check((await field.inputValue()).startsWith('First line'),'Typing immediately after opening reaches the comment input');
       check(await field.inputValue()==='First line\na','Enter adds a newline');
       const count=requests.length;
       await field.dispatchEvent('keydown',{key:'Enter',shiftKey:true,isComposing:true});
@@ -70,7 +71,7 @@ async page => {
     check(await page.locator('#artifact-comment').evaluate(e=>e===document.activeElement),'Comments button focuses composer');
     const reply=page.locator('.artifact-reply').first();await reply.locator('summary').click();
     await page.waitForFunction(()=>document.activeElement?.getAttribute('aria-label')==='Reply to comment');
-    await reply.locator('textarea').fill('Reply using the keyboard');await reply.locator('textarea').press('Shift+Enter');
+    await page.keyboard.type('Reply using the keyboard');await page.keyboard.press('Shift+Enter');
     await page.waitForFunction(()=>document.querySelector('#artifact-status').textContent==='Reply saved');
     check(requests.at(-1).operation.operation.parent===1,'Reply shortcut keeps the parent thread');
   }
