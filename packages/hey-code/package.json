@@ -1,0 +1,17 @@
+{
+  "name": "@hey-boss/hey-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": { "types": "./hey-code.d.ts", "default": "./hey-code.js" },
+    "./transcript": { "types": "./transcript.d.ts", "default": "./transcript.js" },
+    "./hey-code.css": "./hey-code.css"
+  },
+  "scripts": {
+    "test": "node --test transcript.test.js",
+    "test:browser": "node browser.test.js"
+  },
+  "dependencies": { "dompurify": "3.5.0", "marked": "18.3.0" },
+  "devDependencies": { "playwright": "1.58.2" }
+}

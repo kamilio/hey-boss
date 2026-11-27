@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>hey-code component fixture</title>
+<style>html,body{margin:0;height:100%;overflow:hidden}hey-code{height:100dvh}</style>
+<script type="importmap">{"imports":{"marked":"./node_modules/marked/lib/marked.esm.js","dompurify":"./node_modules/dompurify/dist/purify.es.mjs"}}</script>
+<hey-code></hey-code>
+<script type="module">
+import './hey-code.js';
+import { runtimeEvent } from './transcript.js';
+const view = document.querySelector('hey-code');
+window.calls = [];
+window.initial = () => ({
+  id: 'example-codex', title: 'Build a conversation window', provider: 'codex', model: 'gpt-6', status: 'running', canSteer: true,
+  goal: { objective: 'Build the chat window with replies, goals, and subagents.', status: 'active', tokensUsed: 18420 },
+  items: [
+    { id: 'u1', type: 'message', role: 'user', text: 'Build a reusable chat window for my agent orchestrator. Keep the conversation, goals, and subagents.' },
+    { id: 'a1', type: 'message', role: 'assistant', text: 'I’ll start with the conversation surface and connect the controls to the host orchestrator.' },
+    { id: 'r1', type: 'reasoning', text: 'Keep each reply bound to its conversation, including when the host switches between chats.' },
+    { id: 't1', type: 'tool', name: 'Read components', status: 'completed', input: { command: 'rg --files src/components' }, output: 'ChatView.tsx\nComposer.tsx\nGoal.tsx' },
+    { id: 'a2', type: 'message', role: 'assistant', text: 'The component is ready for integration.\n\n- **Replies** stay attached to their conversation.\n- **Goals** can be started, paused, and resumed.\n- **Subagents** keep their own transcript and composer.\n\n```js\nview.chat = snapshot;\nview.actions = orchestrator;\n```\n\nThe host owns session persistence and execution.' },
+  ],
+  subagents: [{ id: 'example-claude', title: 'Check transcript recovery', status: 'completed', chat: {
+    id: 'example-claude', title: 'Check transcript recovery', provider: 'claude', model: 'claude-sonnet', status: 'completed',
+    items: [{ id: 'c1', type: 'message', role: 'assistant', text: 'Saved transcripts and resumed conversations use the same chat window.' }],
+  } }],
+});
+view.actions = Object.fromEntries(['send', 'stop', 'goal', 'respond', 'loadOlder', 'openSubagent'].map(action => [action, async input => {
+  window.calls.push({ action, ...input });
+  if (window.fail) throw Error('Host is disconnected. Your message was not accepted.');
+  if (window.hold) await new Promise(resolve => window.release = resolve);
+  if (input.threadId !== view.chat.id) return;
+  if (action === 'goal') view.chat = { ...view.chat, goal: { objective: input.objective, status: input.status } };
+  if (action === 'respond') view.chat = { ...view.chat, requests: view.chat.requests.filter(r => r.id !== input.requestId) };
+  if (action === 'stop') view.chat = { ...view.chat, status: 'interrupted' };
+  if (action === 'loadOlder') view.chat = { ...view.chat, hasMore: false, items: [
+    { id: 'older', type: 'message', role: 'user', text: 'Earlier history\n'.repeat(100) }, ...view.chat.items,
+  ] };
+}]));
+view.chat = window.initial();
+window.view = view;
+window.emit = event => view.chat = runtimeEvent(view.chat, event);
+</script>
+</html>

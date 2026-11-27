@@ -2,6 +2,9 @@
 
 Licensed under [MIT](LICENSE).
 
+[hey-code](packages/hey-code/README.md) is an embeddable Codex/Claude conversation
+window with replies, goals, and subagent chats.
+
 [Hey Clipboard](packages/hey-clipboard/README.md) keeps clipboard history locally.
 Hold Command+Shift, tap V to cycle, and release to paste. It includes a JSON CLI
 and excludes temporary Hey Talk dictations from history.
